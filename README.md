@@ -1,123 +1,55 @@
-[![PyPI version](https://badge.fury.io/py/warp-lang.svg)](https://badge.fury.io/py/warp-lang)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/NVIDIA/warp?link=https%3A%2F%2Fgithub.com%2FNVIDIA%2Fwarp%2Fcommits%2Fmain)
-[![Downloads](https://static.pepy.tech/badge/warp-lang/month)](https://pepy.tech/project/warp-lang)
-[![codecov](https://codecov.io/github/NVIDIA/warp/graph/badge.svg?token=7O1KSM79FG)](https://codecov.io/github/NVIDIA/warp)
-![GitHub - CI](https://github.com/NVIDIA/warp/actions/workflows/ci.yml/badge.svg)
+# ROCm Warp
 
-# NVIDIA Warp
+ROCm Warp is a port of the [Warp](https://github.com/NVIDIA/warp) library and adds support for AMD instinct GPUs. This project is in active development. 
 
-Warp is a Python framework for writing high-performance simulation and graphics code. Warp takes
-regular Python functions and JIT compiles them to efficient kernel code that can run on the CPU or GPU.
+Warp is a Python framework for writing high-performance simulation and graphics code. Warp takes regular Python functions and JIT compiles them to efficient kernel code that can run on the CPU or GPU.
 
 Warp is designed for [spatial computing](https://en.wikipedia.org/wiki/Spatial_computing)
 and comes with a rich set of primitives that make it easy to write
 programs for physics simulation, perception, robotics, and geometry processing. In addition, Warp kernels
 are differentiable and can be used as part of machine-learning pipelines with frameworks such as PyTorch, JAX and Paddle.
 
-Please refer to the project [Documentation](https://nvidia.github.io/warp/) for API and language reference and
-[CHANGELOG.md](https://github.com/NVIDIA/warp/blob/main/CHANGELOG.md) for release history.
+## Requirements
+* Python 3.12
+* ROCm 7.0 or higher (for HIP builds)
+* [Git LFS](https://git-lfs.github.com/) installed
 
-<div align="center">
-    <img src="https://github.com/NVIDIA/warp/raw/main/docs/img/header.jpg">
-    <p><i>A selection of physical simulations computed with Warp</i></p>
-</div>
+## GPU and ROCm Support
 
-## Installing
+**Supported GPU:** gfx942 (CDNA3 architecture)
 
-Python version 3.9 or newer is required. Warp can run on x86-64 and ARMv8 CPUs on Windows, Linux, and macOS.
-GPU support requires a CUDA-capable NVIDIA GPU and driver (minimum GeForce GTX 9xx).
+**Supported ROCm version:** 6.4.1, 7.x
 
-The easiest way to install Warp is from [PyPI](https://pypi.org/project/warp-lang/):
+##  Installing
+Python version 3.9 or newer is required. ROCm Warp is currently supported on AMD Instinct GPUs with ROCm 7.x
 
-```text
-pip install warp-lang
+HIP/ROCm is auto-detected just like CUDA. Ensure ROCm 7.x is installed
+and `hipcc`, `hipconfig` are on your `PATH` or under `ROCM_PATH`. 
+If you're using TheRock (e.g., `rocm`/`rocm-sdk` wheels), locate the install root with
+`rocm-sdk path --bin` and set `ROCM_PATH` to its parent directory so the toolchain and headers resolve
+correctly. 
+
+Clone the repository
+```
+git clone https://github.com/ROCm/warp.git
 ```
 
-You can also use `pip install warp-lang[examples]` to install additional dependencies for running examples and USD-related features.
-
-The binaries hosted on PyPI are currently built with the CUDA 12 runtime.
-We also provide binaries built with the CUDA 13.0 runtime on the [GitHub Releases](https://github.com/NVIDIA/warp/releases) page.
-Copy the URL of the appropriate wheel file (`warp-lang-{ver}+cu13-py3-none-{platform}.whl`) and pass it to
-the `pip install` command, e.g.
-
-| Platform        | Install Command                                                                                                               |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Linux aarch64   | `pip install https://github.com/NVIDIA/warp/releases/download/v1.11.1/warp_lang-1.11.1+cu13-py3-none-manylinux_2_34_aarch64.whl` |
-| Linux x86-64    | `pip install https://github.com/NVIDIA/warp/releases/download/v1.11.1/warp_lang-1.11.1+cu13-py3-none-manylinux_2_28_x86_64.whl`  |
-| Windows x86-64  | `pip install https://github.com/NVIDIA/warp/releases/download/v1.11.1/warp_lang-1.11.1+cu13-py3-none-win_amd64.whl`             |
-
-The `--force-reinstall` option may need to be used to overwrite a previous installation.
-
-### Nightly Builds
-
-Nightly builds of Warp from the `main` branch are available on the [NVIDIA Package Index](https://pypi.nvidia.com/warp-lang/).
-
-To install the latest nightly build, use the following command:
-
-```text
-pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
+We can then build and install warp using
+```
+cd warp/
+python build_lib.py
+pip install -e .
 ```
 
-Note that the nightly builds are built with the CUDA 12 runtime and are not published for macOS.
+The build script will automatically detect and enable HIP if ROCm is found.
+You can also specify a custom ROCm path with `--rocm-path="..."`.
 
-If you plan to install nightly builds regularly, you can simplify future installations by adding NVIDIA's package
-repository as an extra index via the `PIP_EXTRA_INDEX_URL` environment variable. For example:
+#### Tips
+- To target a specific AMD GPU architecture, pass `--hip-arch="gfx942"`.
+- For a non-fat build, building for the default architecture (gfx942) pass `--quick`.
+- To build in debug mode, pass `--mode=debug`.
 
-```text
-export PIP_EXTRA_INDEX_URL="https://pypi.nvidia.com"
-```
 
-This ensures the index is automatically used for `pip` commands, avoiding the need to specify it explicitly.
-
-### CUDA Requirements
-
-* Warp packages built with CUDA Toolkit 12.x require NVIDIA driver 525 or newer.
-* Warp packages built with CUDA Toolkit 13.x require NVIDIA driver 580 or newer.
-
-This applies to pre-built packages distributed on PyPI and GitHub and also when building Warp from source.
-
-Note that building Warp with the `--quick` flag changes the driver requirements.  The quick build skips CUDA backward compatibility, so the minimum required driver is determined by the CUDA Toolkit version.  Refer to the [latest CUDA Toolkit release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html) to find the minimum required driver for different CUDA Toolkit versions (e.g., [this table from CUDA Toolkit 12.6](https://docs.nvidia.com/cuda/archive/12.6.0/cuda-toolkit-release-notes/index.html#id5)).
-
-Warp checks the installed driver during initialization and will report a warning if the driver is not suitable, e.g.:
-
-```text
-Warp UserWarning:
-   Insufficient CUDA driver version.
-   The minimum required CUDA driver version is 12.0, but the installed CUDA driver version is 11.8.
-   Visit https://github.com/NVIDIA/warp/blob/main/README.md#installing for guidance.
-```
-
-This will make CUDA devices unavailable, but the CPU can still be used.
-
-To remedy the situation there are a few options:
-
-* Update the driver.
-* Install a compatible pre-built Warp package.
-* Build Warp from source using a CUDA Toolkit that's compatible with the installed driver.
-
-## Tutorial Notebooks
-
-The [NVIDIA Accelerated Computing Hub](https://github.com/NVIDIA/accelerated-computing-hub) contains the current,
-actively maintained set of Warp tutorials:
-
-| Notebook | Colab Link |
-|----------|------------|
-| [Introduction to NVIDIA Warp](https://github.com/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12_Intro_to_NVIDIA_Warp.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12_Intro_to_NVIDIA_Warp.ipynb) |
-| [GPU-Accelerated Ising Model Simulation in NVIDIA Warp](https://github.com/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12.1_IsingModel_In_Warp.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12.1_IsingModel_In_Warp.ipynb) |
-
-Additionally, several notebooks in the [notebooks](https://github.com/NVIDIA/warp/tree/main/notebooks) directory
-provide additional examples and cover key Warp features:
-
-| Notebook | Colab Link |
-|----------|------------|
-| [Warp Core Tutorial: Basics](https://github.com/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb) |
-| [Warp Core Tutorial: Generics](https://github.com/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb) |
-| [Warp Core Tutorial: Points](https://github.com/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb) |
-| [Warp Core Tutorial: Meshes](https://github.com/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb) |
-| [Warp Core Tutorial: Volumes](https://github.com/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb) |
-| [Warp PyTorch Tutorial: Basics](https://github.com/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb) |
-| [Warp PyTorch Tutorial: Custom Operators](https://github.com/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb) |
 
 ## Running Examples
 
@@ -282,98 +214,14 @@ python -m warp.tests
     </tbody>
 </table>
 
-## Building
-
-For developers who want to build the library themselves, the following tools are required:
-
-* Microsoft Visual Studio 2019 upwards (Windows)
-* GCC 9.4 upwards (Linux)
-* CUDA Toolkit 12.0 or higher (For CUDA builds)
-* ROCm 7.0 or higher (for HIP builds)
-* [Git LFS](https://git-lfs.github.com/) installed
-
-After cloning the repository, users should run:
-
-```text
-python build_lib.py
-```
-
-Upon success, the script will output platform-specific binary files in `warp/bin/`.
-The build script will look for the CUDA Toolkit in its default installation path.
-This path can be overridden by setting the `CUDA_PATH` environment variable. Alternatively,
-the path to the CUDA Toolkit can be passed to the build command as
-`--cuda-path="..."`. After building, the Warp package should be installed using:
-
-```text
-pip install -e .
-```
-
-This ensures that subsequent modifications to the library will be reflected in the Python package.
-
-### HIP/ROCm builds (AMD GPUs)
-
-HIP/ROCm is auto-detected just like CUDA. Ensure ROCm 7.x is installed
-and `hipcc`, `hipconfig` are on your `PATH` or under `ROCM_PATH`. 
-If you're using TheRock (e.g., `rocm`/`rocm-sdk` wheels), locate the install root with
-`rocm-sdk path --bin` and set `ROCM_PATH` to its parent directory so the toolchain and headers resolve
-correctly. Then build with the same command:
-
-```text
-python build_lib.py
-```
-
-The build script will automatically detect and enable HIP if ROCm is found.
-You can also specify a custom ROCm path with `--rocm-path="..."`.
-
-#### Tips
-- To target a specific AMD GPU architecture, pass `--hip-arch="gfx942"`.
-- For a non-fat build, building for the default architecture (gfx942) pass `--quick`.
-- To build in debug mode, pass `--mode=debug`.
-
-## Learn More
-
-Please see the following resources for additional background on Warp:
-
-* [Product Page](https://developer.nvidia.com/warp-python)
-* [SIGGRAPH 2024 Course Slides](https://dl.acm.org/doi/10.1145/3664475.3664543)
-* [GTC 2024 Presentation](https://www.nvidia.com/en-us/on-demand/session/gtc24-s63345/)
-* [GTC 2022 Presentation](https://www.nvidia.com/en-us/on-demand/session/gtcspring22-s41599)
-* [GTC 2021 Presentation](https://www.nvidia.com/en-us/on-demand/session/gtcspring21-s31838)
-* [SIGGRAPH Asia 2021 Differentiable Simulation Course](https://dl.acm.org/doi/abs/10.1145/3476117.3483433)
-
-The underlying technology in Warp has been used in a number of research projects at NVIDIA including the following publications:
-
-* Accelerated Policy Learning with Parallel Differentiable Simulation - Xu, J., Makoviychuk, V., Narang, Y., Ramos, F., Matusik, W., Garg, A., & Macklin, M. [(2022)](https://short-horizon-actor-critic.github.io)
-* DiSECt: Differentiable Simulator for Robotic Cutting - Heiden, E., Macklin, M., Narang, Y., Fox, D., Garg, A., & Ramos, F [(2021)](https://github.com/NVlabs/DiSECt)
-* gradSim: Differentiable Simulation for System Identification and Visuomotor Control - Murthy, J. Krishna, Miles Macklin, Florian Golemo, Vikram Voleti, Linda Petrini, Martin Weiss, Breandan Considine et al. [(2021)](https://gradsim.github.io)
-
-## Frequently Asked Questions
-
-See the [FAQ](https://nvidia.github.io/warp/faq.html) in the Warp documentation.
-
 ## Support
 
-Problems, questions, and feature requests can be opened on [GitHub Issues](https://github.com/NVIDIA/warp/issues).
-
-For inquiries not suited for GitHub Issues, please email <warp-python@nvidia.com>.
-
-## Versioning
-
-Versions take the format X.Y.Z, similar to [Python itself](https://devguide.python.org/developer-workflow/development-cycle/#devcycle):
-
-* Increments in X are reserved for major reworks of the project causing disruptive incompatibility (or reaching the 1.0 milestone).
-* Increments in Y are for regular releases with a new set of features.
-* Increments in Z are for bug fixes. In principle, there are no new features. Can be omitted if 0 or not relevant.
-
-This is similar to [Semantic Versioning](https://semver.org/) but is less strict regarding backward compatibility.
-Like with Python, some breaking changes can be present between minor versions if well-documented and gradually introduced.
-
-Note that prior to 0.11.0, this schema was not strictly adhered to.
+Problems, questions, and feature requests can be opened on [GitHub Issues](https://github.com/ROCm/warp/issues).
 
 ## License
 
 Warp is provided under the Apache License, Version 2.0.
-Please see [LICENSE.md](https://github.com/NVIDIA/warp/blob/main/LICENSE.md) for full license text.
+Please see [LICENSE.md](https://github.com/ROCm/warp/blob/main/LICENSE.md) for full license text.
 
 This project will download and install additional third-party open source software projects.
 Review the license terms of these open source projects before use.
@@ -381,18 +229,17 @@ Review the license terms of these open source projects before use.
 ## Contributing
 
 Contributions and pull requests from the community are welcome.
-Please see the [Contribution Guide](https://nvidia.github.io/warp/user_guide/contribution_guide.html) for more
-information on contributing to the development of Warp.
+Please setup `pre-commit` hooks using
 
-## Publications & Citation
+```
+pip install pre-commit
+```
+And then in the source directory of the project
+```
+pre-commit install
+```
 
-### Research Using Warp
-
-Our [PUBLICATIONS.md](https://github.com/NVIDIA/warp/blob/main/PUBLICATIONS.md) file lists academic and research
-publications that leverage the capabilities of Warp.
-We encourage you to add your own published work using Warp to this list.
-
-### Citing Warp
+## Citation
 
 To cite Warp itself in your own publications, please use the following BibTeX entry:
 
