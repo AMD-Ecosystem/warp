@@ -1,6 +1,6 @@
 # ROCm Warp
 
-ROCm Warp is a port of the [Warp](https://github.com/NVIDIA/warp) library and adds support for AMD instinct GPUs. This project is in active development. 
+ROCm Warp is a port of the [Warp](https://github.com/ROCm/warp) library and adds support for AMD instinct GPUs. This project is in active development. 
 
 Warp is a Python framework for writing high-performance simulation and graphics code. Warp takes regular Python functions and JIT compiles them to efficient kernel code that can run on the CPU or GPU.
 
@@ -53,7 +53,7 @@ You can also specify a custom ROCm path with `--rocm-path="..."`.
 
 ## Running Examples
 
-The [warp/examples](https://github.com/NVIDIA/warp/tree/main/warp/examples) directory contains a number of scripts categorized under subdirectories
+The [warp/examples](https://github.com/ROCm/warp/tree/amd-integration/warp/examples) directory contains a number of scripts categorized under subdirectories
 that show how to implement various simulation methods using the Warp API.
 Most examples will generate USD files containing time-sampled animations in the current working directory.
 Before running examples, users should ensure that the ``usd-core``, ``matplotlib``, and ``pyglet`` packages are installed using:
@@ -82,23 +82,16 @@ python -m warp.examples.browse
 
 Most examples can be run on either the CPU or a CUDA-capable device, but a handful require a CUDA-capable device. These are marked at the top of the example script.
 
-USD files can be viewed or rendered inside [NVIDIA Omniverse](https://developer.nvidia.com/omniverse), Pixar's UsdView, and Blender. Note that Preview in macOS is not recommended as it has limited support for time-sampled animations.
-
-Built-in unit tests can be run from the command-line as follows:
-
-```text
-python -m warp.tests
-```
 
 ### warp/examples/core
 
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_dem.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fluid.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_graph_capture.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_graph_capture.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_marching_cubes.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_dem.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_fluid.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_fluid.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_graph_capture.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_graph_capture.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_marching_cubes.png"></a></td>
         </tr>
         <tr>
             <td align="center">dem</td>
@@ -107,10 +100,10 @@ python -m warp.tests
             <td align="center">marching cubes</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_mesh.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_nvdb.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_nvdb.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raycast.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_raymarch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raymarch.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_mesh.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_nvdb.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_nvdb.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_raycast.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_raymarch.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_raymarch.png"></a></td>
         </tr>
         <tr>
             <td align="center">mesh</td>
@@ -119,10 +112,10 @@ python -m warp.tests
             <td align="center">raymarch</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_sample_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sample_mesh.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_sph.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sph.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_torch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_torch.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_wave.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_sample_mesh.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_sample_mesh.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_sph.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_sph.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_torch.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_torch.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_wave.png"></a></td>
         </tr>
         <tr>
             <td align="center">sample mesh</td>
@@ -138,10 +131,10 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_diffusion_3d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_diffusion_3d.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_mixed_elasticity.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_mixed_elasticity.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_apic_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_apic_fluid.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_streamlines.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_streamlines.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_diffusion_3d.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_diffusion_3d.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_mixed_elasticity.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_mixed_elasticity.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_apic_fluid.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_apic_fluid.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_streamlines.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_streamlines.png"></a></td>
         </tr>
         <tr>
             <td align="center">diffusion 3d</td>
@@ -150,10 +143,10 @@ python -m warp.tests
             <td align="center">streamlines</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_distortion_energy.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_distortion_energy.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_navier_stokes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_navier_stokes.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_burgers.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_burgers.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_magnetostatics.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_magnetostatics.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_distortion_energy.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_distortion_energy.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_navier_stokes.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_navier_stokes.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_burgers.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_burgers.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_magnetostatics.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_magnetostatics.png"></a></td>
         </tr>
         <tr>
             <td align="center">distortion energy</td>
@@ -162,10 +155,10 @@ python -m warp.tests
             <td align="center">magnetostatics</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_adaptive_grid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_adaptive_grid.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_nonconforming_contact.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_nonconforming_contact.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_darcy_ls_optimization.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_darcy_ls_optimization.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_elastic_shape_optimization.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_elastic_shape_optimization.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_adaptive_grid.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_adaptive_grid.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_nonconforming_contact.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_nonconforming_contact.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_darcy_ls_optimization.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_darcy_ls_optimization.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_elastic_shape_optimization.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_elastic_shape_optimization.png"></a></td>
         </tr>
         <tr>
             <td align="center">adaptive grid</td>
@@ -181,9 +174,9 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_diffray.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_diffray.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_fluid_checkpoint.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_fluid_checkpoint.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_particle_repulsion.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_particle_repulsion.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_diffray.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_diffray.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_fluid_checkpoint.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_fluid_checkpoint.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_particle_repulsion.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_particle_repulsion.png"></a></td>
             <td></td>
         </tr>
         <tr>
@@ -200,9 +193,9 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_mlp.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_mlp.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_nbody.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_nbody.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_mcgp.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_mcgp.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_mlp.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_mlp.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_nbody.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_nbody.png"></a></td>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_mcgp.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_mcgp.png"></a></td>
             <td></td>
         </tr>
         <tr>
@@ -221,7 +214,7 @@ Problems, questions, and feature requests can be opened on [GitHub Issues](https
 ## License
 
 Warp is provided under the Apache License, Version 2.0.
-Please see [LICENSE.md](https://github.com/ROCm/warp/blob/main/LICENSE.md) for full license text.
+Please see [LICENSE.md](https://github.com/ROCm/warp/blob/amd-integration/LICENSE.md) for full license text.
 
 This project will download and install additional third-party open source software projects.
 Review the license terms of these open source projects before use.
