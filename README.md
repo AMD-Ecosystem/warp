@@ -79,37 +79,31 @@ Since the current build is targetting AMD Instinct GPUs the examples with opengl
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_dem.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_marching_cubes.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_mesh.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_raycast.png"></a></td>
         </tr>
         <tr>
             <td align="center">dem</td>
             <td align="center">marching cubes</td>
             <td align="center">mesh</td>
-            <td align="center">raycast</td>
         </tr>
         <tr>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_raycast.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_raymarch.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_raymarch.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_sample_mesh.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_sample_mesh.png"></a></td>
+        </tr>
+        <tr>
+            <td align="center">raycast</td>
+            <td align="center">raymarch</td>
+            <td align="center">sample mesh</td>
+        </tr>
+        <tr>
+            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_wave.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_sph.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_sph.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_torch.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_torch.png"></a></td>
         </tr>
         <tr>
-            <td align="center">raymarch</td>
-            <td align="center">sample mesh</td>
+            <td align="center">wave</td>
             <td align="center">sph</td>
             <td align="center">torch</td>
-        </tr>
-        <tr>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_wave.png"></a></td>
-            <td></td>
-            <td></td>
-            <td></td>
-        </tr>
-        <tr>
-            <td align="center">wave</td>
-            <td></td>
-            <td></td>
-            <td></td>
         </tr>
     </tbody>
 </table>
