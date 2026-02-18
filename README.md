@@ -120,11 +120,9 @@ Since the current build is targetting AMD Instinct GPUs the examples with opengl
     <tbody>
         <tr>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_diffray.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_diffray.png"></a></td>
-            <td></td>
         </tr>
         <tr>
             <td align="center">diffray</td>
-            <td align="center"></td>
         </tr>
     </tbody>
 </table>
@@ -135,15 +133,9 @@ Since the current build is targetting AMD Instinct GPUs the examples with opengl
     <tbody>
         <tr>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_mlp.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_mlp.png"></a></td>
-            <td align="center"></td>
-            <td align="center"></td>
-            <td align="center"></td>
         </tr>
         <tr>
             <td align="center">mlp</td>
-            <td align="center"></td>
-            <td align="center"></td>
-            <td align="center"></td>
         </tr>
     </tbody>
 </table>
