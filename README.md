@@ -1,6 +1,6 @@
 # ROCm Warp
 
-ROCm Warp is a port of the [Warp](https://github.com/ROCm/warp) library and adds support for AMD instinct GPUs. This project is in active development. 
+ROCm Warp is a port of the [Warp](https://github.com/Nvidia/warp) library and adds support for AMD instinct GPUs. This project is in active development. 
 
 Warp is a Python framework for writing high-performance simulation and graphics code. Warp takes regular Python functions and JIT compiles them to efficient kernel code that can run on the CPU or GPU.
 
@@ -16,10 +16,12 @@ are differentiable and can be used as part of machine-learning pipelines with fr
 
 ## GPU and ROCm Support
 
-**Supported GPU:** gfx942 (CDNA3 architecture)
+**Supported GPU:** gfx942 MI325x
 
-**Supported ROCm version:** 6.4.1, 7.x
+**Supported ROCm version:** 7.1.1, 7.2.1
 
+**Supported Rock Build version:** rocm-7.9.0rc20250930
+ 
 ##  Installing
 Python version 3.9 or newer is required. ROCm Warp is currently supported on AMD Instinct GPUs with ROCm 7.x
 
