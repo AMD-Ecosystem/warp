@@ -10,7 +10,7 @@ programs for physics simulation, perception, robotics, and geometry processing. 
 are differentiable and can be used as part of machine-learning pipelines with frameworks such as PyTorch, JAX and Paddle.
 
 ## Requirements
-* Python 3.12
+* Python 3.9+
 * ROCm 7.0 or higher (for HIP builds)
 * [Git LFS](https://git-lfs.github.com/) installed
 
@@ -56,13 +56,7 @@ You can also specify a custom ROCm path with `--rocm-path="..."`.
 The [warp/examples](https://github.com/ROCm/warp/tree/amd-integration/warp/examples) directory contains a number of scripts categorized under subdirectories
 that show how to implement various simulation methods using the Warp API.
 Most examples will generate USD files containing time-sampled animations in the current working directory.
-Before running examples, users should ensure that the ``usd-core``, ``matplotlib``, and ``pyglet`` packages are installed using:
-
-```text
-pip install warp-lang[extras]
-```
-
-These dependencies can also be manually installed using:
+Before running examples, users should ensure that the ``usd-core``, ``matplotlib`` are installed using:
 
 ```text
 pip install usd-core matplotlib pyglet
@@ -74,13 +68,7 @@ Examples can be run from the command-line as follows:
 python -m warp.examples.<example_subdir>.<example>
 ```
 
-To browse the example source code, you can open the directory where the files are located like this:
-
-```text
-python -m warp.examples.browse
-```
-
-Most examples can be run on either the CPU or a CUDA-capable device, but a handful require a CUDA-capable device. These are marked at the top of the example script.
+Since the current build is targetting AMD Instinct GPUs the examples with opengl may not work. 
 
 
 ### warp/examples/core
@@ -88,16 +76,16 @@ Most examples can be run on either the CPU or a CUDA-capable device, but a handf
 <table>
     <tbody>
         <tr>
+            <td></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_dem.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_fluid.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_fluid.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_graph_capture.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_graph_capture.png"></a></td>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_marching_cubes.png"></a></td>
+            <td></td>
         </tr>
         <tr>
+            <td></td>
             <td align="center">dem</td>
-            <td align="center">fluid</td>
-            <td align="center">graph capture</td>
             <td align="center">marching cubes</td>
+            <td></td>
         </tr>
         <tr>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/core_mesh.png"></a></td>
@@ -126,63 +114,16 @@ Most examples can be run on either the CPU or a CUDA-capable device, but a handf
     </tbody>
 </table>
 
-### warp/examples/fem
-
-<table>
-    <tbody>
-        <tr>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_diffusion_3d.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_diffusion_3d.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_mixed_elasticity.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_mixed_elasticity.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_apic_fluid.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_apic_fluid.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_streamlines.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_streamlines.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">diffusion 3d</td>
-            <td align="center">mixed elasticity</td>
-            <td align="center">apic fluid</td>
-            <td align="center">streamlines</td>
-        </tr>
-        <tr>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_distortion_energy.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_distortion_energy.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_navier_stokes.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_navier_stokes.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_burgers.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_burgers.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_magnetostatics.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_magnetostatics.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">distortion energy</td>
-            <td align="center">navier stokes</td>
-            <td align="center">burgers</td>
-            <td align="center">magnetostatics</td>
-        </tr>
-        <tr>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_adaptive_grid.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_adaptive_grid.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_nonconforming_contact.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_nonconforming_contact.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_darcy_ls_optimization.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_darcy_ls_optimization.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/fem/example_elastic_shape_optimization.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/fem_elastic_shape_optimization.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">adaptive grid</td>
-            <td align="center">nonconforming contact</td>
-            <td align="center">darcy level-set optimization</td>
-            <td align="center">elastic shape optimization</td>
-        </tr>
-    </tbody>
-</table>
-
 ### warp/examples/optim
 
 <table>
     <tbody>
         <tr>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_diffray.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_diffray.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_fluid_checkpoint.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_fluid_checkpoint.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/optim/example_particle_repulsion.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/optim_particle_repulsion.png"></a></td>
             <td></td>
         </tr>
         <tr>
             <td align="center">diffray</td>
-            <td align="center">fluid checkpoint</td>
-            <td align="center">particle repulsion</td>
             <td align="center"></td>
         </tr>
     </tbody>
@@ -194,14 +135,14 @@ Most examples can be run on either the CPU or a CUDA-capable device, but a handf
     <tbody>
         <tr>
             <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_mlp.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_mlp.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_nbody.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_nbody.png"></a></td>
-            <td><a href="https://github.com/ROCm/warp/tree/amd-integration/warp/examples/tile/example_tile_mcgp.py"><img src="https://media.githubusercontent.com/media/ROCm/warp/refs/heads/amd-integration/docs/img/examples/tile_mcgp.png"></a></td>
-            <td></td>
+            <td align="center"></td>
+            <td align="center"></td>
+            <td align="center"></td>
         </tr>
         <tr>
             <td align="center">mlp</td>
-            <td align="center">nbody</td>
-            <td align="center">mcgp</td>
+            <td align="center"></td>
+            <td align="center"></td>
             <td align="center"></td>
         </tr>
     </tbody>
