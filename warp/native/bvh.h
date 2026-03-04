@@ -1,19 +1,6 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES
+// SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+// SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
@@ -216,9 +203,14 @@ CUDA_CALLABLE inline void make_node(volatile BVHPackedNodeHalf* n, const vec3& b
 CUDA_CALLABLE inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index)
 {
 #if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(USE_LOAD4)
+    // On NVIDIA __ldg routes through the read-only / texture cache.
+    // On AMD (HIP) __ldg is a no-op (maps to a plain load) since CDNA/RDNA
+    // have no separate read-only cache.  The float4 cast is still valuable:
+    // it guarantees a single 128-bit global-memory transaction per node,
+    // which matches the L2 cache-line granularity on MI250X / MI300X and
+    // avoids partial-line fetches.
     float4 f4 = __ldg((const float4*)(nodes) + index);
     return (const wp::BVHPackedNodeHalf&)f4;
-    // return  (const wp::BVHPackedNodeHalf&)(*((const float4*)(nodes)+index));
 #else
     return nodes[index];
 #endif
@@ -452,7 +444,6 @@ adj_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir, int root, uin
 }
 
 CUDA_CALLABLE inline void adj_bvh_get_group_root(uint64_t id, int group_id, uint64_t&, int&, int&) { }
-
 
 CUDA_CALLABLE inline bool bvh_query_next(bvh_query_t& query, int& index, const float& max_dist)
 {
