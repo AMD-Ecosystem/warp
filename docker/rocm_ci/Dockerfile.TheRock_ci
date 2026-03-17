@@ -57,7 +57,7 @@ RUN apt update \
 
 # Note: the index page is at https://therock-nightly-tarball.s3.amazonaws.com/index.html
 # This will directly download the TheROCK nightly ROCm SDK tarball
-ENV THEROCK_TARBALL=https://rocm.nightlies.amd.com/tarball/therock-dist-linux-${GFX_FAMILY}-${THE_ROCK_VERSION}.tar.gz
+ENV THEROCK_TARBALL=https://rocm.nightlies.amd.com/tarball/therock-dist-linux-gfx94X-dcgpu-7.9.0rc20250930.tar.gz
 
 RUN mkdir -p /opt/rocm \
     && cd /opt/rocm \
