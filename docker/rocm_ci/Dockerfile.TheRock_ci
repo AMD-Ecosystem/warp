@@ -1,0 +1,131 @@
+# =============================================================================
+# BUILD CONTEXT REQUIREMENT
+#
+# The named context "warp_src" must be the root of the warp source
+# repository. Providing it explicitly avoids any ambiguity about what the build
+# context should contain.
+#
+#   docker buildx (local):
+#     docker buildx build --build-context warp_src=/path/to/warp \
+#         -f docker/Dockerfile.rocm_ci --target warp_base .
+#
+#   buildctl (CI entrypoint.sh):
+#     buildctl build --local warp_src="${SRC_FOLDER}/warp" \
+#         --local dockerfile="${SRC_FOLDER}/warp/docker" ...
+# =============================================================================
+
+ARG BASE_IMAGE=ubuntu:24.04
+# -----------------------------------------------------------------------------
+# Stage 1 (warp_build): compile the wheel and install it.
+#   Source tree is present; dist/*.whl is accessible for the whl_export stage.
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS warp_build
+
+WORKDIR /root/
+ENV MAX_JOBS=128
+ENV PYTORCH_ROCM_ARCH="gfx942"
+ENV ROCM_AMDGPU_TARGETS="gfx942"
+
+
+ARG THE_ROCK_VERSION=7.9.0rc20250930
+ARG GFX_FAMILY="gfx94X-dcgpu"
+ARG PY_VERSION=3.12
+ARG TORCH_VERSION=2.9.1
+ARG MAMBA_ENV_NAME=base
+
+# Install Ubuntu dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update \
+    && apt install -y \
+    git \
+    git-lfs \
+    libtool \
+    libegl1-mesa-dev \
+    g++-14 \
+    wget \
+    sudo \
+    curl \
+    libstdc++-14-dev \
+    libdw1 \
+    libdrm-dev \
+    ccache \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+
+
+# Note: the index page is at https://therock-nightly-tarball.s3.amazonaws.com/index.html
+# This will directly download the TheROCK nightly ROCm SDK tarball
+ENV THEROCK_TARBALL=https://rocm.nightlies.amd.com/tarball/therock-dist-linux-gfx94X-dcgpu-7.9.0rc20250930.tar.gz
+
+RUN mkdir -p /opt/rocm \
+    && cd /opt/rocm \
+    && wget ${THEROCK_TARBALL} \
+    && tar -xvf *.tar.gz -C /opt/rocm \
+    && rm *.tar.gz \
+    # && rm /opt/rocm/bin/flatc \
+    && rm -rf /opt/rocm/include/flatbuffers \
+    && rm -rf /opt/rocm/lib/libflatbuffers*
+
+# warp_src is a named build context — see file header for invocation details.
+COPY --from=warp_src . /root/warp/
+RUN test -f /root/warp/pyproject.toml && \
+    grep -q 'name.*=.*"warp-lang"' /root/warp/pyproject.toml || { \
+        echo "ERROR: named context 'warp_src' must be the warp source root." >&2; \
+        echo "       Expected pyproject.toml with name = 'warp-lang' at root." >&2; \
+        exit 1; \
+    }
+RUN git config --global --add safe.directory /root/warp
+
+# Setup ROCm stack related envs
+# Note: /opt/rocm/lib is intentionally NOT in PATH (it is a library dir, not a bin dir).
+ENV PATH="/opt/rocm/bin:$PATH"
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+ENV ROCM_PATH=/opt/rocm
+ENV HIP_PLATFORM=amd
+ENV HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode
+# Workaround for the HAS_STATUS_ERROR_OUT_OF_RESOURCES issue (runtime)
+ENV HAS_ENABLE_SCRATCH_ASYNC_RECLAIM=0
+ENV HAS_NO_SCRATCH_RECLAIM=1
+
+RUN curl -L micro.mamba.pm/install.sh | bash && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} ~/.local/bin/micromamba install python=${PY_VERSION} -c conda-forge --override-channels -y && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install cmake pybind11 build ninja scikit-build-core setuptools-scm numpy pytest pytest-xdist Pillow && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://rocm.nightlies.amd.com/v2-staging/${GFX_FAMILY}/ --pre torch && \
+    /bin/bash -c "eval \"\$(~/.local/bin/micromamba shell hook --shell bash)\" && \
+    micromamba activate ${MAMBA_ENV_NAME} && \
+    cd /root/warp/ && \
+    python build_lib.py --jobs \$(nproc) && \
+    python -m build --wheel -C--build-option=-Plinux-x86_64 && \
+    pip install dist/warp_lang-*.whl"
+
+#-----------------------------------------------------------------------------
+# Stage 2 (warp_base): clean release image shipped to users.
+#   Source tree and build artifacts are removed; only the installed package
+#   and its runtime dependencies remain.
+# -----------------------------------------------------------------------------
+FROM warp_build AS warp_base
+
+# ARG must be redeclared in each stage that uses it (Docker multi-stage scoping).
+ARG MAMBA_ENV_NAME=base
+
+RUN rm -rf /root/warp/
+
+# Activate the micromamba base env for all shell types:
+#   - ENV PATH: covers non-interactive shells (docker exec, entrypoints, scripts)
+#   - shell init + bashrc append: covers interactive bash sessions
+ENV MAMBA_ROOT_PREFIX=/root/micromamba
+ENV CONDA_PREFIX=/root/micromamba
+ENV CONDA_DEFAULT_ENV=${MAMBA_ENV_NAME}
+ENV PATH=/root/micromamba/bin:${PATH}
+
+RUN /root/.local/bin/micromamba shell init --shell bash --root-prefix /root/micromamba && \
+echo "micromamba activate base" >> /root/.bashrc
+
+# -----------------------------------------------------------------------------
+# Stage 3 (whl_export): minimal scratch image used only to extract the wheel.
+#   Built by CI with --output type=local — never shipped to users.
+# -----------------------------------------------------------------------------
+FROM scratch AS whl_export
+COPY --from=warp_build /root/warp/dist/*.whl /
