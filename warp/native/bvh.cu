@@ -200,6 +200,7 @@ public:
         bounds3* total_bounds,
         int* item_groups
     );
+}
 #endif
 
 __global__ void compute_morton_codes(
@@ -256,12 +257,23 @@ static __device__ __forceinline__ int delta_prefix(const uint64_t* __restrict__ 
 {
     if (j < 0 || j >= n)
         return -1;
-    const uint64_t a = keys[i];
-    const uint64_t b = keys[j];
-    const uint64_t diff = a ^ b;
+    const uint64_t diff = keys[i] ^ keys[j];
     if (diff == 0ull) {
-        // Tie-break identical keys with index distance (matches common LBVH practice)
-        // Larger is better: use 64 + leading zeros of index xor
+        const unsigned int idiff = (unsigned int)(i ^ j);
+        return 64 + __clz(idiff);
+    }
+    return __clzll(diff);
+}
+
+// Variant that accepts a pre-loaded key to avoid redundant global loads
+// when the same index is queried repeatedly (common in Karras construction).
+static __device__ __forceinline__ int delta_prefix_cached(
+    const uint64_t* __restrict__ keys, int n, uint64_t key_i, int i, int j)
+{
+    if (j < 0 || j >= n)
+        return -1;
+    const uint64_t diff = key_i ^ keys[j];
+    if (diff == 0ull) {
         const unsigned int idiff = (unsigned int)(i ^ j);
         return 64 + __clz(idiff);
     }
@@ -285,22 +297,24 @@ __global__ void build_karras_topology(
 
     const int internal_offset = n;
 
+    const uint64_t key_i = keys[i];
+
     // Determine direction of the range (+1 or -1)
-    const int delta_next = delta_prefix(keys, n, i, i + 1);
-    const int delta_prev = delta_prefix(keys, n, i, i - 1);
+    const int delta_next = delta_prefix_cached(keys, n, key_i, i, i + 1);
+    const int delta_prev = delta_prefix_cached(keys, n, key_i, i, i - 1);
     const int d = (delta_next - delta_prev) >= 0 ? 1 : -1;
 
     // Compute upper bound for the length of the range
-    const int delta_min = delta_prefix(keys, n, i, i - d);
+    const int delta_min = delta_prefix_cached(keys, n, key_i, i, i - d);
 
     int l_max = 2;
-    while (delta_prefix(keys, n, i, i + l_max * d) > delta_min)
+    while (delta_prefix_cached(keys, n, key_i, i, i + l_max * d) > delta_min)
         l_max *= 2;
 
     // Find the other end using binary search
     int l = 0;
     for (int t = l_max / 2; t >= 1; t /= 2) {
-        if (delta_prefix(keys, n, i, i + (l + t) * d) > delta_min)
+        if (delta_prefix_cached(keys, n, key_i, i, i + (l + t) * d) > delta_min)
             l += t;
     }
     const int j = i + l * d;
@@ -308,8 +322,9 @@ __global__ void build_karras_topology(
     const int first = min(i, j);
     const int last = max(i, j);
 
-    // Find split position (canonical Karras)
-    const int delta_node = delta_prefix(keys, n, first, last);
+    // Find split position (canonical Karras) — cache keys[first] for binary search
+    const uint64_t key_first = keys[first];
+    const int delta_node = delta_prefix_cached(keys, n, key_first, first, last);
 
     int split = first;
     int step = last - first;
@@ -317,7 +332,7 @@ __global__ void build_karras_topology(
         step = (step + 1) >> 1;
         const int new_split = split + step;
         if (new_split < last) {
-            const int delta_split = delta_prefix(keys, n, first, new_split);
+            const int delta_split = delta_prefix_cached(keys, n, key_first, first, new_split);
             if (delta_split > delta_node)
                 split = new_split;
         }
@@ -389,27 +404,24 @@ __global__ void compute_node_depths_and_max(
 }
 
 __global__ void refit_nodes_at_depth(
-    int n_nodes,
+    int n_internal,
+    int internal_offset,
     int target_depth,
     const int* __restrict__ depths,
     BVHPackedNodeHalf* __restrict__ node_lowers,
-    BVHPackedNodeHalf* __restrict__ node_uppers
-)
+    BVHPackedNodeHalf* __restrict__ node_uppers)
 {
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    if (idx >= n_nodes)
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if (tid >= n_internal)
         return;
+
+    int idx = internal_offset + tid;
 
     if (depths[idx] != target_depth)
         return;
 
-    // Skip leaves (their bounds already valid)
-    BVHPackedNodeHalf lower = bvh_load_node(node_lowers, idx);
-    if (lower.b)
-        return;
-
-    const int left = lower.i;
-    const int right = bvh_load_node(node_uppers, idx).i;
+    const int left = node_lowers[idx].i;
+    const int right = node_uppers[idx].i;
 
     BVHPackedNodeHalf ll = bvh_load_node(node_lowers, left);
     BVHPackedNodeHalf lu = bvh_load_node(node_uppers, left);
@@ -605,28 +617,27 @@ __global__ void mark_packed_leaf_nodes(
     const uint64_t* __restrict__ keys,
     BVHPackedNodeHalf* __restrict__ lowers,
     BVHPackedNodeHalf* __restrict__ uppers,
-    const int leaf_size
+    const int leaf_size,
+    const int* __restrict__ precomputed_depths
 )
 {
     int node_index = blockDim.x * blockIdx.x + threadIdx.x;
     if (node_index < n) {
-        // mark the node as leaf if its range is less than leaf_size or it is deeper than BVH_QUERY_STACK_SIZE
-        // this will forever mute its child nodes so that they will never be accessed
-
-        // calculate depth
-        int depth = 1;
-        int parent = parents[node_index];
-        while (parent != -1) {
-            parent = parents[parent];
-            depth++;
+        int depth;
+        if (precomputed_depths) {
+            depth = precomputed_depths[node_index];
+        } else {
+            depth = 1;
+            int parent = parents[node_index];
+            while (parent != -1) {
+                parent = parents[parent];
+                depth++;
+            }
         }
 
         int left = range_lefts[node_index];
-        // the LBVH constructor's range is defined as left <= i <= right
-        // we need to convert it to our convention: left <= i < right
         int right = range_rights[node_index] + 1;
 
-        // avoid creating packed leaves that straddle group boundaries
         bool single_group = true;
         const uint64_t group_left = keys[left] >> 32;
         const uint64_t group_right = keys[right - 1] >> 32;
@@ -677,14 +688,16 @@ __global__ void compute_block_bounds(
 // Block size for the final reduction kernel
 #define REDUCE_BLOCK_DIM 256
 
+// Fused final reduction: block bounds -> total bounds + inverse edge lengths.
+// Eliminates the separate compute_total_inv_edges kernel launch.
 __global__ void reduce_block_bounds(
-    const vec3* block_lowers, const vec3* block_uppers, int num_blocks, vec3* total_lower, vec3* total_upper
+    const vec3* block_lowers, const vec3* block_uppers, int num_blocks,
+    vec3* total_lower, vec3* total_upper, vec3* total_inv_edges
 )
 {
     typedef cub::BlockReduce<vec3, REDUCE_BLOCK_DIM> BlockReduce;
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
-    // Each thread processes multiple elements with striding
     vec3 lo = vec3(FLT_MAX);
     vec3 hi = vec3(-FLT_MAX);
 
@@ -693,8 +706,6 @@ __global__ void reduce_block_bounds(
         hi = max(hi, block_uppers[i]);
     }
 
-    // Now reduce across all threads in the block
-    // All threads have valid data (strided access, initial value is identity for min/max)
     vec3 block_upper = BlockReduce(temp_storage).Reduce(hi, Vec3Max);
     __syncthreads();
     vec3 block_lower = BlockReduce(temp_storage).Reduce(lo, Vec3Min);
@@ -702,6 +713,10 @@ __global__ void reduce_block_bounds(
     if (threadIdx.x == 0) {
         total_lower[0] = block_lower;
         total_upper[0] = block_upper;
+        if (total_inv_edges) {
+            vec3 edges = block_upper - block_lower + vec3(0.0001f);
+            total_inv_edges[0] = vec3(1.0f / edges[0], 1.0f / edges[1], 1.0f / edges[2]);
+        }
     }
 }
 #else
@@ -755,68 +770,61 @@ void LinearBVHBuilderGPU::build(
     BVH& bvh, const vec3* item_lowers, const vec3* item_uppers, int num_items, bounds3* total_bounds, int* item_groups
 )
 {
-    // POOLED SCRATCH ALLOCATION
-    //
-    // Every temporary buffer needed during build is carved from a
-    // single hipMalloc.  This eliminates individual hipMalloc /
-    // hipFree round-trips and the mid-build cuCtxSynchronize that
-    // was previously required before freeing the block-bounds temporaries.
+    constexpr int tree_threads = WP_BVH_BLOCK_DIM;
+
     auto align_up = [](size_t x, size_t a) -> size_t { return (x + a - 1) & ~(a - 1); };
-    constexpr size_t ALIGN = 256;  // safe for any AMD cache-line / vector-load width
+    constexpr size_t ALIGN = 256;
 
     const int nb_bounds = (num_items + WP_BVH_BLOCK_DIM - 1) / WP_BVH_BLOCK_DIM;
 
-    // Compute sub-buffer sizes (all rounded up to ALIGN)
-    const size_t sz_indices = align_up(sizeof(int) * num_items * 2, ALIGN);  // *2 for radix sort double-buffer
-    const size_t sz_keys = align_up(sizeof(uint64_t) * num_items * 2, ALIGN);  // *2 for radix sort double-buffer
-    const size_t sz_deltas = align_up(sizeof(int) * num_items, ALIGN);
+    // 30-bit Morton codes in lower bits; group id in upper 32 bits (if present)
+    const int sort_end_bit = item_groups ? 64 : 30;
+
+    // Query radix-sort temp storage requirement so we can include it in the pool
+    size_t sort_temp_bytes = 0;
+    (void)cub::DeviceRadixSort::SortPairs(
+        nullptr, sort_temp_bytes,
+        (const uint64_t*)nullptr, (uint64_t*)nullptr,
+        (const int*)nullptr, (int*)nullptr,
+        num_items, 0, sort_end_bit
+    );
+
+    const size_t sz_indices     = align_up(sizeof(int) * num_items, ALIGN);
+    const size_t sz_keys        = align_up(sizeof(uint64_t) * num_items * 2, ALIGN);  // *2 for cub internal double-buffer
     const size_t sz_range_lefts = align_up(sizeof(int) * bvh.max_nodes, ALIGN);
-    const size_t sz_range_rights = align_up(sizeof(int) * bvh.max_nodes, ALIGN);
-    const size_t sz_num_children = align_up(sizeof(int) * bvh.max_nodes, ALIGN);  // reused as node_depths
+    const size_t sz_range_rights= align_up(sizeof(int) * bvh.max_nodes, ALIGN);
+    const size_t sz_num_children= align_up(sizeof(int) * bvh.max_nodes, ALIGN);  // reused as node_depths
     const size_t sz_total_lower = align_up(sizeof(vec3), ALIGN);
     const size_t sz_total_upper = align_up(sizeof(vec3), ALIGN);
-    const size_t sz_inv_edges = align_up(sizeof(vec3), ALIGN);
-    const size_t sz_blk_lowers = align_up(sizeof(vec3) * nb_bounds, ALIGN);
-    const size_t sz_blk_uppers = align_up(sizeof(vec3) * nb_bounds, ALIGN);
-    const size_t sz_max_depth = align_up(sizeof(int), ALIGN);
+    const size_t sz_inv_edges   = align_up(sizeof(vec3), ALIGN);
+    const size_t sz_blk_lowers  = align_up(sizeof(vec3) * nb_bounds, ALIGN);
+    const size_t sz_blk_uppers  = align_up(sizeof(vec3) * nb_bounds, ALIGN);
+    const size_t sz_max_depth   = align_up(sizeof(int), ALIGN);
+    const size_t sz_sort_temp   = align_up(sort_temp_bytes, ALIGN);
 
-    const size_t pool_bytes = sz_indices + sz_keys + sz_deltas + sz_range_lefts + sz_range_rights + sz_num_children
-        + sz_total_lower + sz_total_upper + sz_inv_edges + sz_blk_lowers + sz_blk_uppers + sz_max_depth;
+    const size_t pool_bytes = sz_indices + sz_keys + sz_range_lefts + sz_range_rights + sz_num_children
+        + sz_total_lower + sz_total_upper + sz_inv_edges + sz_blk_lowers + sz_blk_uppers + sz_max_depth + sz_sort_temp;
 
     char* pool = (char*)wp_alloc_device(WP_CURRENT_CONTEXT, pool_bytes);
 
-    // Carve out sub-buffers
     char* ptr = pool;
-    int* indices = (int*)ptr;
-    ptr += sz_indices;
-    uint64_t* keys = (uint64_t*)ptr;
-    ptr += sz_keys;
-    int* deltas = (int*)ptr;
-    ptr += sz_deltas;
-    int* range_lefts = (int*)ptr;
-    ptr += sz_range_lefts;
-    int* range_rights = (int*)ptr;
-    ptr += sz_range_rights;
-    int* num_children = (int*)ptr;
-    ptr += sz_num_children;
-    vec3* total_lower = (vec3*)ptr;
-    ptr += sz_total_lower;
-    vec3* total_upper = (vec3*)ptr;
-    ptr += sz_total_upper;
-    vec3* total_inv_edges = (vec3*)ptr;
-    ptr += sz_inv_edges;
-    vec3* block_lowers = (vec3*)ptr;
-    ptr += sz_blk_lowers;
-    vec3* block_uppers = (vec3*)ptr;
-    ptr += sz_blk_uppers;
-    int* max_depth_dev = (int*)ptr;  // ptr += sz_max_depth;
+    int*      indices       = (int*)ptr;      ptr += sz_indices;
+    uint64_t* keys          = (uint64_t*)ptr; ptr += sz_keys;
+    int*      range_lefts   = (int*)ptr;      ptr += sz_range_lefts;
+    int*      range_rights  = (int*)ptr;      ptr += sz_range_rights;
+    int*      num_children  = (int*)ptr;      ptr += sz_num_children;
+    vec3*     total_lower   = (vec3*)ptr;     ptr += sz_total_lower;
+    vec3*     total_upper   = (vec3*)ptr;     ptr += sz_total_upper;
+    vec3*     total_inv_edges = (vec3*)ptr;   ptr += sz_inv_edges;
+    vec3*     block_lowers  = (vec3*)ptr;     ptr += sz_blk_lowers;
+    vec3*     block_uppers  = (vec3*)ptr;     ptr += sz_blk_uppers;
+    int*      max_depth_dev = (int*)ptr;      ptr += sz_max_depth;
+    void*     sort_temp     = (void*)ptr;     // ptr += sz_sort_temp;
 
     // COMPUTE TOTAL BOUNDS
     if (total_bounds) {
-        // Host-supplied bounds – upload directly
         vec3 edges = (*total_bounds).edges();
         edges += vec3(0.0001f);
-
         vec3 inv_edges = vec3(1.0f / edges[0], 1.0f / edges[1], 1.0f / edges[2]);
 
         wp_memcpy_h2d(WP_CURRENT_CONTEXT, total_lower, &total_bounds->lower[0], sizeof(vec3));
@@ -829,75 +837,71 @@ void LinearBVHBuilderGPU::build(
         );
         wp_launch_device(
             WP_CURRENT_CONTEXT, reduce_block_bounds, 1,
-            (block_lowers, block_uppers, nb_bounds, total_lower, total_upper)
+            (block_lowers, block_uppers, nb_bounds, total_lower, total_upper, total_inv_edges)
         );
-
-        // compute the total edge length
-        wp_launch_device(WP_CURRENT_CONTEXT, compute_total_inv_edges, 1, (total_lower, total_upper, total_inv_edges));
     }
 
-    // MORTON CODES + SORT
+    // MORTON CODES
     wp_launch_device(
         WP_CURRENT_CONTEXT, compute_morton_codes, num_items,
         (item_lowers, item_uppers, num_items, total_lower, total_inv_edges, indices, keys, item_groups)
     );
 
-    // 64-bit sort: group in upper 32 bits, morton code in lower 32 bits
-    radix_sort_pairs_device(WP_CURRENT_CONTEXT, keys, indices, num_items);
-    wp_memcpy_d2d(WP_CURRENT_CONTEXT, bvh.primitive_indices, indices, sizeof(int) * num_items);
-
-    // calculate deltas between adjacent keys (used by mark_packed_leaf_nodes for group-boundary detection)
-    wp_launch_device(WP_CURRENT_CONTEXT, compute_key_deltas, num_items, (keys, deltas, num_items - 1));
-
-    // BUILD TREE TOPOLOGY (Karras-style, deterministic)
-    // initialise leaf nodes
-    wp_launch_device(
-        WP_CURRENT_CONTEXT, build_leaves, num_items,
-        (item_lowers, item_uppers, num_items, indices, range_lefts, range_rights, bvh.node_lowers, bvh.node_uppers)
+    // SORT: keys in-place, values from indices -> bvh.primitive_indices (eliminates D2D copy)
+    hipStream_t stream = (hipStream_t)wp_cuda_stream_get_current();
+    (void)cub::DeviceRadixSort::SortPairs(
+        sort_temp, sort_temp_bytes,
+        keys, keys,
+        indices, bvh.primitive_indices,
+        num_items, 0, sort_end_bit, stream
     );
 
-    // initialise parents to -1
+    // BUILD TREE TOPOLOGY (Karras-style, deterministic)
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, build_leaves, num_items,
+        (item_lowers, item_uppers, num_items, bvh.primitive_indices, range_lefts, range_rights,
+         bvh.node_lowers, bvh.node_uppers)
+    );
+
     wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_parents, 0xFF, sizeof(int) * bvh.max_nodes);
 
-    // build internal-node topology (one thread per internal node)
     wp_launch_device(
         WP_CURRENT_CONTEXT, build_karras_topology, num_items,
         (num_items, bvh.root, keys, range_lefts, range_rights, bvh.node_parents, bvh.node_lowers, bvh.node_uppers)
     );
 
-    // DETERMINISTIC REFIT (depth-level iteration)
-    //
-    // Fused kernel: compute depth-from-root for every node AND the
-    // global maximum depth in a single launch
-    int* node_depths = num_children;  // reuse buffer (same size: max_nodes)
+    // DEPTH-LEVEL REFIT: compute per-node depths, then refit from deepest to shallowest
+    int* node_depths = num_children;
     wp_memset_device(WP_CURRENT_CONTEXT, max_depth_dev, 0, sizeof(int));
-
     wp_launch_device(
         WP_CURRENT_CONTEXT, compute_node_depths_and_max, bvh.max_nodes,
         (bvh.max_nodes, bvh.node_parents, node_depths, max_depth_dev, 1024)
     );
 
-    int max_depth_host = 0;
-    wp_memcpy_d2h(WP_CURRENT_CONTEXT, &max_depth_host, max_depth_dev, sizeof(int));
+    {
+        int max_depth = 0;
+        wp_memcpy_d2h(WP_CURRENT_CONTEXT, &max_depth, max_depth_dev, sizeof(int));
 
-    // Refit internal nodes from deepest to root (root depth == 1).
-    for (int d = max_depth_host - 1; d >= 1; --d) {
-        wp_launch_device(
-            WP_CURRENT_CONTEXT, refit_nodes_at_depth, bvh.max_nodes,
-            (bvh.max_nodes, d, node_depths, bvh.node_lowers, bvh.node_uppers)
-        );
+        const int num_internal = num_items - 1;
+        for (int d = max_depth; d >= 1; --d)
+        {
+            wp_launch_device(
+                WP_CURRENT_CONTEXT, refit_nodes_at_depth, num_internal,
+                (num_internal, num_items, d, node_depths, bvh.node_lowers, bvh.node_uppers)
+            );
+        }
     }
 
-    // PACK SMALL SUB-TREES INTO LEAF NODES
+    // PACK SMALL SUB-TREES INTO LEAF NODES (use pre-computed depths to avoid parent-chain walk)
+    int* precomputed_depths = node_depths;
     wp_launch_device(
         WP_CURRENT_CONTEXT, mark_packed_leaf_nodes, bvh.max_nodes,
         (bvh.max_nodes, range_lefts, range_rights, bvh.node_parents, keys, bvh.node_lowers, bvh.node_uppers,
-         bvh.leaf_size)
+         bvh.leaf_size, precomputed_depths)
     );
 
     // CLEANUP – single sync + single free
     (void)cuCtxSynchronize_f();
-
     wp_free_device(WP_CURRENT_CONTEXT, pool);
 }
 #else
@@ -994,7 +998,7 @@ void LinearBVHBuilderGPU::build(
         wp_launch_device(
             WP_CURRENT_CONTEXT, mark_packed_leaf_nodes, bvh.max_nodes,
             (bvh.max_nodes, range_lefts, range_rights, bvh.node_parents, keys, bvh.node_lowers, bvh.node_uppers,
-             bvh.leaf_size)
+             bvh.leaf_size, (const int*)nullptr)
         );
 
 
