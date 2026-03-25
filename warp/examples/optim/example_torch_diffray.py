@@ -23,16 +23,14 @@
 
 import math
 import os
+from types import SimpleNamespace
 
 import numpy as np
+import torch
 from pxr import Usd, UsdGeom
 
 import warp as wp
 import warp.examples
-
-import torch
-
-from types import SimpleNamespace
 
 # Context for custom ops: (scene_bufs, render_mesh). Set by caller before forward. Not tensors.
 _ray_cast_context = [None, None]
@@ -50,16 +48,12 @@ class MeshRotationModule(torch.nn.Module):
         self._scene_bufs = scene_bufs
         self._render_mesh = render_mesh
         device = wp.device_to_torch(wp.get_device())
-        self.mesh_rot = torch.nn.Parameter(
-            torch.tensor(init_rot, dtype=torch.float32, device=device)
-        )
+        self.mesh_rot = torch.nn.Parameter(torch.tensor(init_rot, dtype=torch.float32, device=device))
 
     def forward(self, target_pixels: torch.Tensor) -> torch.Tensor:
         """Run draw + loss. target_pixels: torch.Tensor [N, 3]. Returns scalar loss."""
         _ray_cast_context[0], _ray_cast_context[1] = self._scene_bufs, self._render_mesh
-        target = (
-            wp.to_torch(target_pixels) if hasattr(target_pixels, "ptr") else target_pixels
-        )
+        target = wp.to_torch(target_pixels) if hasattr(target_pixels, "ptr") else target_pixels
         return ray_cast_forward(self.mesh_rot, target)
 
 
@@ -338,9 +332,7 @@ def ray_cast_forward(rot: torch.Tensor, target_pixels: torch.Tensor) -> torch.Te
     )
     target_wp = wp.from_torch(target_pixels.contiguous(), dtype=wp.vec3)
     _ray_cast(scene_bufs, render_mesh)
-    wp.launch(
-        loss_kernel, dim=scene_bufs.num_pixels, inputs=[scene_bufs.pixels, target_wp, scene_bufs.loss]
-    )
+    wp.launch(loss_kernel, dim=scene_bufs.num_pixels, inputs=[scene_bufs.pixels, target_wp, scene_bufs.loss])
     return wp.to_torch(scene_bufs.loss)
 
 
@@ -358,9 +350,7 @@ def ray_cast_backward(
 
     target_wp = wp.from_torch(target_pixels.contiguous(), dtype=wp.vec3)
     adj_loss_wp = wp.from_torch(adj_loss.contiguous(), dtype=wp.float32)
-    adj_pixels = wp.zeros(
-        scene_bufs.num_pixels, dtype=wp.vec3, device=device, requires_grad=False
-    )
+    adj_pixels = wp.zeros(scene_bufs.num_pixels, dtype=wp.vec3, device=device, requires_grad=False)
     loss_wp = wp.from_torch(loss.contiguous(), dtype=wp.float32, requires_grad=False)
     wp.launch(
         kernel=loss_kernel,
@@ -372,9 +362,7 @@ def ray_cast_backward(
         adjoint=True,
     )
 
-    adj_rays = wp.zeros(
-        scene_bufs.num_rays, dtype=wp.vec3, device=device, requires_grad=False
-    )
+    adj_rays = wp.zeros(scene_bufs.num_rays, dtype=wp.vec3, device=device, requires_grad=False)
     wp.launch(
         kernel=downsample_kernel,
         dim=scene_bufs.num_pixels,
@@ -440,9 +428,7 @@ def ray_cast_setup_context(ctx, inputs, output):
     ctx.loss = output
 
 
-ray_cast_forward.register_autograd(
-    ray_cast_backward_impl, setup_context=ray_cast_setup_context
-)
+ray_cast_forward.register_autograd(ray_cast_backward_impl, setup_context=ray_cast_setup_context)
 
 
 class Example:
@@ -646,9 +632,7 @@ class Example:
             if isinstance(target_pixels, torch.Tensor)
             else target_pixels
         )
-        wp.launch(
-            loss_kernel, dim=self.num_pixels, inputs=[self.pixels, target_wp, self.loss]
-        )
+        wp.launch(loss_kernel, dim=self.num_pixels, inputs=[self.pixels, target_wp, self.loss])
 
     def _warp_forward(self):
         """Warp-only forward: ray cast + loss. Used for backward compatibility."""
