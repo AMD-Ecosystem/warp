@@ -140,7 +140,7 @@ def set_msvc_env(msvc_path, sdk_path):
     return os.path.join(msvc_path, "bin", "HostX64", "x64", "cl.exe")
 
 
-def find_host_compiler() -> str:
+def find_host_compiler(hip_enabled: bool = False) -> str:
     """Find the host C++ compiler.
 
     On Windows, checks for pre-configured Visual Studio environment before
@@ -823,7 +823,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         hip_arches = _parse_hip_arches(args)
                         hip_arch_flags = " ".join([f"--offload-arch={arch}" for arch in hip_arches])
                         # Match nvcc/NVRTC default: strict IEEE 754 FP semantics
-                        hip_fp_flags = "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
+                        hip_fp_flags = (
+                            "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
+                        )
                         # Workaround for AMD clang 22+ regression: device-side inlining of
                         # heavily-templated hipcub/rocPRIM code (e.g. DeviceReduce::Sum with
                         # custom iterators) can cause exponential compilation time.  Disabling
@@ -834,13 +836,13 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                             _hip_extra_flags = "-Xarch_device -fno-inline"
                         if mode == "debug":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden '
-                                f'-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 '
+                                f"{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden "
+                                f"-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 "
                                 f'-I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
                         elif mode == "release":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -O3 {_hip_extra_flags} -fPIC -fvisibility=hidden -DNDEBUG '
+                                f"{hipcc_cmd} -x hip -std=c++17 -O3 {_hip_extra_flags} -fPIC -fvisibility=hidden -DNDEBUG "
                                 f'{hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} '
                                 f'{libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
