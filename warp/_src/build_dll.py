@@ -824,6 +824,14 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         hip_arch_flags = " ".join([f"--offload-arch={arch}" for arch in hip_arches])
                         # Match nvcc/NVRTC default: strict IEEE 754 FP semantics
                         hip_fp_flags = "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
+                        # Workaround for AMD clang 22+ regression: device-side inlining of
+                        # heavily-templated hipcub/rocPRIM code (e.g. DeviceReduce::Sum with
+                        # custom iterators) can cause exponential compilation time.  Disabling
+                        # device inlining for affected files keeps all other -O3 optimizations.
+                        _hip_extra_flags = ""
+                        _cu_basename = os.path.basename(cu_path)
+                        if _cu_basename in ("reduce.cu",):
+                            _hip_extra_flags = "-Xarch_device -fno-inline"
                         if mode == "debug":
                             cuda_cmd = (
                                 f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden '
@@ -832,7 +840,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                             )
                         elif mode == "release":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden -DNDEBUG '
+                                f'{hipcc_cmd} -x hip -std=c++17 -O3 {_hip_extra_flags} -fPIC -fvisibility=hidden -DNDEBUG '
                                 f'{hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} '
                                 f'{libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
