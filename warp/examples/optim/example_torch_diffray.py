@@ -292,12 +292,6 @@ def normalize(x: wp.array(dtype=wp.quat)):
     x[tid] = wp.normalize(x[tid])
 
 
-# Context for custom ops: (scene_bufs, render_mesh). Set by caller before forward.
-# scene_bufs: object with camera, texture, lights, rays, pixels, loss, rot, rays_width, rays_height,
-#             num_rays, num_pixels, num_samples, render_mode
-_ray_cast_context = [None, None]
-
-
 def _ray_cast(scene_bufs, render_mesh):
     """Flat ray-cast: draw + downsample. Used internally."""
     wp.launch(
