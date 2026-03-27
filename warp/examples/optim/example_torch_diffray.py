@@ -37,24 +37,27 @@ _ray_cast_context = [None, None]
 
 
 class MeshRotationModule(torch.nn.Module):
-    """PyTorch module with a single parameter `mesh_rot` (quaternion, shape [4]).
-    Forward takes (rot, target_pixels) as tensors. Scene/render_mesh are set via context before call.
+    """PyTorch module with `mesh_rot` (quaternion [4]) and `mesh_pos` (translation [3]).
+    Forward takes target pixels; scene/render_mesh are set via context before call.
     """
 
-    def __init__(self, scene_bufs, render_mesh, init_rot=None):
+    def __init__(self, scene_bufs, render_mesh, init_rot=None, init_pos=None):
         super().__init__()
         if init_rot is None:
             init_rot = [0.0, 0.0, 0.0, 1.0]
+        if init_pos is None:
+            init_pos = [0.0, 0.0, 0.0]
         self._scene_bufs = scene_bufs
         self._render_mesh = render_mesh
         device = wp.device_to_torch(wp.get_device())
         self.mesh_rot = torch.nn.Parameter(torch.tensor(init_rot, dtype=torch.float32, device=device))
+        self.mesh_pos = torch.nn.Parameter(torch.tensor(np.array(init_pos, dtype=np.float32), device=device))
 
     def forward(self, target_pixels: torch.Tensor) -> torch.Tensor:
         """Run draw + loss. target_pixels: torch.Tensor [N, 3]. Returns scalar loss."""
         _ray_cast_context[0], _ray_cast_context[1] = self._scene_bufs, self._render_mesh
         target = wp.to_torch(target_pixels) if hasattr(target_pixels, "ptr") else target_pixels
-        return ray_cast_forward(self.mesh_rot, target)
+        return ray_cast_forward(self.mesh_rot, self.mesh_pos, target)
 
 
 class RenderMode:
@@ -82,7 +85,6 @@ class RenderMesh:
     tex_coords: wp.array(dtype=wp.vec2)
     tex_indices: wp.array(dtype=int)
     vertex_normals: wp.array(dtype=wp.vec3)
-    pos: wp.array(dtype=wp.vec3)
 
 
 @wp.struct
@@ -166,6 +168,7 @@ def texture_interpolation(tex_interp: wp.vec2, texture: wp.array2d(dtype=wp.vec3
 def draw_kernel(
     mesh: RenderMesh,
     rot: wp.array(dtype=wp.quat),
+    pos: wp.array(dtype=wp.vec3),
     camera: Camera,
     texture: wp.array2d(dtype=wp.vec3),
     rays_width: int,
@@ -187,7 +190,7 @@ def draw_kernel(
     rd_world = wp.normalize(wp.quat_rotate(camera.rot, wp.vec3(sx * camera.tan * camera.aspect, sy * camera.tan, -1.0)))
 
     # compute view ray in mesh space
-    inv = wp.transform_inverse(wp.transform(mesh.pos[0], rot[0]))
+    inv = wp.transform_inverse(wp.transform(pos[0], rot[0]))
     ro = wp.transform_point(inv, ro_world)
     rd = wp.transform_vector(inv, rd_world)
 
@@ -300,6 +303,7 @@ def _ray_cast(scene_bufs, render_mesh):
         inputs=[
             render_mesh,
             scene_bufs.rot,
+            scene_bufs.pos,
             scene_bufs.camera,
             scene_bufs.texture,
             scene_bufs.rays_width,
@@ -316,14 +320,23 @@ def _ray_cast(scene_bufs, render_mesh):
     )
 
 
+def _torch_pos_to_wp_vec3_array(mesh_pos: torch.Tensor):
+    """Torch [3] or [1,3] -> wp array length 1 of vec3 (for wp.copy into scene_bufs.pos)."""
+    t = mesh_pos.detach().contiguous()
+    if t.dim() == 1:
+        t = t.unsqueeze(0)
+    return wp.from_torch(t, dtype=wp.vec3)
+
+
 @torch.library.custom_op("wp::ray_cast_forward", mutates_args=())
-def ray_cast_forward(rot: torch.Tensor, target_pixels: torch.Tensor) -> torch.Tensor:
-    """Forward: copy rot to scene_bufs.rot, run draw + downsample + loss, return loss."""
+def ray_cast_forward(rot: torch.Tensor, mesh_pos: torch.Tensor, target_pixels: torch.Tensor) -> torch.Tensor:
+    """Forward: copy rot / mesh pos to Warp buffers, run draw + downsample + loss, return loss."""
     scene_bufs, render_mesh = _ray_cast_context[0], _ray_cast_context[1]
     wp.copy(
         scene_bufs.rot,
         wp.from_torch(rot.detach().contiguous(), dtype=wp.quat),
     )
+    wp.copy(scene_bufs.pos, _torch_pos_to_wp_vec3_array(mesh_pos))
     target_wp = wp.from_torch(target_pixels.contiguous(), dtype=wp.vec3)
     _ray_cast(scene_bufs, render_mesh)
     wp.launch(loss_kernel, dim=scene_bufs.num_pixels, inputs=[scene_bufs.pixels, target_wp, scene_bufs.loss])
@@ -333,10 +346,11 @@ def ray_cast_forward(rot: torch.Tensor, target_pixels: torch.Tensor) -> torch.Te
 @torch.library.custom_op("wp::ray_cast_backward", mutates_args=())
 def ray_cast_backward(
     rot: torch.Tensor,
+    mesh_pos: torch.Tensor,
     loss: torch.Tensor,
     adj_loss: torch.Tensor,
     target_pixels: torch.Tensor,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward: run adjoint of loss, downsample, draw kernels (no Tape). Uses _ray_cast_context."""
     scene_bufs, render_mesh = _ray_cast_context[0], _ray_cast_context[1]
     device = wp.get_device()
@@ -368,14 +382,14 @@ def ray_cast_backward(
     )
 
     adj_rot = wp.zeros(1, dtype=wp.quat, device=device, requires_grad=False)
+    adj_pos = wp.zeros(1, dtype=wp.vec3, device=device, requires_grad=False)
     adj_mesh = RenderMesh()
     adj_mesh.id = render_mesh.id
-    adj_mesh.vertices = render_mesh.vertices
-    adj_mesh.indices = render_mesh.indices
-    adj_mesh.tex_coords = render_mesh.tex_coords
-    adj_mesh.tex_indices = render_mesh.tex_indices
-    adj_mesh.vertex_normals = render_mesh.vertex_normals
-    adj_mesh.pos = render_mesh.pos
+    adj_mesh.vertices = None
+    adj_mesh.indices = None
+    adj_mesh.tex_coords = None
+    adj_mesh.tex_indices = None
+    adj_mesh.vertex_normals = None
 
     # Struct args (Camera, DirectionalLights) cannot be None in adj_inputs
     adj_camera = scene_bufs.camera
@@ -386,6 +400,7 @@ def ray_cast_backward(
         inputs=[
             render_mesh,
             scene_bufs.rot,
+            scene_bufs.pos,
             scene_bufs.camera,
             scene_bufs.texture,
             scene_bufs.rays_width,
@@ -395,30 +410,35 @@ def ray_cast_backward(
             scene_bufs.render_mode,
         ],
         outputs=[],
-        adj_inputs=[adj_mesh, adj_rot, adj_camera, None, None, None, adj_rays, adj_lights, None],
+        adj_inputs=[adj_mesh, adj_rot, adj_pos, adj_camera, None, None, None, adj_rays, adj_lights, None],
         adj_outputs=[],
         adjoint=True,
     )
-    return wp.to_torch(adj_rot)
+    grad_rot = wp.to_torch(adj_rot).reshape(4)
+    grad_pos = wp.to_torch(adj_pos).reshape(3)
+    return grad_rot, grad_pos
 
 
 @ray_cast_forward.register_fake
-def ray_cast_forward_fake(rot, target_pixels):
+def ray_cast_forward_fake(rot, mesh_pos, target_pixels):
     return torch.empty(1, dtype=torch.float32, device=rot.device)
 
 
 @ray_cast_backward.register_fake
-def ray_cast_backward_fake(rot, loss, adj_loss, target_pixels):
-    return torch.empty(4, dtype=torch.float32, device=rot.device)
+def ray_cast_backward_fake(rot, mesh_pos, loss, adj_loss, target_pixels):
+    return (
+        torch.empty(4, dtype=torch.float32, device=rot.device),
+        torch.empty(3, dtype=torch.float32, device=rot.device),
+    )
 
 
 def ray_cast_backward_impl(ctx, adj_loss):
-    grad_rot = ray_cast_backward(ctx.rot, ctx.loss, adj_loss, ctx.target_pixels)
-    return (grad_rot, None)
+    grad_rot, grad_pos = ray_cast_backward(ctx.rot, ctx.mesh_pos, ctx.loss, adj_loss, ctx.target_pixels)
+    return (grad_rot, grad_pos, None)
 
 
 def ray_cast_setup_context(ctx, inputs, output):
-    ctx.rot, ctx.target_pixels = inputs
+    ctx.rot, ctx.mesh_pos, ctx.target_pixels = inputs
     ctx.loss = output
 
 
@@ -442,14 +462,14 @@ class Example:
     render_mesh.tex_indices: texture indices
 
     Differentiable variables:
-    render_mesh.pos: parent transform displacement
+    pos: parent transform translation (vec3), passed separately to draw_kernel
     rot: parent transform rotation (quaternion), passed separately
     render_mesh.vertices: mesh vertex positions
     render_mesh.vertex_normals: mesh vertex normals
     render_mesh.tex_coords: 2D texture coordinates
     """
 
-    def __init__(self, height=1024, train_iters=150, rot_array=None):
+    def __init__(self, height=1024, train_iters=150, rot_array=None, pos_array=None):
         cam_pos = wp.vec3(0.0, 0.75, 7.0)
         cam_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
         horizontal_aperture = 36.0
@@ -462,6 +482,9 @@ class Example:
 
         if rot_array is None:
             rot_array = [0.0, 0.0, 0.0, 1.0]
+
+        if pos_array is None:
+            pos_array = [0.0, 0.0, 0.0]
 
         asset_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), "bunny.usd"))
         mesh_geom = UsdGeom.Mesh(asset_stage.GetPrimAtPath("/root/bunny"))
@@ -516,7 +539,9 @@ class Example:
         self.render_mesh.tex_indices = wp.array(tex_indices, dtype=int)
         self.normal_sums = wp.zeros(num_points, dtype=wp.vec3, requires_grad=True)
         self.render_mesh.vertex_normals = wp.zeros(num_points, dtype=wp.vec3, requires_grad=True)
-        self.render_mesh.pos = wp.zeros(1, dtype=wp.vec3, requires_grad=True)
+        self.pos = wp.array(
+            np.asarray(pos_array, dtype=np.float32).reshape(1, 3), dtype=wp.vec3, requires_grad=True
+        )
         self.rot = wp.array(np.array(rot_array), dtype=wp.quat, requires_grad=True)
 
         # compute vertex normals
@@ -572,6 +597,7 @@ class Example:
             pixels=self.pixels,
             loss=self.loss,
             rot=self.rot,
+            pos=self.pos,
             rays_width=self.rays_width,
             rays_height=self.rays_height,
             num_rays=self.num_rays,
@@ -579,9 +605,11 @@ class Example:
             num_samples=self.num_samples,
             render_mode=self.render_mode,
         )
-        self.model = MeshRotationModule(self.scene_bufs, self.render_mesh, init_rot=rot_array)
+        self.model = MeshRotationModule(
+            self.scene_bufs, self.render_mesh, init_rot=rot_array, init_pos=pos_array
+        )
         self.optimizer = torch.optim.SGD(
-            self.model.parameters(),
+            [self.model.mesh_rot, ],
             lr=self.train_rate,
             momentum=self.momentum,
             dampening=self.dampening,
@@ -601,6 +629,7 @@ class Example:
             inputs=[
                 mesh,
                 rot_arr,
+                self.pos,
                 self.camera,
                 self.texture,
                 self.rays_width,
@@ -647,6 +676,7 @@ class Example:
             with torch.no_grad():
                 self.model.mesh_rot.data /= self.model.mesh_rot.data.norm()
             wp.copy(self.rot, wp.from_torch(self.model.mesh_rot.detach(), dtype=wp.quat))
+            wp.copy(self.pos, _torch_pos_to_wp_vec3_array(self.model.mesh_pos.detach()))
 
             if self.iter % self.period == 0:
                 print(f"Iter: {self.iter} Loss: {loss.item():.6f}")
