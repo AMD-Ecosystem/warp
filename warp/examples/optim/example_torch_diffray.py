@@ -14,10 +14,10 @@
 # limitations under the License.
 
 #############################################################################
-# Example Differentiable Ray Caster
+# Example Differentiable Ray Caster implemented with torch module
 #
 # Shows how to use the built-in wp.Mesh data structure and wp.mesh_query_ray()
-# function to implement a basic differentiable ray caster
+# function to implement a basic differentiable ray caster within a torch model.
 #
 ##############################################################################
 
