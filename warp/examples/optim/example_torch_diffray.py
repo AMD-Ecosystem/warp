@@ -455,9 +455,7 @@ def ray_cast_backward_fake(rot, mesh_pos, loss, adj_loss, target_pixels, buffer_
 
 
 def ray_cast_backward_impl(ctx, adj_loss):
-    grad_rot, grad_pos = ray_cast_backward(
-        ctx.rot, ctx.mesh_pos, ctx.loss, adj_loss, ctx.target_pixels, ctx.buffer_key
-    )
+    grad_rot, grad_pos = ray_cast_backward(ctx.rot, ctx.mesh_pos, ctx.loss, adj_loss, ctx.target_pixels, ctx.buffer_key)
     return (grad_rot, grad_pos, None, None)
 
 
@@ -563,9 +561,7 @@ class Example:
         self.render_mesh.tex_indices = wp.array(tex_indices, dtype=int)
         self.normal_sums = wp.zeros(num_points, dtype=wp.vec3, requires_grad=True)
         self.render_mesh.vertex_normals = wp.zeros(num_points, dtype=wp.vec3, requires_grad=True)
-        self.pos = wp.array(
-            np.asarray(pos_array, dtype=np.float32).reshape(1, 3), dtype=wp.vec3, requires_grad=True
-        )
+        self.pos = wp.array(np.asarray(pos_array, dtype=np.float32).reshape(1, 3), dtype=wp.vec3, requires_grad=True)
         self.rot = wp.array(np.array(rot_array), dtype=wp.quat, requires_grad=True)
 
         # compute vertex normals
@@ -629,12 +625,12 @@ class Example:
             num_samples=self.num_samples,
             render_mode=self.render_mode,
         )
-        self.model = MeshRotationModule(
-            self.scene_bufs, self.render_mesh, init_rot=rot_array, init_pos=pos_array
-        )
+        self.model = MeshRotationModule(self.scene_bufs, self.render_mesh, init_rot=rot_array, init_pos=pos_array)
 
         self.optimizer = torch.optim.SGD(
-            [self.model.mesh_rot, ],
+            [
+                self.model.mesh_rot,
+            ],
             lr=self.train_rate,
             momentum=self.momentum,
             dampening=self.dampening,
