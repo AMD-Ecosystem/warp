@@ -21,6 +21,7 @@
 #
 ##############################################################################
 
+import itertools
 import math
 import os
 from types import SimpleNamespace
@@ -32,8 +33,16 @@ from pxr import Usd, UsdGeom
 import warp as wp
 import warp.examples
 
-# Context for custom ops: (scene_bufs, render_mesh). Set by caller before forward. Not tensors.
-_ray_cast_context = [None, None]
+# Maps registry id -> (scene_bufs, render_mesh). Ids are passed as a tensor into custom ops so
+# torch.compile can trace the handle; mutating a global list before forward does not.
+_RAY_CAST_REGISTRY: dict[int, tuple] = {}
+_next_ray_cast_registry_id = itertools.count(1)
+
+
+def _register_ray_cast_buffers(scene_bufs, render_mesh) -> int:
+    rid = next(_next_ray_cast_registry_id)
+    _RAY_CAST_REGISTRY[rid] = (scene_bufs, render_mesh)
+    return rid
 
 
 class MeshRotationModule(torch.nn.Module):
@@ -52,12 +61,17 @@ class MeshRotationModule(torch.nn.Module):
         device = wp.device_to_torch(wp.get_device())
         self.mesh_rot = torch.nn.Parameter(torch.tensor(init_rot, dtype=torch.float32, device=device))
         self.mesh_pos = torch.nn.Parameter(torch.tensor(np.array(init_pos, dtype=np.float32), device=device))
+        buf_id = _register_ray_cast_buffers(scene_bufs, render_mesh)
+        self.register_buffer(
+            "_ray_cast_handle",
+            torch.tensor([buf_id], dtype=torch.int64, device=device),
+            persistent=False,
+        )
 
     def forward(self, target_pixels: torch.Tensor) -> torch.Tensor:
         """Run draw + loss. target_pixels: torch.Tensor [N, 3]. Returns scalar loss."""
-        _ray_cast_context[0], _ray_cast_context[1] = self._scene_bufs, self._render_mesh
         target = wp.to_torch(target_pixels) if hasattr(target_pixels, "ptr") else target_pixels
-        return ray_cast_forward(self.mesh_rot, self.mesh_pos, target)
+        return ray_cast_forward(self.mesh_rot, self.mesh_pos, target, self._ray_cast_handle)
 
 
 class RenderMode:
@@ -329,9 +343,15 @@ def _torch_pos_to_wp_vec3_array(mesh_pos: torch.Tensor):
 
 
 @torch.library.custom_op("wp::ray_cast_forward", mutates_args=())
-def ray_cast_forward(rot: torch.Tensor, mesh_pos: torch.Tensor, target_pixels: torch.Tensor) -> torch.Tensor:
+def ray_cast_forward(
+    rot: torch.Tensor,
+    mesh_pos: torch.Tensor,
+    target_pixels: torch.Tensor,
+    buffer_key: torch.Tensor,
+) -> torch.Tensor:
     """Forward: copy rot / mesh pos to Warp buffers, run draw + downsample + loss, return loss."""
-    scene_bufs, render_mesh = _ray_cast_context[0], _ray_cast_context[1]
+    rid = int(buffer_key.reshape(-1)[0].item())
+    scene_bufs, render_mesh = _RAY_CAST_REGISTRY[rid]
     wp.copy(
         scene_bufs.rot,
         wp.from_torch(rot.detach().contiguous(), dtype=wp.quat),
@@ -350,9 +370,11 @@ def ray_cast_backward(
     loss: torch.Tensor,
     adj_loss: torch.Tensor,
     target_pixels: torch.Tensor,
+    buffer_key: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward: run adjoint of loss, downsample, draw kernels (no Tape). Uses _ray_cast_context."""
-    scene_bufs, render_mesh = _ray_cast_context[0], _ray_cast_context[1]
+    """Backward: run adjoint of loss, downsample, draw kernels (no Tape)."""
+    rid = int(buffer_key.reshape(-1)[0].item())
+    scene_bufs, render_mesh = _RAY_CAST_REGISTRY[rid]
     device = wp.get_device()
     num_samples = pow(2, scene_bufs.num_samples)
 
@@ -420,12 +442,12 @@ def ray_cast_backward(
 
 
 @ray_cast_forward.register_fake
-def ray_cast_forward_fake(rot, mesh_pos, target_pixels):
+def ray_cast_forward_fake(rot, mesh_pos, target_pixels, buffer_key):
     return torch.empty(1, dtype=torch.float32, device=rot.device)
 
 
 @ray_cast_backward.register_fake
-def ray_cast_backward_fake(rot, mesh_pos, loss, adj_loss, target_pixels):
+def ray_cast_backward_fake(rot, mesh_pos, loss, adj_loss, target_pixels, buffer_key):
     return (
         torch.empty(4, dtype=torch.float32, device=rot.device),
         torch.empty(3, dtype=torch.float32, device=rot.device),
@@ -433,12 +455,14 @@ def ray_cast_backward_fake(rot, mesh_pos, loss, adj_loss, target_pixels):
 
 
 def ray_cast_backward_impl(ctx, adj_loss):
-    grad_rot, grad_pos = ray_cast_backward(ctx.rot, ctx.mesh_pos, ctx.loss, adj_loss, ctx.target_pixels)
-    return (grad_rot, grad_pos, None)
+    grad_rot, grad_pos = ray_cast_backward(
+        ctx.rot, ctx.mesh_pos, ctx.loss, adj_loss, ctx.target_pixels, ctx.buffer_key
+    )
+    return (grad_rot, grad_pos, None, None)
 
 
 def ray_cast_setup_context(ctx, inputs, output):
-    ctx.rot, ctx.mesh_pos, ctx.target_pixels = inputs
+    ctx.rot, ctx.mesh_pos, ctx.target_pixels, ctx.buffer_key = inputs
     ctx.loss = output
 
 
@@ -608,6 +632,7 @@ class Example:
         self.model = MeshRotationModule(
             self.scene_bufs, self.render_mesh, init_rot=rot_array, init_pos=pos_array
         )
+
         self.optimizer = torch.optim.SGD(
             [self.model.mesh_rot, ],
             lr=self.train_rate,
