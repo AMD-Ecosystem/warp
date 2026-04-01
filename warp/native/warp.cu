@@ -65,41 +65,41 @@
 #define check_cublasdx(code) (check_cublasdx_result(code, __FILE__, __LINE__))
 #define check_cusolver(code) (check_cusolver_result(code, __FILE__, __LINE__))
 #define CHECK_ANY(code) \
-{ \
-    do { \
-        bool out = (check_any(code)); \
-        if(!out) { \
-            return out; \
-        } \
-    } while(0); \
-}
+ { \
+     do { \
+         bool out = (check_any(code)); \
+         if(!out) { \
+             return out; \
+         } \
+     } while(0); \
+ }
 #define CHECK_CUFFTDX(code) \
-{ \
-    do { \
-        bool out = (check_cufftdx(code)); \
-        if(!out) { \
-            return out; \
-        } \
-    } while(0); \
-}
+ { \
+     do { \
+         bool out = (check_cufftdx(code)); \
+         if(!out) { \
+             return out; \
+         } \
+     } while(0); \
+ }
 #define CHECK_CUBLASDX(code) \
-{ \
-    do { \
-        bool out = (check_cufftdx(code)); \
-        if(!out) { \
-            return out; \
-        } \
-    } while(0); \
-}
+ { \
+     do { \
+         bool out = (check_cufftdx(code)); \
+         if(!out) { \
+             return out; \
+         } \
+     } while(0); \
+ }
 #define CHECK_CUSOLVER(code) \
-{ \
-    do { \
-        bool out = (check_cusolver(code)); \
-        if(!out) { \
-            return out; \
-        } \
-    } while(0); \
-}
+ { \
+     do { \
+         bool out = (check_cusolver(code)); \
+         if(!out) { \
+             return out; \
+         } \
+     } while(0); \
+ }
 
 bool check_nvrtc_result(nvrtcResult result, const char* file, int line)
 {
@@ -614,8 +614,7 @@ static int free_deferred_allocs(void* context = NULL)
                         StreamInfo* alloc_si = get_stream_info(alloc_stream);
                         if (alloc_si && alloc_si->cached_event) {
                             check_cu(cuEventRecord_f(alloc_si->cached_event, alloc_stream));
-                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event,
-                                                         CU_EVENT_WAIT_DEFAULT));
+                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event, CU_EVENT_WAIT_DEFAULT));
                         }
                     }
                     g_alloc_streams.erase(alloc_it);
@@ -917,8 +916,7 @@ void wp_free_device_async(void* context, void* ptr)
                         StreamInfo* alloc_info = get_stream_info(alloc_stream);
                         if (alloc_info && alloc_info->cached_event) {
                             check_cu(cuEventRecord_f(alloc_info->cached_event, alloc_stream));
-                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_info->cached_event,
-                                                         CU_EVENT_WAIT_DEFAULT));
+                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_info->cached_event, CU_EVENT_WAIT_DEFAULT));
                         }
                     }
                     g_alloc_streams.erase(it);
@@ -987,8 +985,9 @@ void wp_free_device_async(void* context, void* ptr)
                             StreamInfo* alloc_si = get_stream_info(alloc_stream);
                             if (alloc_si && alloc_si->cached_event) {
                                 check_cu(cuEventRecord_f(alloc_si->cached_event, alloc_stream));
-                                check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event,
-                                                             CU_EVENT_WAIT_DEFAULT));
+                                check_cu(
+                                    cuStreamWaitEvent_f(free_stream, alloc_si->cached_event, CU_EVENT_WAIT_DEFAULT)
+                                );
                             }
                         }
                         g_alloc_streams.erase(alloc_it);
@@ -1147,8 +1146,12 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
                 // check if either of the pointers was allocated from a mempool
                 void* src_mempool = NULL;
                 void* dst_mempool = NULL;
-                ignore_cu_result(cuPointerGetAttribute_f(&src_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)src));
-                ignore_cu_result(cuPointerGetAttribute_f(&dst_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)dst));
+                ignore_cu_result(
+                    cuPointerGetAttribute_f(&src_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)src)
+                );
+                ignore_cu_result(
+                    cuPointerGetAttribute_f(&dst_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)dst)
+                );
                 ignore_cuda_error(cudaGetLastError());  // clear any errors
                 // check if either of the pointers was allocated during graph capture
                 auto src_alloc = g_graph_allocs.find(src);
@@ -3189,30 +3192,30 @@ static std::map<ModuleKey, void*> g_conditional_modules;
 static void* compile_conditional_module(int arch, bool use_ptx)
 {
     static const char* kernel_source = R"(
-        typedef __device_builtin__ unsigned long long cudaGraphConditionalHandle;
-        extern "C" __device__ __cudart_builtin__ void cudaGraphSetConditional(cudaGraphConditionalHandle handle, unsigned int value);
-
-        extern "C" __global__ void set_conditional_if_handle_kernel(cudaGraphConditionalHandle handle, int* value)
-        {
-            if (threadIdx.x + blockIdx.x * blockDim.x == 0)
-                cudaGraphSetConditional(handle, *value);
-        }
-
-        extern "C" __global__ void set_conditional_else_handle_kernel(cudaGraphConditionalHandle handle, int* value)
-        {
-            if (threadIdx.x + blockIdx.x * blockDim.x == 0)
-                cudaGraphSetConditional(handle, !*value);
-        }
-
-        extern "C" __global__ void set_conditional_if_else_handles_kernel(cudaGraphConditionalHandle if_handle, cudaGraphConditionalHandle else_handle, int* value)
-        {
-            if (threadIdx.x + blockIdx.x * blockDim.x == 0)
-            {
-                cudaGraphSetConditional(if_handle, *value);
-                cudaGraphSetConditional(else_handle, !*value);
-            }
-        }
-    )";
+         typedef __device_builtin__ unsigned long long cudaGraphConditionalHandle;
+         extern "C" __device__ __cudart_builtin__ void cudaGraphSetConditional(cudaGraphConditionalHandle handle, unsigned int value);
+ 
+         extern "C" __global__ void set_conditional_if_handle_kernel(cudaGraphConditionalHandle handle, int* value)
+         {
+             if (threadIdx.x + blockIdx.x * blockDim.x == 0)
+                 cudaGraphSetConditional(handle, *value);
+         }
+ 
+         extern "C" __global__ void set_conditional_else_handle_kernel(cudaGraphConditionalHandle handle, int* value)
+         {
+             if (threadIdx.x + blockIdx.x * blockDim.x == 0)
+                 cudaGraphSetConditional(handle, !*value);
+         }
+ 
+         extern "C" __global__ void set_conditional_if_else_handles_kernel(cudaGraphConditionalHandle if_handle, cudaGraphConditionalHandle else_handle, int* value)
+         {
+             if (threadIdx.x + blockIdx.x * blockDim.x == 0)
+             {
+                 cudaGraphSetConditional(if_handle, *value);
+                 cudaGraphSetConditional(else_handle, !*value);
+             }
+         }
+     )";
 
     // avoid recompilation
     ModuleKey key = { arch, use_ptx };
@@ -3947,6 +3950,30 @@ size_t wp_cuda_compile_program(
         }
     }
 
+    // Add clang resource directory so HIPRTC can find compiler built-in
+    // headers (float.h, stdint.h, etc.) that are not in the standard
+    // system include path.  Also add the main ROCm include directory so
+    // that <hip/hip_runtime.h> and <hip/hip_fp16.h> (included by
+    // builtin.h when __HIP_DEVICE_COMPILE__ is defined) can be found.
+    {
+        std::string rocm_path = "/opt/rocm";
+        const char* env_rocm = getenv("ROCM_PATH");
+        if (!env_rocm || !env_rocm[0])
+            env_rocm = getenv("ROCM_HOME");
+        if (env_rocm && env_rocm[0])
+            rocm_path = env_rocm;
+
+        std::string clang_res_include
+            = rocm_path + "/lib/llvm/lib/clang/" + std::to_string(__clang_major__) + "/include";
+        stored_options.push_back(std::string("-I") + clang_res_include);
+        opts.push_back(stored_options.back().c_str());
+
+        // ROCm include directory for HIP runtime headers
+        std::string rocm_include = rocm_path + "/include";
+        stored_options.push_back(std::string("-I") + rocm_include);
+        opts.push_back(stored_options.back().c_str());
+    }
+
     stored_options.push_back("--std=c++17");
     opts.push_back(stored_options.back().c_str());
 
@@ -3993,11 +4020,11 @@ size_t wp_cuda_compile_program(
     // Match NVRTC default: strict IEEE 754 floating-point semantics.
     // These override the dangerous parts of -ffast-math while keeping
     // the transcendental substitutions from -fgpu-approx-transcendentals.
-    stored_options.push_back("-fno-finite-math-only");   // preserve inf/NaN
+    stored_options.push_back("-fno-finite-math-only");  // preserve inf/NaN
     opts.push_back(stored_options.back().c_str());
-    stored_options.push_back("-fno-associative-math");   // no reordering min/max chains
+    stored_options.push_back("-fno-associative-math");  // no reordering min/max chains
     opts.push_back(stored_options.back().c_str());
-    stored_options.push_back("-fno-reciprocal-math");    // no unsafe 1/x transforms
+    stored_options.push_back("-fno-reciprocal-math");  // no unsafe 1/x transforms
     opts.push_back(stored_options.back().c_str());
 
     // Match NVRTC default: safe pointer aliasing for reinterpret_casts
@@ -4040,11 +4067,9 @@ size_t wp_cuda_compile_program(
         const auto compile_end = std::chrono::steady_clock::now();
         const double compile_ms = std::chrono::duration<double, std::milli>(compile_end - compile_start).count();
         const std::string trace_path = std::string(output_path) + "_compile-time-trace.json";
-        const std::string trace = std::string("{\n")
-            + "  \"tool\": \"hiprtc\",\n"
+        const std::string trace = std::string("{\n") + "  \"tool\": \"hiprtc\",\n"
             + "  \"compile_ms\": " + std::to_string(compile_ms) + ",\n"
-            + "  \"result\": " + std::to_string(static_cast<int>(res)) + "\n"
-            + "}\n";
+            + "  \"result\": " + std::to_string(static_cast<int>(res)) + "\n" + "}\n";
         if (!write_file(trace.data(), trace.size(), trace_path, "wb")) {
             fprintf(stderr, "Warp warning: Failed to write HIPRTC compile_time_trace to '%s'\n", trace_path.c_str());
         }
@@ -4737,8 +4762,7 @@ void* wp_cuda_load_module(void* context, const char* path)
         if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
             fprintf(
                 stderr,
-                "Warp error: Failed to load HIP code object from '%s'. PTX is not supported on HIP; use HSACO.\n",
-                path
+                "Warp error: Failed to load HIP code object from '%s'. PTX is not supported on HIP; use HSACO.\n", path
             );
             return NULL;
         }

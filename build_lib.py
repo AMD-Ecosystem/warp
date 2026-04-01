@@ -501,12 +501,12 @@ def main(argv: list[str] | None = None) -> int:
             args.host_compiler = build_dll.set_msvc_env(msvc_path=args.msvc_path, sdk_path=args.sdk_path)
         else:
             # attempt to find MSVC in environment (will set vcvars)
-            args.host_compiler = build_dll.find_host_compiler()
+            args.host_compiler = build_dll.find_host_compiler(hip_enabled=args.enable_hip)
             if not args.host_compiler:
                 print("Warp build error: Could not find MSVC compiler")
                 return 1
     else:
-        args.host_compiler = build_dll.find_host_compiler()
+        args.host_compiler = build_dll.find_host_compiler(hip_enabled=args.enable_hip)
         if not args.host_compiler:
             print("Warp build error: Could not find C++ compiler")
             return 1
