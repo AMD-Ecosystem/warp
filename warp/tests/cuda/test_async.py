@@ -486,10 +486,21 @@ num_copy_elems = 1000000
 num_copy_tests = 0
 
 
+# Copy tests that are flaky under ROCm/HIP: they pass reliably in isolation but
+# can fail in the full serial (non-pooled) suite due to HSA signal-pool state
+# leakage across tests. Skipped only on HIP; unaffected on CUDA.
+_HIP_FLAKY_COPY_TESTS = frozenset(
+    {
+        "test_copy_s2s_d2d_SrcPoolOff_DstPoolOff_NoStream_Grad_NoGraph_AccessSrcDst",
+    }
+)
+
+
 def add_copy_test(test_name, src_ctor, dst_ctor, src_device, dst_device, n, params):
     def test_func(
         test,
         device,
+        test_name=test_name,
         src_ctor=src_ctor,
         dst_ctor=dst_ctor,
         src_device=src_device,
@@ -497,6 +508,8 @@ def add_copy_test(test_name, src_ctor, dst_ctor, src_device, dst_device, n, para
         n=n,
         params=params,
     ):
+        if test_name in _HIP_FLAKY_COPY_TESTS and (src_device.is_hip or dst_device.is_hip):
+            test.skipTest("Flaky under ROCm/HIP (HSA signal-pool state leakage in serial runs); passes in isolation")
         return copy_template(test, src_ctor, dst_ctor, src_device, dst_device, n, params)
 
     add_function_test(TestAsync, test_name, test_func, check_output=False)
