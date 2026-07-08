@@ -16,7 +16,13 @@
 #include "hip_util.h"
 
 #include <hipcub/hipcub.hpp>
-namespace cub = hipcub;
+// cuBQL's builder headers (builder/cuda/builder_common.h) alias cub onto hipcub
+// with `namespace cub { using namespace hipcub; }`. A namespace *alias*
+// (`namespace cub = hipcub;`) cannot coexist with that namespace *definition* in
+// the same translation unit, so use the reopen-namespace form here too. Both
+// forms make Warp's own `cub::` uses (BlockReduce, DeviceRadixSort) resolve to
+// hipcub, and reopening the namespace with duplicate using-directives is legal.
+namespace cub { using namespace hipcub; }
 #else
 #include <cub/cub.cuh>
 #include <cuda.h>
@@ -26,23 +32,19 @@ namespace cub = hipcub;
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 #define REORDER_HOST_TREE
 
-// cuBQL has no HIP port. Force it off on HIP so all cuBQL-namespaced helpers
-// below compile to the stub variants under `#else // WP_DISABLE_CUBQL`.
-#if defined(__HIP_PLATFORM_AMD__) && !defined(WP_DISABLE_CUBQL)
-#define WP_DISABLE_CUBQL 1
-#endif
-
-#if !defined(__HIP_PLATFORM_AMD__)
 // CUB must be included before cuBQL. cuBQL's math/common.h includes <stdexcept>,
 // which causes CCCL's _CCCL_HAS_EXCEPTIONS() to be true when typeid.h is later
 // pulled in by CUB. This makes __throw_out_of_range non-constexpr, breaking a
 // static_assert in typeid.h on GCC < 12 (which lacks P2448R2 relaxed constexpr).
+// On HIP hipcub is already included above; cuBQL now has a HIP port so it is
+// pulled in on both toolchains unless explicitly disabled with WP_DISABLE_CUBQL.
+#if !defined(__HIP_PLATFORM_AMD__)
 #include <cub/cub.cuh>
+#endif
 
 #ifndef WP_DISABLE_CUBQL
 #include "cuBQL/bvh.h"
 #endif
-#endif  // !__HIP_PLATFORM_AMD__
 
 
 extern CUcontext get_current_context();

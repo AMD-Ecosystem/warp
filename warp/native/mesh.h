@@ -1976,6 +1976,11 @@ CUDA_CALLABLE inline bool mesh_query_ray(
     // Speculative BVH traversal with pre-tested children (HIP-only).
     Mesh mesh = mesh_get(id);
 
+    // cuBQL-backed meshes have no Warp mesh.bvh; dispatch to the cuBQL
+    // traversal before touching mesh.bvh (whose root pointer is null here).
+    if (mesh_uses_cubql(mesh))
+        return mesh_query_ray_cubql(mesh, start, dir, max_t, t, u, v, sign, normal, face, root);
+
     // Stack stores node index + entry distance for early termination
     struct StackEntry {
         int node;

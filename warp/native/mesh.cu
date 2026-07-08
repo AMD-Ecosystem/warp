@@ -8,16 +8,6 @@
 #include "mesh.h"
 #include "scan.h"
 
-// cuBQL has no HIP port. Force it off on HIP so the Mesh device builder takes
-// the cuBQL-disabled branch and returns 0 to the caller, mirroring the policy
-// applied in bvh.cu. Without this guard, `wp::cubql_bvh_create_device` resolves
-// to its no-op stub (which only zeroes the CuBQLBVH descriptor), `mesh_create`
-// still returns a non-zero handle, and any subsequent `mesh_query_ray` kernel
-// dereferences NULL on the GPU.
-#if defined(__HIP_PLATFORM_AMD__) && !defined(WP_DISABLE_CUBQL)
-#define WP_DISABLE_CUBQL 1
-#endif
-
 extern CUcontext get_current_context();
 
 namespace wp {

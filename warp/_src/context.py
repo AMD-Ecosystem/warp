@@ -3985,20 +3985,11 @@ class Device:
     def supports_cubql(self) -> bool:
         """A boolean indicating whether the cuBQL BVH backend is usable on this device.
 
-        Returns ``True`` for CPU devices (cuBQL has a CPU builder) and for non-HIP
-        CUDA devices when the native library was compiled with cuBQL support.
-        Returns ``False`` for HIP/ROCm devices: cuBQL has no HIP port, so the
-        device-side cuBQL entry points compile to no-op stubs and constructing a
-        :class:`~warp._src.types.Mesh` with ``bvh_constructor="cubql"`` would
-        otherwise produce a handle whose internal pointers are NULL (causing a
-        GPU memory access fault on the first query).
+        Returns ``True`` when the native library was compiled with cuBQL support.
+        cuBQL has both a CPU builder and (since its ROCm/HIP port) GPU builders
+        that compile for CUDA and HIP alike, so this tracks the build-time
+        ``WP_DISABLE_CUBQL`` switch rather than special-casing the backend.
         """
-        if self.is_hip:
-            return False
-        if self.is_cpu:
-            # CPU cuBQL builder is always available when the host library is
-            # compiled with cuBQL support.
-            return is_cubql_available()
         return is_cubql_available()
 
     @property
