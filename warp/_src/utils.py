@@ -1991,7 +1991,7 @@ class ScopedCapture:
 
     def __enter__(self):
         try:
-            wp.capture_begin(
+            result = wp.capture_begin(
                 device=self.device,
                 stream=self.stream,
                 force_module_load=self.force_module_load,
@@ -1999,7 +1999,11 @@ class ScopedCapture:
                 apic=self.apic,
                 capture_mode=self.capture_mode,
             )
-            self.active = True
+            # capture_begin returns False on devices where graph capture is
+            # unsupported (currently HIP/ROCm). Leave self.active = False so
+            # __exit__ skips capture_end and self.graph stays None.
+            if result is not False:
+                self.active = True
             return self
         except:
             raise

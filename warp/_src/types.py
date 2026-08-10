@@ -5959,6 +5959,17 @@ class Mesh:
             bvh_constructor = BvhConstructor.from_str(bvh_constructor)
 
         if bvh_constructor == BvhConstructor.CUBQL:
+            if not self.device.supports_cubql:
+                # cuBQL has no HIP port and the device-side stubs would otherwise
+                # leave the Mesh with NULL internal pointers, producing a GPU
+                # memory access fault on the first mesh query. Fail early with a
+                # clear error instead of letting the worker crash.
+                raise RuntimeError(
+                    f"bvh_constructor='cubql' is not supported on device '{self.device}'. "
+                    "cuBQL is unavailable on HIP/ROCm devices and on builds without cuBQL "
+                    "support. Use 'sah', 'median', or 'lbvh' instead, or filter test devices "
+                    "with `Device.supports_cubql`."
+                )
             if groups is not None:
                 raise RuntimeError("Grouped mesh queries are not supported with bvh_constructor='cubql'")
             if support_winding_number:
@@ -6006,7 +6017,16 @@ class Mesh:
             )
 
         if not self.id:
-            raise RuntimeError(f"Failed to create mesh: {self.runtime.get_error_string()}")
+            # The native builder signals failure with a 0 handle (e.g. cuBQL was
+            # requested in a build that disabled cuBQL support). Convert that
+            # into a Python exception so callers don't end up launching kernels
+            # with mesh_id=0 and dereferencing NULL on the device.
+            raise RuntimeError(
+                "Failed to create wp.Mesh on device "
+                f"'{self.device}' with bvh_constructor='{bvh_constructor.name.lower()}'. "
+                "The native mesh builder returned a null handle; check the "
+                "stderr output for the underlying error."
+            )
 
     def __del__(self):
         if not self.id:

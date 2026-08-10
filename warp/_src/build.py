@@ -8,6 +8,7 @@ import hashlib
 import json
 import ntpath
 import os
+import re
 import shutil
 import threading
 import time
@@ -32,6 +33,60 @@ LTO_CACHE_KEY_LENGTH = 16
 # Warp can feed it back into this function without treating arbitrary
 # version-named base directories as already resolved.
 _resolved_kernel_cache_dir: str | None = None
+
+
+_HIP_EXTRA_INCLUDE_DIRS_CACHE: "list[str] | None" = None
+
+
+def _hip_extra_include_dirs() -> "list[str]":
+    """Return extra `-I` directories needed by HIPRTC compiles.
+
+    ROCm 7's comgr embeds clang but doesn't always auto-detect either
+    (a) the clang resource directory for the ``<rocm>/lib/llvm/lib/clang/<ver>``
+        layout (so HIPRTC fails to find ``<float.h>`` / ``<stdint.h>`` etc.), or
+    (b) the HIP runtime headers under ``<rocm>/include`` (so HIPRTC fails on
+        ``#include <hip/hip_runtime.h>``).
+    We feed both explicitly when present.
+    """
+    global _HIP_EXTRA_INCLUDE_DIRS_CACHE
+    if _HIP_EXTRA_INCLUDE_DIRS_CACHE is not None:
+        return _HIP_EXTRA_INCLUDE_DIRS_CACHE
+
+    candidate_roots: "list[str]" = []
+    for var in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        v = os.environ.get(var)
+        if v:
+            candidate_roots.append(v)
+    candidate_roots.append("/opt/rocm")
+
+    dirs: "list[str]" = []
+    seen: "set[str]" = set()
+
+    def _add(path: str) -> None:
+        if path and os.path.isdir(path) and path not in seen:
+            dirs.append(path)
+            seen.add(path)
+
+    for root in candidate_roots:
+        clang_root = os.path.join(root, "lib", "llvm", "lib", "clang")
+        if os.path.isdir(clang_root):
+            try:
+                versions = [
+                    d for d in os.listdir(clang_root)
+                    if re.fullmatch(r"\d+(\.\d+)*", d)
+                    and os.path.isdir(os.path.join(clang_root, d))
+                ]
+            except OSError:
+                versions = []
+            if versions:
+                versions.sort(key=lambda s: [int(p) for p in s.split(".")])
+                _add(os.path.join(clang_root, versions[-1], "include"))
+
+        # HIP runtime headers (hip/hip_runtime.h and friends).
+        _add(os.path.join(root, "include"))
+
+    _HIP_EXTRA_INCLUDE_DIRS_CACHE = dirs
+    return dirs
 
 
 # builds cuda source to PTX or CUBIN using NVRTC (output type determined by output_path extension)
@@ -80,15 +135,34 @@ def build_cuda(
         # Per-thread directory shared across module compilations for PCH reuse,
         # isolated between threads and processes to avoid .pch races.
         pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
-        arch_suffix_bytes = arch_suffix.encode("utf-8")
+
+        # Calling convention for wp_cuda_compile_program (see warp.h):
+        #   - CUDA: arch is the numeric arch (e.g. 75) and arch_suffix is "" / "a" / "f"
+        #   - HIP : arch is 0 and arch_suffix carries the full gfx target string
+        #           (e.g., "gfx942"). We accept a string `arch` (legacy AMD path)
+        #           and route it through arch_suffix transparently.
+        if isinstance(arch, str):
+            arch_int = 0
+            arch_suffix_bytes = arch.encode("utf-8")
+        else:
+            arch_int = arch if arch is not None else 0
+            arch_suffix_bytes = arch_suffix.encode("utf-8")
+
+        extra_include_dirs: "list[bytes]" = []
+        runtime = getattr(warp._src.context, "runtime", None)
+        if runtime is not None and getattr(runtime, "is_hip", False):
+            extra_include_dirs = [d.encode("utf-8") for d in _hip_extra_include_dirs()]
+        num_extra = len(extra_include_dirs)
+        extra_arr = (ctypes.c_char_p * num_extra)(*extra_include_dirs) if num_extra else None
+
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
             program_name_bytes,
-            arch,
+            arch_int,
             arch_suffix_bytes,
             inc_path,
-            0,
-            None,
+            num_extra,
+            extra_arr,
             config == "debug",
             optimization_level,
             warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
@@ -659,10 +733,24 @@ def build_lto_solver(
                 max_smem_bytes = 232448
                 max_smem_is_estimate = True
                 for d in warp.get_cuda_devices():
-                    if d.arch == arch:
-                        max_smem_bytes = d.max_shared_memory_per_block
-                        max_smem_is_estimate = False
-                        break
+                    # On HIP, arch is a gfx string and devices expose `arch_str`. On CUDA, arch is an int.
+                    arch_match = (
+                        (isinstance(arch, str) and getattr(d, "arch_str", None) == arch)
+                        or (isinstance(arch, int) and d.arch == arch)
+                    )
+                    if arch_match:
+                        # Prefer device-reported limit when present (upstream); fall back to a runtime query (AMD).
+                        device_limit = getattr(d, "max_shared_memory_per_block", None)
+                        if device_limit:
+                            max_smem_bytes = device_limit
+                            max_smem_is_estimate = False
+                            break
+                        queried_bytes = warp._src.context.runtime.core.wp_cuda_get_max_shared_memory(d.context)
+                        if queried_bytes > 0:
+                            max_smem_bytes = queried_bytes
+                            max_smem_is_estimate = False
+                            break
+
                 if smem_estimate_bytes > max_smem_bytes:
                     source = "estimated limit" if max_smem_is_estimate else "device-reported limit"
                     hint = (
