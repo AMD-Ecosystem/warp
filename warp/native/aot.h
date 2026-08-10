@@ -5,10 +5,10 @@
 
 // Warp AOT (Ahead-Of-Time) utilities for C++ integration
 // This header provides common boilerplate for C++ programs that use
-// Warp-generated kernels via PTX loading or source inclusion.
+// Warp-generated kernels via PTX/HSACO loading or source inclusion.
 
 // Auto-detect CUDA compilation
-#if defined(__CUDACC__) || defined(__CUDA__) || defined(__NVCC__)
+#if defined(__CUDACC__) || defined(__CUDA__) || defined(__NVCC__) || defined(__HIPCC__)
 #define WP_ENABLE_CUDA 1
 #else
 #define WP_ENABLE_CUDA 0
@@ -24,9 +24,32 @@
 #include <cstdlib>  // For exit() in error checking macros
 #include <iostream>  // For std::cerr in error checking macros
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#else
 #include <cuda.h>  // CUDA Driver API
 #include <cuda_runtime.h>  // CUDA Runtime API
+#endif
 
+#if defined(__HIP_PLATFORM_AMD__)
+#ifndef CHECK_CU
+// HIP Driver-like API error checking
+#define CHECK_CU(call) \
+        do { \
+            hipError_t err = call; \
+            if (err != hipSuccess) { \
+                std::cerr << "HIP API error at " << __FILE__ << ":" << __LINE__ \
+                          << " - " << hipGetErrorString(err) << std::endl; \
+                exit(1); \
+            } \
+        } while(0)
+#endif
+
+#ifndef CHECK_CUDA
+// HIP Runtime API error checking
+#define CHECK_CUDA(call) CHECK_CU(call)
+#endif
+#else
 #ifndef CHECK_CU
 // CUDA Driver API error checking
 #define CHECK_CU(call) \
@@ -53,6 +76,7 @@
                 exit(1); \
             } \
         } while(0)
+#endif
 #endif
 
 #endif  // WP_ENABLE_CUDA

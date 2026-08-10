@@ -62,7 +62,7 @@ typedef unsigned long long uint64_t;
 
 #endif // __CUDACC_RTC__
 
-#if defined(__CUDACC__) || defined(__HIP__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 // Only define __hostdev__ qualifier when using NVIDIA CUDA or HIP compilers
 #ifndef __hostdev__
 #define __hostdev__ __host__ __device__ // Runs on the CPU and GPU, called from the CPU or the GPU

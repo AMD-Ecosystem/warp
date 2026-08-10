@@ -13,7 +13,10 @@ extern CUcontext get_current_context();
 
 namespace wp {
 
-__global__ void compute_triangle_bounds(int n, const vec3* points, const int* indices, vec3* lowers, vec3* uppers)
+__global__ void compute_triangle_bounds(
+    int n, const vec3* WP_RESTRICT points, const int* WP_RESTRICT indices, vec3* WP_RESTRICT lowers,
+    vec3* WP_RESTRICT uppers
+)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -35,7 +38,9 @@ __global__ void compute_triangle_bounds(int n, const vec3* points, const int* in
     }
 }
 
-__global__ void compute_mesh_edge_lengths(int n, const vec3* points, const int* indices, float* edge_lengths)
+__global__ void compute_mesh_edge_lengths(
+    int n, const vec3* WP_RESTRICT points, const int* WP_RESTRICT indices, float* WP_RESTRICT edge_lengths
+)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -54,7 +59,7 @@ __global__ void compute_mesh_edge_lengths(int n, const vec3* points, const int* 
     }
 }
 
-__global__ void compute_average_mesh_edge_length(int n, float* sum_edge_lengths, Mesh* m)
+__global__ void compute_average_mesh_edge_length(int n, float* WP_RESTRICT sum_edge_lengths, Mesh* WP_RESTRICT m)
 {
     m->average_edge_length = sum_edge_lengths[n - 1] / (3 * n);
 }
@@ -65,10 +70,10 @@ __global__ void bvh_refit_with_solid_angle_kernel(
     int* __restrict__ child_count,
     BVHPackedNodeHalf* __restrict__ node_lowers,
     BVHPackedNodeHalf* __restrict__ node_uppers,
-    const vec3* points,
-    const int* indices,
-    const int* primitive_indices,
-    SolidAngleProps* solid_angle_props
+    const vec3* WP_RESTRICT points,
+    const int* WP_RESTRICT indices,
+    const int* WP_RESTRICT primitive_indices,
+    SolidAngleProps* WP_RESTRICT solid_angle_props
 )
 {
     int index = blockDim.x * blockIdx.x + threadIdx.x;

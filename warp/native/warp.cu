@@ -11,9 +11,11 @@
 #include "scan.h"
 #include "sort.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 
+#if !defined(__HIP_PLATFORM_AMD__)
 #include <nvPTXCompiler.h>
 #include <nvrtc.h>
 #if WP_ENABLE_MATHDX
@@ -22,6 +24,7 @@
 #include <libcusolverdx.h>
 #include <libmathdx.h>
 #include <nvJitLink.h>
+#endif
 #endif
 
 #include <algorithm>
@@ -37,8 +40,16 @@
 
 #define check_any(result) (check_generic(result, __FILE__, __LINE__))
 #define check_nvrtc(code) (check_nvrtc_result(code, __FILE__, __LINE__))
+#if !defined(__HIP_PLATFORM_AMD__)
 #define check_nvptx(code) (check_nvptx_result(code, __FILE__, __LINE__))
+#else
+#define check_nvptx(code) (false)
+#endif
+#if WP_ENABLE_MATHDX && !defined(__HIP_PLATFORM_AMD__)
 #define check_nvjitlink(handle, code) (check_nvjitlink_result(handle, code, __FILE__, __LINE__))
+#else
+#define check_nvjitlink(handle, code) (false)
+#endif
 #define check_cufftdx(code) (check_cufftdx_result(code, __FILE__, __LINE__))
 #define check_cublasdx(code) (check_cublasdx_result(code, __FILE__, __LINE__))
 #define check_cusolver(code) (check_cusolver_result(code, __FILE__, __LINE__))
@@ -89,6 +100,7 @@ bool check_nvrtc_result(nvrtcResult result, const char* file, int line)
     return false;
 }
 
+#if !defined(__HIP_PLATFORM_AMD__)
 bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
 {
     if (result == NVPTXCOMPILE_SUCCESS)
@@ -125,6 +137,7 @@ bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
     fprintf(stderr, "Warp PTX compilation error %u: %s (%s:%d)\n", unsigned(result), error_string, file, line);
     return false;
 }
+#endif
 
 bool check_generic(int result, const char* file, int line)
 {
@@ -138,6 +151,7 @@ bool check_generic(int result, const char* file, int line)
 
 struct DeviceInfo {
     static constexpr int kNameLen = 128;
+    static constexpr int kArchLen = 32;
 
     CUdevice device = -1;
     CUuuid uuid = { 0 };
@@ -146,6 +160,7 @@ struct DeviceInfo {
     int pci_bus_id = -1;
     int pci_device_id = -1;
     char name[kNameLen] = "";
+    char arch_str[kArchLen] = "";
     int arch = 0;
     int is_uva = 0;
     int pageable_memory_access = 0;
@@ -227,6 +242,14 @@ static std::unordered_map<uint64_t, CaptureInfo*> g_captures;
 // See wp_alloc_device_async() and wp_free_device_async().
 static std::unordered_map<void*, GraphAllocInfo> g_graph_allocs;
 
+#if defined(__HIP_PLATFORM_AMD__)
+// Track allocation stream for each mempool allocation so that
+// wp_free_device_async can create proper inter-stream dependencies.
+// On CUDA, cudaFreeAsync(ptr, NULL) provides this implicitly via
+// the legacy null stream; HIP requires explicit event dependencies.
+static std::unordered_map<void*, CUstream> g_alloc_streams;
+#endif
+
 // Memory that cannot be freed immediately gets queued here.
 // Call free_deferred_allocs() to release.
 static std::vector<FreeInfo> g_deferred_free_list;
@@ -295,8 +318,7 @@ int cuda_init()
                 check_cu(
                     cuDeviceGetAttribute_f(&g_devices[i].sm_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device)
                 );
-#ifdef CUDA_VERSION
-#if CUDA_VERSION >= 12000
+#if !defined(__HIP_PLATFORM_AMD__) && defined(CUDA_VERSION) && CUDA_VERSION >= 12000
                 int device_attribute_integrated = 0;
                 check_cu(cuDeviceGetAttribute_f(&device_attribute_integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device));
                 if (device_attribute_integrated == 0) {
@@ -307,11 +329,31 @@ int cuda_init()
                     // integrated devices do not support CUDA IPC
                     g_devices[i].is_ipc_supported = 0;
                 }
+#else
+#if defined(__HIP_PLATFORM_AMD__)
+                g_devices[i].is_ipc_supported = 0;
+                int prev_device = -1;
+                if (hipGetDevice(&prev_device) == hipSuccess) {
+                    if (hipSetDevice(i) == hipSuccess) {
+                        void* ipc_ptr = nullptr;
+                        if (hipMalloc(&ipc_ptr, 4) == hipSuccess) {
+                            CUipcMemHandle mem_handle;
+                            if (cuIpcGetMemHandle_f(&mem_handle, (CUdeviceptr)ipc_ptr) == CUDA_SUCCESS) {
+                                g_devices[i].is_ipc_supported = 1;
+                            }
+                            ignore_cuda_error(hipFree(ipc_ptr));
+                        }
+                        ignore_cuda_error(hipSetDevice(prev_device));
+                    }
+                }
+#else
+                g_devices[i].is_ipc_supported = 0;
 #endif
 #endif
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].max_smem_bytes, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device
                 ));
+#if !defined(__HIP_PLATFORM_AMD__)
                 int major = 0;
                 int minor = 0;
                 check_cu(cuDeviceGetAttribute_f(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
@@ -323,6 +365,17 @@ int cuda_init()
                     g_devices[i].arch = 101;  // Thor SM change
                 }
 #endif
+#endif
+#else
+                g_devices[i].arch = 0;
+#endif
+#if defined(__HIP_PLATFORM_AMD__)
+                cudaDeviceProp props;
+                if (check_cuda(cudaGetDeviceProperties(&props, i))) {
+                    snprintf(g_devices[i].arch_str, DeviceInfo::kArchLen, "%s", props.gcnArchName);
+                }
+#else
+                snprintf(g_devices[i].arch_str, DeviceInfo::kArchLen, "sm_%d", g_devices[i].arch);
 #endif
                 g_device_map[device] = &g_devices[i];
             } else {
@@ -375,11 +428,13 @@ static ContextInfo* get_context_info(CUcontext ctx)
             DeviceInfo* device_info = g_device_map[device];
 
             // workaround for https://nvbugspro.nvidia.com/bug/4456003
+#if !defined(__HIP_PLATFORM_AMD__)
             if (device_info->is_mempool_supported) {
                 void* dummy = NULL;
                 check_cuda(cudaMallocAsync(&dummy, 1, NULL));
                 check_cuda(cudaFreeAsync(dummy, NULL));
             }
+#endif
 
             ContextInfo context_info;
             context_info.device_info = device_info;
@@ -456,7 +511,8 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
-        if (CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040) {
+#if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
+        if (wp_cuda_driver_version() >= 12040) {
             // pause the capture so that the alloc/memcpy won't be captured
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(WP_CURRENT_CONTEXT, stream, &graph))
@@ -488,7 +544,9 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
                 return false;
 
             free_devptr = false;  // memory is owned by the graph, doesn't need to be freed
-        } else {
+        } else
+#endif
+        {
             // older CUDA can't pause/resume the capture, so stage in CPU memory
             void* hostptr = wp_alloc_host(size);
             if (!hostptr) {
@@ -565,13 +623,35 @@ static int free_deferred_allocs(void* context = NULL)
 
             if (free_info.is_async) {
                 // this could be a regular stream-ordered allocation or a graph allocation
+#if defined(__HIP_PLATFORM_AMD__)
+                ContextInfo* ci = get_context_info(free_info.context);
+                CUstream free_stream = ci ? ci->stream : NULL;
+
+                // Apply the same cross-stream event dependency as wp_free_device_async
+                // to match CUDA's implicit null-stream synchronization semantics.
+                auto alloc_it = g_alloc_streams.find(free_info.ptr);
+                if (alloc_it != g_alloc_streams.end()) {
+                    CUstream alloc_stream = alloc_it->second;
+                    if (alloc_stream != free_stream && alloc_stream != NULL) {
+                        StreamInfo* alloc_si = get_stream_info(alloc_stream);
+                        if (alloc_si && alloc_si->cached_event) {
+                            check_cu(cuEventRecord_f(alloc_si->cached_event, alloc_stream));
+                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event,
+                                                         CU_EVENT_WAIT_DEFAULT));
+                        }
+                    }
+                    g_alloc_streams.erase(alloc_it);
+                }
+                cudaError_t res = cudaFreeAsync(free_info.ptr, free_stream);
+#else
                 cudaError_t res = cudaFreeAsync(free_info.ptr, NULL);
+#endif
                 if (res != cudaSuccess) {
                     if (res == cudaErrorInvalidValue) {
                         // This can happen if we try to release the pointer but the graph was
                         // never launched, so the memory isn't mapped.
                         // This is fine, so clear the error.
-                        cudaGetLastError();
+                        ignore_cuda_error(cudaGetLastError());
                     } else {
                         // something else went wrong, report error
                         check_cuda(res);
@@ -744,7 +824,7 @@ void wp_free_pinned(void* ptr)
 {
     if (g_alloc_tracker.enabled && ptr)
         g_alloc_tracker.record_free(ptr);
-    cudaFreeHost(ptr);
+    ignore_cuda_error(cudaFreeHost(ptr));
 }
 
 void* wp_alloc_device(void* context, size_t s, const char* tag)
@@ -786,6 +866,11 @@ void wp_free_device_default(void* context, void* ptr)
         g_alloc_tracker.record_free(ptr);
 
     ContextGuard guard(context);
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // Clean up alloc tracking in case async-allocated memory is freed via the default path
+    g_alloc_streams.erase(ptr);
+#endif
 
     // check if a capture is in progress
     if (g_captures.empty()) {
@@ -853,6 +938,12 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
                 g_graph_allocs[ptr] = alloc_info;
             }
         }
+#if defined(__HIP_PLATFORM_AMD__)
+        else {
+            // Track the allocation stream for cross-stream free safety
+            g_alloc_streams[ptr] = stream;
+        }
+#endif
     }
 
     if (g_alloc_tracker.enabled && ptr)
@@ -907,7 +998,34 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             // cudaFreeAsync on the null stream does not block or trigger synchronization, but it postpones
             // the deallocation until a synchronization point is reached, so preceding work on this pointer
             // should safely complete.
+#if defined(__HIP_PLATFORM_AMD__)
+            {
+                ContextInfo* ci = get_context_info(context);
+                CUstream free_stream = ci ? ci->stream : NULL;
+
+                // Look up the stream this pointer was allocated on.
+                // If freeing on a different stream, create an event dependency
+                // so the free waits for all prior work on the allocation stream.
+                // This replicates CUDA's implicit null-stream cross-stream
+                // synchronization that cudaFreeAsync(ptr, NULL) provides.
+                auto it = g_alloc_streams.find(ptr);
+                if (it != g_alloc_streams.end()) {
+                    CUstream alloc_stream = it->second;
+                    if (alloc_stream != free_stream && alloc_stream != NULL) {
+                        StreamInfo* alloc_info = get_stream_info(alloc_stream);
+                        if (alloc_info && alloc_info->cached_event) {
+                            check_cu(cuEventRecord_f(alloc_info->cached_event, alloc_stream));
+                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_info->cached_event,
+                                                         CU_EVENT_WAIT_DEFAULT));
+                        }
+                    }
+                    g_alloc_streams.erase(it);
+                }
+                check_cuda(cudaFreeAsync(ptr, free_stream));
+            }
+#else
             check_cuda(cudaFreeAsync(ptr, NULL));
+#endif
         } else {
             // We must defer the free operation until graph capture completes.
             deferred_free(ptr, context, true);
@@ -927,6 +1045,17 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
         // path is taken again for frees that occur after the conditional completes.
         auto capture_iter = g_captures.find(capture_id);
         if (capture_iter != g_captures.end() && capture_id == get_capture_id(capture_iter->second->stream)) {
+#if defined(__HIP_PLATFORM_AMD__)
+            // hipGraphAddMemFreeNode rejects pointers from hipMallocAsync during
+            // stream capture (hipErrorInvalidValue). It only accepts pointers from
+            // hipGraphAddMemAllocNode on explicitly constructed graphs.
+            // Use hipFreeAsync on the capturing stream instead, the stream capture
+            // mechanism records it as a proper free node in the graph.
+            {
+                CaptureInfo* capture = capture_iter->second;
+                check_cuda(cudaFreeAsync(ptr, capture->stream));
+            }
+#else
             CaptureInfo* capture = capture_iter->second;
             cudaGraph_t graph = get_capture_graph(capture->stream);
             if (!graph) {
@@ -1024,7 +1153,7 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             // return the free node for testing/debugging
             if (dbg_node_ret)
                 *dbg_node_ret = free_node;
-
+#endif
             // we're done with this allocation, it's owned by the graph
             g_graph_allocs.erase(alloc_iter);
         } else {
@@ -1034,12 +1163,33 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             if (alloc_info.graph_destroyed) {
                 if (g_captures.empty()) {
                     // try to free the pointer now
+#if defined(__HIP_PLATFORM_AMD__)
+                    ContextInfo* ci = get_context_info(context);
+                    CUstream free_stream = ci ? ci->stream : NULL;
+
+                    // Apply cross-stream event dependency for CUDA null-stream parity
+                    auto alloc_it = g_alloc_streams.find(ptr);
+                    if (alloc_it != g_alloc_streams.end()) {
+                        CUstream alloc_stream = alloc_it->second;
+                        if (alloc_stream != free_stream && alloc_stream != NULL) {
+                            StreamInfo* alloc_si = get_stream_info(alloc_stream);
+                            if (alloc_si && alloc_si->cached_event) {
+                                check_cu(cuEventRecord_f(alloc_si->cached_event, alloc_stream));
+                                check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event,
+                                                             CU_EVENT_WAIT_DEFAULT));
+                            }
+                        }
+                        g_alloc_streams.erase(alloc_it);
+                    }
+                    cudaError_t res = cudaFreeAsync(ptr, free_stream);
+#else
                     cudaError_t res = cudaFreeAsync(ptr, NULL);
+#endif
                     if (res == cudaErrorInvalidValue) {
                         // This can happen if we try to release the pointer but the graph was
                         // never launched, so the memory isn't mapped.
                         // This is fine, so clear the error.
-                        cudaGetLastError();
+                        ignore_cuda_error(cudaGetLastError());
                     } else {
                         // check for other errors
                         check_cuda(res);
@@ -1184,14 +1334,14 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
 
             if (result != cudaSuccess) {
                 // clear error in destination context
-                cudaGetLastError();
+                ignore_cuda_error(cudaGetLastError());
 
                 // try doing the copy in the source context
                 ContextGuard guard(src_context);
                 result = cudaMemcpyAsync(dst, src, n, cudaMemcpyDefault, cuda_stream);
 
                 // clear error in source context
-                cudaGetLastError();
+                ignore_cuda_error(cudaGetLastError());
             }
         }
 
@@ -1201,9 +1351,9 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
                 // check if either of the pointers was allocated from a mempool
                 void* src_mempool = NULL;
                 void* dst_mempool = NULL;
-                cuPointerGetAttribute_f(&src_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)src);
-                cuPointerGetAttribute_f(&dst_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)dst);
-                cudaGetLastError();  // clear any errors
+                ignore_cu_result(cuPointerGetAttribute_f(&src_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)src));
+                ignore_cu_result(cuPointerGetAttribute_f(&dst_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)dst));
+                ignore_cuda_error(cudaGetLastError());  // clear any errors
                 // check if either of the pointers was allocated during graph capture
                 auto src_alloc = g_graph_allocs.find(src);
                 auto dst_alloc = g_graph_allocs.find(dst);
@@ -1243,8 +1393,12 @@ bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, siz
 
     bool result = true;
 
-#if CUDA_VERSION >= 12080
-    if (wp_cuda_driver_version() >= 12080) {
+#if WP_HAS_MEMCPY_BATCH
+    bool use_batch = true;
+#if !defined(__HIP_PLATFORM_AMD__)
+    use_batch = (wp_cuda_driver_version() >= 12080);
+#endif
+    if (use_batch) {
         CUmemcpyAttributes attr = {};
         attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
         // attr.flags = CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE;
@@ -2509,11 +2663,11 @@ const char* wp_cuda_device_get_name(int ordinal)
     return NULL;
 }
 
-int wp_cuda_device_get_arch(int ordinal)
+const char* wp_cuda_device_get_arch(int ordinal)
 {
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
-        return g_devices[ordinal].arch;
-    return 0;
+        return g_devices[ordinal].arch_str;
+    return NULL;
 }
 
 int wp_cuda_device_get_sm_count(int ordinal)
@@ -3548,8 +3702,8 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         // make sure we terminate the capture
         if (!external) {
             cudaGraph_t graph = NULL;
-            cudaStreamEndCapture(cuda_stream, &graph);
-            cudaGetLastError();
+            ignore_cuda_error(cudaStreamEndCapture(cuda_stream, &graph));
+            ignore_cuda_error(cudaGetLastError());
         }
     };
 
@@ -3902,7 +4056,7 @@ int wp_cuda_graph_alloc_query(void* alloc_node, void* query_node)
 }
 
 // Support for conditional graph nodes available with CUDA 12.4+.
-#if CUDA_VERSION >= 12040
+#if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
 
 // CUBIN or PTX data for compiled conditional modules, loaded on demand, keyed on device architecture
 using ModuleKey = std::pair<int, bool>;  // <arch, use_ptx>
@@ -4598,7 +4752,7 @@ bool write_file(const char* data, size_t size, std::string filename, const char*
     }
 }
 
-#if WP_ENABLE_MATHDX
+#if WP_ENABLE_MATHDX && !defined(__HIP_PLATFORM_AMD__)
 bool check_nvjitlink_result(nvJitLinkHandle handle, nvJitLinkResult result, const char* file, int line)
 {
     if (result != NVJITLINK_SUCCESS) {
@@ -4644,6 +4798,197 @@ size_t wp_cuda_compile_program(
     int* ltoir_input_types
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    (void)ltoirs;
+    (void)ltoir_sizes;
+    (void)ltoir_input_types;
+    (void)pch_dir;
+
+    if (!cuda_src || !program_name || !output_path) {
+        fprintf(stderr, "Warp HIP error: Invalid arguments to wp_cuda_compile_program\n");
+        return size_t(-1);
+    }
+
+    if (precompiled_headers) {
+        fprintf(stderr, "Warp warning: HIPRTC does not support precompiled headers, ignoring request\n");
+    }
+    if (num_ltoirs > 0) {
+        fprintf(stderr, "Warp warning: HIPRTC LTO inputs are not supported, ignoring %zu inputs\n", num_ltoirs);
+    }
+
+    nvrtcProgram prog;
+    nvrtcResult res = nvrtcCreateProgram(&prog, cuda_src, program_name, 0, nullptr, nullptr);
+    if (!check_nvrtc(res))
+        return size_t(res);
+
+    std::vector<std::string> stored_options;
+    std::vector<const char*> opts;
+
+    // Reserve enough space to prevent vector reallocation which would invalidate c_str() pointers
+    stored_options.reserve(32 + num_cuda_include_dirs);
+
+    // On HIP, the CUDA-style numeric `arch` is unused; the full gfx target string
+    // (e.g. "gfx942") is passed in via `arch_suffix`. See the wp_cuda_compile_program
+    // declaration in warp.h for the calling convention.
+    (void)arch;
+    if (arch_suffix && arch_suffix[0]) {
+        stored_options.push_back(std::string("--gpu-architecture=") + arch_suffix);
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (include_dir && include_dir[0]) {
+        stored_options.push_back(std::string("-I") + include_dir);
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    for (int i = 0; i < num_cuda_include_dirs; ++i) {
+        if (cuda_include_dirs && cuda_include_dirs[i]) {
+            stored_options.push_back(std::string("-I") + cuda_include_dirs[i]);
+            opts.push_back(stored_options.back().c_str());
+        }
+    }
+
+    stored_options.push_back("--std=c++17");
+    opts.push_back(stored_options.back().c_str());
+
+    if (debug) {
+        stored_options.push_back("-O0");
+        opts.push_back(stored_options.back().c_str());
+        stored_options.push_back("-g");
+        opts.push_back(stored_options.back().c_str());
+        stored_options.push_back("-D_DEBUG");
+        opts.push_back(stored_options.back().c_str());
+    } else {
+        if (optimization_level >= 0) {
+            stored_options.push_back(std::string("-O") + std::to_string(optimization_level));
+            opts.push_back(stored_options.back().c_str());
+        }
+        // Match NVRTC: define NDEBUG in release mode
+        stored_options.push_back("-DNDEBUG");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    // Match NVRTC: define WP_ENABLE_MATHDX (always 0 on HIP)
+    stored_options.push_back("-DWP_ENABLE_MATHDX=0");
+    opts.push_back(stored_options.back().c_str());
+
+    if (verify_fp) {
+        stored_options.push_back("-DWP_VERIFY_FP");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (fast_math) {
+        stored_options.push_back("-ffast-math");
+        opts.push_back(stored_options.back().c_str());
+        // Match NVRTC --use_fast_math: substitute sinf/cosf/expf/logf etc.
+        // with single-instruction approximate hardware intrinsics.
+        // powf is unaffected (no approximate hardware instruction on CDNA).
+        stored_options.push_back("-fgpu-approx-transcendentals");
+        opts.push_back(stored_options.back().c_str());
+        // Match NVRTC --ftz=true (part of --use_fast_math): flush
+        // single-precision denormals to zero for faster FP execution.
+        stored_options.push_back("-fgpu-flush-denormals-to-zero");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    // Match NVRTC default: strict IEEE 754 floating-point semantics.
+    // These override the dangerous parts of -ffast-math while keeping
+    // the transcendental substitutions from -fgpu-approx-transcendentals.
+    stored_options.push_back("-fno-finite-math-only");   // preserve inf/NaN
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-associative-math");   // no reordering min/max chains
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-reciprocal-math");    // no unsafe 1/x transforms
+    opts.push_back(stored_options.back().c_str());
+
+    // Match NVRTC default: safe pointer aliasing for reinterpret_casts
+    stored_options.push_back("-fno-strict-aliasing");
+    opts.push_back(stored_options.back().c_str());
+
+    if (fuse_fp) {
+        stored_options.push_back("-ffp-contract=fast");
+        opts.push_back(stored_options.back().c_str());
+    } else {
+        // Match NVRTC --fmad=false: disable FMA fusion entirely
+        stored_options.push_back("-ffp-contract=off");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (lineinfo) {
+        stored_options.push_back("-gline-tables-only");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    // Suppress warnings matching NVRTC's --diag-suppress=177,550
+    stored_options.push_back("-Wno-unused-variable");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-Wno-unused-but-set-variable");
+    opts.push_back(stored_options.back().c_str());
+
+    if (verbose) {
+        fprintf(stdout, "HIPRTC options:\n");
+        for (auto option : opts)
+            fprintf(stdout, "%s\n", option);
+    }
+
+    std::chrono::steady_clock::time_point compile_start;
+    if (compile_time_trace)
+        compile_start = std::chrono::steady_clock::now();
+
+    res = nvrtcCompileProgram(prog, int(opts.size()), opts.data());
+
+    if (compile_time_trace) {
+        const auto compile_end = std::chrono::steady_clock::now();
+        const double compile_ms = std::chrono::duration<double, std::milli>(compile_end - compile_start).count();
+        const std::string trace_path = std::string(output_path) + "_compile-time-trace.json";
+        const std::string trace = std::string("{\n")
+            + "  \"tool\": \"hiprtc\",\n"
+            + "  \"compile_ms\": " + std::to_string(compile_ms) + ",\n"
+            + "  \"result\": " + std::to_string(static_cast<int>(res)) + "\n"
+            + "}\n";
+        if (!write_file(trace.data(), trace.size(), trace_path, "wb")) {
+            fprintf(stderr, "Warp warning: Failed to write HIPRTC compile_time_trace to '%s'\n", trace_path.c_str());
+        }
+    }
+
+    if (res != NVRTC_SUCCESS || verbose) {
+        size_t log_size = 0;
+        if (check_nvrtc(nvrtcGetProgramLogSize(prog, &log_size)) && log_size > 0) {
+            std::vector<char> log(log_size);
+            if (check_nvrtc(nvrtcGetProgramLog(prog, log.data()))) {
+                if (res != NVRTC_SUCCESS)
+                    fprintf(stderr, "%s", log.data());
+                else
+                    fprintf(stdout, "%s", log.data());
+            }
+        }
+
+        if (res != NVRTC_SUCCESS) {
+            nvrtcDestroyProgram(&prog);
+            return size_t(res);
+        }
+    }
+
+    size_t code_size = 0;
+    if (!check_nvrtc(nvrtcGetPTXSize(prog, &code_size))) {
+        nvrtcDestroyProgram(&prog);
+        return size_t(-1);
+    }
+
+    std::vector<char> code(code_size);
+    if (!check_nvrtc(nvrtcGetPTX(prog, code.data()))) {
+        nvrtcDestroyProgram(&prog);
+        return size_t(-1);
+    }
+
+    if (!write_file(code.data(), code.size(), output_path, "wb")) {
+        nvrtcDestroyProgram(&prog);
+        return size_t(-1);
+    }
+
+    check_nvrtc(nvrtcDestroyProgram(&prog));
+    return res;
+#else
     // use file extension to determine whether to output PTX or CUBIN
     const char* output_ext = strrchr(output_path, '.');
     bool use_ptx = output_ext && strcmp(output_ext + 1, "ptx") == 0;
@@ -4960,6 +5305,7 @@ size_t wp_cuda_compile_program(
     check_nvrtc(nvrtcDestroyProgram(&prog));
 
     return res;
+#endif
 }
 
 #if WP_ENABLE_MATHDX
@@ -5287,6 +5633,16 @@ void* wp_cuda_load_module(void* context, const char* path)
     CUmodule module = NULL;
 
     if (load_ptx) {
+#if defined(__HIP_PLATFORM_AMD__)
+        if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
+            fprintf(
+                stderr,
+                "Warp error: Failed to load HIP code object from '%s'. PTX is not supported on HIP; use HSACO.\n",
+                path
+            );
+            return NULL;
+        }
+#else
         if (check_cu(cuDriverGetVersion_f(&driver_cuda_version)) && driver_cuda_version >= CUDA_VERSION) {
             // let the driver compile the PTX
 
@@ -5349,6 +5705,7 @@ void* wp_cuda_load_module(void* context, const char* path)
                 return NULL;
             }
         }
+#endif
     } else {
         // load CUBIN
         if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
@@ -5721,7 +6078,11 @@ void wp_cuda_graphics_device_ptr_and_size(void* context, void* resource, uint64_
     size_t bytes;
     check_cu(cuGraphicsResourceGetMappedPointer_f(&device_ptr, &bytes, *(CUgraphicsResource*)resource));
 
+#if defined(__HIP_PLATFORM_AMD__)
+    *ptr = reinterpret_cast<uint64_t>(device_ptr);
+#else
     *ptr = device_ptr;
+#endif
     *size = bytes;
 }
 

@@ -47,7 +47,7 @@ template <> struct _svd_config<double> {
 
 template <typename Type> inline CUDA_CALLABLE Type recipSqrt(Type x)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return ::rsqrt(x);
 #else
     return Type(1) / sqrt(x);

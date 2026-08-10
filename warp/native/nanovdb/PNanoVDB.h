@@ -77,7 +77,7 @@
 #ifndef __CUDACC_RTC__
 #include <stdint.h>
 #endif
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #define PNANOVDB_BUF_FORCE_INLINE static __host__ __device__ __forceinline__
 #elif defined(_WIN32)
 #define PNANOVDB_BUF_FORCE_INLINE static inline __forceinline
@@ -275,7 +275,7 @@ void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value
 
 // force inline
 #if defined(PNANOVDB_C)
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #define PNANOVDB_FORCE_INLINE static __host__ __device__ __forceinline__
 #elif defined(_WIN32)
 #define PNANOVDB_FORCE_INLINE static inline __forceinline
@@ -291,7 +291,7 @@ void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value
 // struct typedef, static const, inout
 #if defined(PNANOVDB_C)
 #define PNANOVDB_STRUCT_TYPEDEF(X) typedef struct X X;
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define PNANOVDB_STATIC_CONST constexpr __constant__
 #else
 #define PNANOVDB_STATIC_CONST static const

@@ -435,6 +435,7 @@ using CUipcMemHandle = hipIpcMemHandle_t;
 using cuuint64_t = uint64_t;
 using CUgraphicsResource = hipGraphicsResource_t;
 using CUarray = hipArray_t;
+using CUmipmappedArray = hipMipmappedArray_t;
 using CUtexObject = hipTextureObject_t;
 using CUgraph = hipGraph_t;
 using CUgraphNode = hipGraphNode_t;

@@ -9,12 +9,20 @@
 #include "temp_buffer.h"
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_reduce.cuh>
+#endif
 
 namespace {
 
 template <typename T>
-__global__ void cwise_mult_kernel(int len, int stride_a, int stride_b, const T* a, const T* b, T* out)
+__global__ void cwise_mult_kernel(
+    int len, int stride_a, int stride_b, const T* WP_RESTRICT a, const T* WP_RESTRICT b, T* WP_RESTRICT out
+)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= len)

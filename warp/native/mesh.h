@@ -21,10 +21,10 @@ struct Mesh {
 
     array_t<int> indices;
 
-    vec3* lowers;
-    vec3* uppers;
+    vec3* WP_RESTRICT lowers;
+    vec3* WP_RESTRICT uppers;
 
-    SolidAngleProps* solid_angle_props;
+    SolidAngleProps* WP_RESTRICT solid_angle_props;
 
     int num_points;
     int num_tris;
@@ -1775,6 +1775,162 @@ CUDA_CALLABLE inline bool mesh_query_ray(
     int root = -1
 )
 {
+#if defined(__HIPCC__) && defined(__HIP_PLATFORM_AMD__)
+    // Speculative BVH traversal with pre-tested children (HIP-only).
+    Mesh mesh = mesh_get(id);
+
+    // cuBQL-backed meshes have no Warp mesh.bvh; dispatch to the cuBQL
+    // traversal before touching mesh.bvh (whose root pointer is null here).
+    if (mesh_uses_cubql(mesh))
+        return mesh_query_ray_cubql(mesh, start, dir, max_t, t, u, v, sign, normal, face, root);
+
+    // Stack stores node index + entry distance for early termination
+    struct StackEntry {
+        int node;
+        float t_entry;
+    };
+    StackEntry stack[BVH_QUERY_STACK_SIZE];
+    int count = 0;
+
+    const vec3 rcp_dir = vec3(1.0f / dir[0], 1.0f / dir[1], 1.0f / dir[2]);
+    const float eps = 1.e-3f;
+
+    float min_t = max_t;
+    int min_face = -1;
+    float min_u = 0.0f;
+    float min_v = 0.0f;
+    float min_sign = 1.0f;
+    vec3 min_normal;
+
+    // Test root node first
+    const int root_idx = root == -1 ? *mesh.bvh.root : root;
+    BVHPackedNodeHalf root_lower = bvh_load_node(mesh.bvh.node_lowers, root_idx);
+    BVHPackedNodeHalf root_upper = bvh_load_node(mesh.bvh.node_uppers, root_idx);
+
+    float root_t;
+    bool root_hit = intersect_ray_aabb(
+        start, rcp_dir,
+        vec3(root_lower.x - eps, root_lower.y - eps, root_lower.z - eps),
+        vec3(root_upper.x + eps, root_upper.y + eps, root_upper.z + eps), root_t
+    );
+
+    if (!root_hit || root_t >= min_t)
+        return false;
+
+    // Push root to start traversal
+    stack[count].node = root_idx;
+    stack[count].t_entry = root_t;
+    count++;
+
+    while (count > 0) {
+        const StackEntry entry = stack[--count];
+
+        // Early termination: skip if this node can't improve min_t
+        if (entry.t_entry >= min_t)
+            continue;
+
+        const int node_index = entry.node;
+        BVHPackedNodeHalf lower = bvh_load_node(mesh.bvh.node_lowers, node_index);
+        BVHPackedNodeHalf upper = bvh_load_node(mesh.bvh.node_uppers, node_index);
+
+        if (lower.b) {
+            // Leaf node - test primitives
+            const int start_index = lower.i;
+            const int end_index = upper.i;
+
+            for (int primitive_counter = start_index; primitive_counter < end_index; primitive_counter++) {
+                const int primitive_index = mesh.bvh.primitive_indices[primitive_counter];
+                const int i = mesh.indices[primitive_index * 3 + 0];
+                const int j = mesh.indices[primitive_index * 3 + 1];
+                const int k = mesh.indices[primitive_index * 3 + 2];
+
+                const vec3 p = mesh.points[i];
+                const vec3 q = mesh.points[j];
+                const vec3 r = mesh.points[k];
+
+                float temp_t, temp_u, temp_v, temp_sign;
+                vec3 n;
+
+                if (intersect_ray_tri_woop(start, dir, p, q, r, temp_t, temp_u, temp_v, temp_sign, &n)) {
+                    if (temp_t < min_t && temp_t >= 0.0f) {
+                        min_t = temp_t;
+                        min_face = primitive_index;
+                        min_u = temp_u;
+                        min_v = temp_v;
+                        min_sign = temp_sign;
+                        min_normal = n;
+                    }
+                }
+            }
+        } else {
+            // Internal node - speculatively test both children before pushing
+            const int left_idx = lower.i;
+            const int right_idx = upper.i;
+
+            // Load both children's bounds
+            BVHPackedNodeHalf left_lower = bvh_load_node(mesh.bvh.node_lowers, left_idx);
+            BVHPackedNodeHalf left_upper = bvh_load_node(mesh.bvh.node_uppers, left_idx);
+            BVHPackedNodeHalf right_lower = bvh_load_node(mesh.bvh.node_lowers, right_idx);
+            BVHPackedNodeHalf right_upper = bvh_load_node(mesh.bvh.node_uppers, right_idx);
+
+            // Test both children
+            float left_t, right_t;
+            const bool left_hit = intersect_ray_aabb(
+                start, rcp_dir,
+                vec3(left_lower.x - eps, left_lower.y - eps, left_lower.z - eps),
+                vec3(left_upper.x + eps, left_upper.y + eps, left_upper.z + eps), left_t
+            ) && left_t < min_t;
+
+            const bool right_hit = intersect_ray_aabb(
+                start, rcp_dir,
+                vec3(right_lower.x - eps, right_lower.y - eps, right_lower.z - eps),
+                vec3(right_upper.x + eps, right_upper.y + eps, right_upper.z + eps), right_t
+            ) && right_t < min_t;
+
+            // Push valid children in distance-sorted order (farther first, nearer last)
+            // This ensures we process nearer nodes first (LIFO), improving early termination
+            if (left_hit && right_hit) {
+                if (left_t < right_t) {
+                    // Left is nearer - push right first, then left
+                    stack[count].node = right_idx;
+                    stack[count].t_entry = right_t;
+                    count++;
+                    stack[count].node = left_idx;
+                    stack[count].t_entry = left_t;
+                    count++;
+                } else {
+                    // Right is nearer - push left first, then right
+                    stack[count].node = left_idx;
+                    stack[count].t_entry = left_t;
+                    count++;
+                    stack[count].node = right_idx;
+                    stack[count].t_entry = right_t;
+                    count++;
+                }
+            } else if (left_hit) {
+                stack[count].node = left_idx;
+                stack[count].t_entry = left_t;
+                count++;
+            } else if (right_hit) {
+                stack[count].node = right_idx;
+                stack[count].t_entry = right_t;
+                count++;
+            }
+        }
+    }
+
+    if (min_face >= 0) {
+        // write outputs
+        u = min_u;
+        v = min_v;
+        sign = min_sign;
+        t = min_t;
+        normal = normalize(min_normal);
+        face = min_face;
+        return true;
+    }
+    return false;
+#else
     Mesh mesh = mesh_get(id);
 
     uint64_t stack[BVH_QUERY_STACK_SIZE];
@@ -1884,6 +2040,7 @@ CUDA_CALLABLE inline bool mesh_query_ray(
     } else {
         return false;
     }
+#endif
 }
 
 CUDA_CALLABLE inline bool

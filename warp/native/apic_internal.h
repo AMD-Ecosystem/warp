@@ -151,7 +151,7 @@ struct APICModule {
     std::string module_name;
     std::string cubin_filename;
     int target_arch = 0;
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     CUmodule cuda_module = nullptr;  // Set after loading
 #else
     void* cuda_module = nullptr;  // CUmodule, opaque on non-CUDA compilers

@@ -10,8 +10,8 @@ namespace wp {
 struct fabricbucket_t {
     size_t index_start;
     size_t index_end;
-    void* ptr;
-    size_t* lengths;
+    void* WP_RESTRICT ptr;
+    size_t* WP_RESTRICT lengths;
 };
 
 
@@ -25,7 +25,7 @@ template <typename T> struct fabricarray_t {
 
     CUDA_CALLABLE inline bool empty() const { return !size; }
 
-    fabricbucket_t* buckets;  // array of fabricbucket_t on the correct device
+    fabricbucket_t* WP_RESTRICT buckets;  // array of fabricbucket_t on the correct device
 
     size_t nbuckets;
     size_t size;
@@ -45,7 +45,7 @@ template <typename T> struct indexedfabricarray_t {
 
     // TODO: we use 32-bit indices for consistency with other Warp indexed arrays,
     // but Fabric uses 64-bit indexing.
-    int* indices;
+    int* WP_RESTRICT indices;
     size_t size;
 };
 

@@ -516,7 +516,7 @@ public:
             mVec[2] = other[2];
         return *this;
     }
-#if defined(__CUDACC__) // the following functions only run on the GPU!
+#if defined(__CUDACC__) || defined(__HIPCC__) // the following functions only run on the GPU!
     __device__ inline Coord& minComponentAtomic(const Coord& other)
     {
         atomicMin(&mVec[0], other[0]);
@@ -1283,7 +1283,7 @@ struct BBox<CoordT, false> : public BaseBBox<CoordT>
         return bbox;
     }
 
-#if defined(__CUDACC__) // the following functions only run on the GPU!
+#if defined(__CUDACC__) || defined(__HIPCC__) // the following functions only run on the GPU!
     __device__ inline BBox& expandAtomic(const CoordT& ijk)
     {
         mCoord[0].minComponentAtomic(ijk);

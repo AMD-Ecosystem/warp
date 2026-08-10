@@ -8,7 +8,13 @@
 #include "cuda_util.h"
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_run_length_encode.cuh>
+#endif
 
 template <typename T>
 void runlength_encode_device(int n, const T* values, T* run_values, int* run_lengths, int* run_count)

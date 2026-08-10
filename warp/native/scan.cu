@@ -11,7 +11,13 @@
 #include <iterator>
 #include <type_traits>
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_scan.cuh>
+#endif
 
 namespace {
 

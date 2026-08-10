@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -7,7 +8,7 @@
 
 #include "intersect.h"
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define BVH_SHARED_STACK 1
 #else
 #define BVH_SHARED_STACK 0
@@ -173,14 +174,14 @@ struct BVHPackedNodeHalf {
 };
 
 struct BVH {
-    BVHPackedNodeHalf* node_lowers;
-    BVHPackedNodeHalf* node_uppers;
+    BVHPackedNodeHalf* WP_RESTRICT node_lowers;
+    BVHPackedNodeHalf* WP_RESTRICT node_uppers;
 
     // used for fast refits
-    int* node_parents;
-    int* node_counts;
+    int* WP_RESTRICT node_parents;
+    int* WP_RESTRICT node_counts;
     // reordered primitive indices corresponds to the ordering of leaf nodes
-    int* primitive_indices;
+    int* WP_RESTRICT primitive_indices;
 
     int max_depth;
     int max_nodes;
@@ -191,12 +192,12 @@ struct BVH {
     // pointer (CPU or GPU) to a single integer index in node_lowers, node_uppers
     // representing the root of the tree, this is not always the first node
     // for bottom-up builders
-    int* root;
+    int* WP_RESTRICT root;
 
     // item bounds are not owned by the BVH but by the caller
-    vec3* item_lowers;
-    vec3* item_uppers;
-    int* item_groups;
+    vec3* WP_RESTRICT item_lowers;
+    vec3* WP_RESTRICT item_uppers;
+    int* WP_RESTRICT item_groups;
     int num_items;
     int leaf_size;
     int constructor_type;
@@ -228,20 +229,21 @@ CUDA_CALLABLE inline void make_node(volatile BVHPackedNodeHalf* n, const vec3& b
     n->b = (unsigned int)(leaf ? 1 : 0);
 }
 
-#ifdef __CUDA_ARCH__
-__device__ inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index)
+CUDA_CALLABLE inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index)
 {
-#ifdef USE_LOAD4
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(USE_LOAD4)
+    // On NVIDIA __ldg routes through the read-only / texture cache.
+    // On AMD (HIP) __ldg is a no-op (maps to a plain load) since CDNA/RDNA
+    // have no separate read-only cache.  The float4 cast is still valuable:
+    // it guarantees a single 128-bit global-memory transaction per node,
+    // which matches the L2 cache-line granularity on MI250X / MI300X and
+    // avoids partial-line fetches.
     float4 f4 = __ldg((const float4*)(nodes) + index);
     return (const wp::BVHPackedNodeHalf&)f4;
-    // return  (const wp::BVHPackedNodeHalf&)(*((const float4*)(nodes)+index));
 #else
     return nodes[index];
-#endif  // USE_LOAD4
+#endif
 }
-#else
-inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index) { return nodes[index]; }
-#endif  // __CUDACC__
 
 CUDA_CALLABLE inline int clz(int x)
 {
@@ -395,7 +397,7 @@ struct bvh_stack_t {
     CUDA_CALLABLE inline int operator[](int depth) const { return ptr[depth * WP_TILE_BLOCK_DIM]; }
     CUDA_CALLABLE inline int& operator[](int depth) { return ptr[depth * WP_TILE_BLOCK_DIM]; }
 
-    int* ptr;
+    int* WP_RESTRICT ptr;
 };
 
 // stores state required to traverse the BVH nodes that
