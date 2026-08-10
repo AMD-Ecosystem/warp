@@ -268,7 +268,13 @@ bool wp_texture_copy_device(
     if (dst_memory_type == CU_MEMORYTYPE_HOST) {
         copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
     } else if (dst_memory_type == CU_MEMORYTYPE_DEVICE) {
+        // CUDA: CUdeviceptr is `unsigned long long` (static_cast OK).
+        // HIP:  CUdeviceptr is `void*` (only reinterpret_cast is valid).
+#if defined(__HIP_PLATFORM_AMD__)
+        copy_params.dstDevice = reinterpret_cast<CUdeviceptr>(dst_handle);
+#else
         copy_params.dstDevice = static_cast<CUdeviceptr>(dst_handle);
+#endif
     } else if (dst_memory_type == CU_MEMORYTYPE_ARRAY) {
         copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
     } else {
@@ -282,7 +288,11 @@ bool wp_texture_copy_device(
     if (src_memory_type == CU_MEMORYTYPE_HOST) {
         copy_params.srcHost = reinterpret_cast<void*>(src_handle);
     } else if (src_memory_type == CU_MEMORYTYPE_DEVICE) {
+#if defined(__HIP_PLATFORM_AMD__)
+        copy_params.srcDevice = reinterpret_cast<CUdeviceptr>(src_handle);
+#else
         copy_params.srcDevice = static_cast<CUdeviceptr>(src_handle);
+#endif
     } else if (src_memory_type == CU_MEMORYTYPE_ARRAY) {
         copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
     } else {
@@ -425,7 +435,12 @@ uint64_t wp_texture_object_create_device(
     CUtexObject tex_object = 0;
     check_cu(cuTexObjectCreate_f(&tex_object, &res_desc, &tex_desc, nullptr));
 
-    return tex_object;
+    // CUDA: CUtexObject is `unsigned long long`. HIP: CUtexObject is `__hip_texture*`.
+#if defined(__HIP_PLATFORM_AMD__)
+    return reinterpret_cast<uint64_t>(tex_object);
+#else
+    return static_cast<uint64_t>(tex_object);
+#endif
 }
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
@@ -448,7 +463,12 @@ uint64_t wp_surface_object_create_device(void* context, uint64_t array_handle)
     cudaSurfaceObject_t surface = 0;
     check_cuda(cudaCreateSurfaceObject(&surface, &desc));
 
+    // CUDA: cudaSurfaceObject_t is `unsigned long long`. HIP: it is `__hip_surface*`.
+#if defined(__HIP_PLATFORM_AMD__)
+    return reinterpret_cast<uint64_t>(surface);
+#else
     return static_cast<uint64_t>(surface);
+#endif
 }
 
 void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
@@ -457,7 +477,11 @@ void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
         return;
 
     ContextGuard guard(context);
+#if defined(__HIP_PLATFORM_AMD__)
+    check_cuda(cudaDestroySurfaceObject(reinterpret_cast<cudaSurfaceObject_t>(surface_handle)));
+#else
     check_cuda(cudaDestroySurfaceObject(static_cast<cudaSurfaceObject_t>(surface_handle)));
+#endif
 }
 
 #else  // WP_ENABLE_CUDA

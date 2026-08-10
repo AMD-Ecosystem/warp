@@ -952,7 +952,11 @@ def build_dll_for_arch(
                         # the .cpp objects above); without this the libstdc++ ABI tag
                         # leaks into the mangled names of std::string-taking helpers,
                         # breaking the host<->HIP link step.
-                        hip_abi_flags = "-fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0"
+                        # Define __HIP_PLATFORM_AMD__ explicitly so the source-level
+                        # HIP guards (`#if defined(__HIP_PLATFORM_AMD__)`) are active in
+                        # both the host and device passes of hipcc, matching the host
+                        # C++ objects compiled above.
+                        hip_abi_flags = "-fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -D__HIP_PLATFORM_AMD__"
                         if mode == "debug":
                             cuda_cmd = (
                                 f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden {hip_abi_flags} '

@@ -114,11 +114,56 @@ template <typename T, int BlockSize> struct BlockIterator {
         return BlockIterator(ptr + offset * stride, stride);
     }
 
+    // rocprim (hipcub's backend) exercises more of the random-access iterator
+    // interface than CUB does (e.g. `it - n` and in-place advance), so provide
+    // the full set to satisfy `std::random_access_iterator_tag`.
+    CUDA_CALLABLE BlockIterator operator-(difference_type offset) const
+    {
+        return BlockIterator(ptr - offset * stride, stride);
+    }
+
     CUDA_CALLABLE difference_type operator-(const BlockIterator& other) const { return (ptr - other.ptr) / stride; }
+
+    CUDA_CALLABLE BlockIterator& operator+=(difference_type offset)
+    {
+        ptr += offset * stride;
+        return *this;
+    }
+
+    CUDA_CALLABLE BlockIterator& operator-=(difference_type offset)
+    {
+        ptr -= offset * stride;
+        return *this;
+    }
+
+    CUDA_CALLABLE BlockIterator& operator--()
+    {
+        ptr -= stride;
+        return *this;
+    }
+
+    CUDA_CALLABLE BlockIterator operator--(int)
+    {
+        BlockIterator tmp = *this;
+        ptr -= stride;
+        return tmp;
+    }
 
     CUDA_CALLABLE bool operator==(const BlockIterator& other) const { return ptr == other.ptr; }
     CUDA_CALLABLE bool operator!=(const BlockIterator& other) const { return ptr != other.ptr; }
+    CUDA_CALLABLE bool operator<(const BlockIterator& other) const { return ptr < other.ptr; }
+    CUDA_CALLABLE bool operator>(const BlockIterator& other) const { return ptr > other.ptr; }
+    CUDA_CALLABLE bool operator<=(const BlockIterator& other) const { return ptr <= other.ptr; }
+    CUDA_CALLABLE bool operator>=(const BlockIterator& other) const { return ptr >= other.ptr; }
 };
+
+// Allow `n + it` in addition to `it + n` (some rocprim code paths use this form).
+template <typename T, int BlockSize>
+CUDA_CALLABLE BlockIterator<T, BlockSize> operator+(typename BlockIterator<T, BlockSize>::difference_type offset,
+                                                    const BlockIterator<T, BlockSize>& it)
+{
+    return it + offset;
+}
 
 struct BsrColumnIsActive {
     CUDA_CALLABLE bool operator()(const int& col) const { return col >= 0; }
@@ -597,6 +642,23 @@ bsr_compress_row_sum_capacity(const size_t shared_memory_bytes, const int sort_c
     }
 }
 
+// Portable warp-vote mask: CUDA warps are 32-wide (32-bit mask), while AMD
+// wavefronts are 64-wide and HIP's *_sync intrinsics require a 64-bit mask.
+#if defined(__HIP_PLATFORM_AMD__)
+using wp_warp_mask_t = unsigned long long;
+#else
+using wp_warp_mask_t = unsigned int;
+#endif
+
+CUDA_CALLABLE_DEVICE inline int wp_warp_popcount(wp_warp_mask_t mask)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    return __popcll(mask);
+#else
+    return __popc(mask);
+#endif
+}
+
 CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
     const int count,
     const int* sorted_columns,
@@ -605,7 +667,7 @@ CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
     int* selected_run_starts
 )
 {
-    constexpr unsigned int full_warp_mask = 0xffffffffu;
+    constexpr wp_warp_mask_t full_warp_mask = ~wp_warp_mask_t(0);
 
     const int tid = threadIdx.x;
     const int lane = tid & (WP_TILE_WARP_SIZE - 1);
@@ -627,9 +689,9 @@ CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
             run_start = col >= 0 && col != BSR_COMPRESS_INVALID_COLUMN && prev_col != col;
         }
 
-        const unsigned int keep_mask = __ballot_sync(full_warp_mask, run_start);
-        const int warp_total = __popc(keep_mask);
-        const int lane_prefix = __popc(keep_mask & ((1u << lane) - 1u));
+        const wp_warp_mask_t keep_mask = __ballot_sync(full_warp_mask, run_start);
+        const int warp_total = wp_warp_popcount(keep_mask);
+        const int lane_prefix = wp_warp_popcount(keep_mask & ((wp_warp_mask_t(1) << lane) - 1));
 
         if (lane == WP_TILE_WARP_SIZE - 1) {
             warp_offsets[warp] = warp_total;

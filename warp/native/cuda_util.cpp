@@ -948,9 +948,25 @@ CUresult cuCtxSynchronize_f()
 #endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
-CUresult cuProfilerStart_f() { return pfn_cuProfilerStart ? pfn_cuProfilerStart() : DRIVER_ENTRY_POINT_ERROR; }
+CUresult cuProfilerStart_f()
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    // hipProfilerStart is deprecated (use roctracer/rocTX); treat as a no-op.
+    return CUDA_SUCCESS;
+#else
+    return pfn_cuProfilerStart ? pfn_cuProfilerStart() : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
+}
 
-CUresult cuProfilerStop_f() { return pfn_cuProfilerStop ? pfn_cuProfilerStop() : DRIVER_ENTRY_POINT_ERROR; }
+CUresult cuProfilerStop_f()
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    // hipProfilerStop is deprecated (use roctracer/rocTX); treat as a no-op.
+    return CUDA_SUCCESS;
+#else
+    return pfn_cuProfilerStop ? pfn_cuProfilerStop() : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
+}
 
 CUresult cuCtxGetDevice_f(CUdevice* dev)
 {
@@ -1440,14 +1456,27 @@ CUresult cuModuleGetGlobal_f(CUdeviceptr* dptr, size_t* bytes, CUmodule hmod, co
 
 CUresult cuOccupancyMaxActiveClusters_f(int* numClusters, CUfunction func, const CUlaunchConfig* config)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    // Thread-block clusters are a CUDA-only feature; HIP/ROCm has no equivalent.
+    (void)numClusters;
+    (void)func;
+    (void)config;
+    return CUDA_ERROR_NOT_SUPPORTED;
+#else
     return pfn_cuOccupancyMaxActiveClusters ? pfn_cuOccupancyMaxActiveClusters(numClusters, func, config)
                                             : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int value)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipFuncSetAttribute(hfunc, static_cast<hipFuncAttribute>(attrib), value);
+    // HIP has no driver-style setter for module functions. The attributes Warp
+    // sets here are either dynamic-shared-memory sizing (specified at launch
+    // time on HIP) or non-portable cluster opt-in (clusters are unsupported on
+    // HIP), so treat this as a successful no-op.
+    (void)hfunc; (void)attrib; (void)value;
+    return hipSuccess;
 #else
     return pfn_cuFuncSetAttribute ? pfn_cuFuncSetAttribute(hfunc, attrib, value) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1455,7 +1484,11 @@ CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int
 
 CUresult cuFuncGetAttribute_f(int* pi, CUfunction_attribute attrib, CUfunction hfunc)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    return hipFuncGetAttribute(pi, attrib, hfunc);
+#else
     return pfn_cuFuncGetAttribute ? pfn_cuFuncGetAttribute(pi, attrib, hfunc) : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event)

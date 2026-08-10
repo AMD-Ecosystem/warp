@@ -86,6 +86,12 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
 #define CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE HIP_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
 #endif  // CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
+#ifndef CU_POINTER_ATTRIBUTE_IS_MANAGED
+#define CU_POINTER_ATTRIBUTE_IS_MANAGED HIP_POINTER_ATTRIBUTE_IS_MANAGED
+#endif  // CU_POINTER_ATTRIBUTE_IS_MANAGED
+#ifndef CU_POINTER_ATTRIBUTE_MEMORY_TYPE
+#define CU_POINTER_ATTRIBUTE_MEMORY_TYPE HIP_POINTER_ATTRIBUTE_MEMORY_TYPE
+#endif  // CU_POINTER_ATTRIBUTE_MEMORY_TYPE
 #ifndef CU_IPC_HANDLE_SIZE
 #define CU_IPC_HANDLE_SIZE sizeof(CUipcMemHandle)
 #endif  // CU_IPC_HANDLE_SIZE
@@ -231,8 +237,11 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
 #endif  // cudaFuncAttributeMaxDynamicSharedMemorySize
 #ifndef CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
-#define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES hipFuncAttributeMaxDynamicSharedMemorySize
+#define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES HIP_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
 #endif  // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
+#ifndef CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+#define CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+#endif  // CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
 #ifndef cudaCpuDeviceId
 #define cudaCpuDeviceId hipCpuDeviceId
 #endif  // cudaCpuDeviceId
@@ -331,7 +340,73 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef cudaStreamCaptureModeThreadLocal
 #define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
 #endif  // cudaStreamCaptureModeThreadLocal
+#ifndef cudaStreamCaptureModeRelaxed
+#define cudaStreamCaptureModeRelaxed hipStreamCaptureModeRelaxed
+#endif  // cudaStreamCaptureModeRelaxed
+#ifndef cudaThreadExchangeStreamCaptureMode
+#define cudaThreadExchangeStreamCaptureMode hipThreadExchangeStreamCaptureMode
+#endif  // cudaThreadExchangeStreamCaptureMode
+#ifndef cudaStreamCaptureModeGlobal
+#define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
+#endif  // cudaStreamCaptureModeGlobal
+#ifndef cudaStreamGetFlags
+#define cudaStreamGetFlags hipStreamGetFlags
+#endif  // cudaStreamGetFlags
+#ifndef cudaStreamNonBlocking
+#define cudaStreamNonBlocking hipStreamNonBlocking
+#endif  // cudaStreamNonBlocking
+#ifndef CU_STREAM_SET_CAPTURE_DEPENDENCIES
+#define CU_STREAM_SET_CAPTURE_DEPENDENCIES hipStreamSetCaptureDependencies
+#endif  // CU_STREAM_SET_CAPTURE_DEPENDENCIES
 
+// Managed-memory attach flag and graph-memory attribute queries.
+#ifndef cudaMemAttachGlobal
+#define cudaMemAttachGlobal hipMemAttachGlobal
+#endif  // cudaMemAttachGlobal
+#ifndef cudaGraphAddEmptyNode
+#define cudaGraphAddEmptyNode hipGraphAddEmptyNode
+#endif  // cudaGraphAddEmptyNode
+#ifndef cudaGraphMemAttrUsedMemCurrent
+#define cudaGraphMemAttrUsedMemCurrent hipGraphMemAttrUsedMemCurrent
+#endif  // cudaGraphMemAttrUsedMemCurrent
+#ifndef cudaDeviceGetGraphMemAttribute
+#define cudaDeviceGetGraphMemAttribute hipDeviceGetGraphMemAttribute
+#endif  // cudaDeviceGetGraphMemAttribute
+#ifndef cudaDeviceGraphMemTrim
+#define cudaDeviceGraphMemTrim hipDeviceGraphMemTrim
+#endif  // cudaDeviceGraphMemTrim
+
+// Process-unique stream id query (used by get_stream_id).
+#ifndef cudaStreamGetId
+#define cudaStreamGetId hipStreamGetId
+#endif  // cudaStreamGetId
+
+// Graph memory alloc/free node introspection (used by graph_alloc_query).
+#ifndef CU_GRAPH_NODE_TYPE_MEM_ALLOC
+#define CU_GRAPH_NODE_TYPE_MEM_ALLOC hipGraphNodeTypeMemAlloc
+#endif  // CU_GRAPH_NODE_TYPE_MEM_ALLOC
+#ifndef CU_GRAPH_NODE_TYPE_MEM_FREE
+#define CU_GRAPH_NODE_TYPE_MEM_FREE hipGraphNodeTypeMemFree
+#endif  // CU_GRAPH_NODE_TYPE_MEM_FREE
+#ifndef cudaMemAllocNodeParams
+#define cudaMemAllocNodeParams hipMemAllocNodeParams
+#endif  // cudaMemAllocNodeParams
+#ifndef cudaGraphMemAllocNodeGetParams
+#define cudaGraphMemAllocNodeGetParams hipGraphMemAllocNodeGetParams
+#endif  // cudaGraphMemAllocNodeGetParams
+#ifndef cudaGraphMemFreeNodeGetParams
+#define cudaGraphMemFreeNodeGetParams hipGraphMemFreeNodeGetParams
+#endif  // cudaGraphMemFreeNodeGetParams
+
+// Cluster launch config type (used only in wrapper signatures; clusters are
+// unsupported on HIP, so the wrappers return an error without dereferencing it).
+#ifndef CUlaunchConfig
+#define CUlaunchConfig hipLaunchConfig_t
+#endif  // CUlaunchConfig
+
+#ifndef CUDA_ERROR_INVALID_VALUE
+#define CUDA_ERROR_INVALID_VALUE hipErrorInvalidValue
+#endif  // CUDA_ERROR_INVALID_VALUE
 #ifndef CUDA_ERROR_NOT_INITIALIZED
 #define CUDA_ERROR_NOT_INITIALIZED hipErrorNotInitialized
 #endif  // CUDA_ERROR_NOT_INITIALIZED
@@ -399,6 +474,7 @@ using cudaGraph_t = hipGraph_t;
 using cudaGraphNode_t = hipGraphNode_t;
 using cudaGraphExec_t = hipGraphExec_t;
 using cudaMemPool_t = hipMemPool_t;
+using CUmemoryPool = hipMemPool_t;
 using cudaMemAccessFlags = hipMemAccessFlags;
 using cudaMemLocation = hipMemLocation;
 using cudaMemAccessDesc = hipMemAccessDesc;
@@ -445,7 +521,11 @@ using CUgraphEdgeData = void;
 using CUstreamCaptureStatus = hipStreamCaptureStatus;
 using CUjit_option = int;
 using CUpointer_attribute = hipPointer_attribute;
-using CUfunction_attribute = hipFuncAttribute;
+// Warp uses the driver-style function-attribute API (cuFuncGetAttribute /
+// cuFuncSetAttribute), which is keyed on the driver enum hipFunction_attribute
+// (HIP_FUNC_ATTRIBUTE_*), not the runtime enum hipFuncAttribute.
+using CUfunction_attribute = hipFunction_attribute;
+using CUgraphExec = hipGraphExec_t;
 // HIP has no equivalent of the CUDA `CUoccupancyB2DSize` callback (the only HIP
 // equivalents take a fixed `size_t` shared-memory size). Provide a stub typedef
 // so call sites that reference the type compile under HIP; HIP code paths must
@@ -522,6 +602,9 @@ using CUaddress_mode = HIPaddress_mode;
 #ifndef CU_RESOURCE_TYPE_ARRAY
 #define CU_RESOURCE_TYPE_ARRAY HIP_RESOURCE_TYPE_ARRAY
 #endif  // CU_RESOURCE_TYPE_ARRAY
+#ifndef CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
+#define CU_RESOURCE_TYPE_MIPMAPPED_ARRAY HIP_RESOURCE_TYPE_MIPMAPPED_ARRAY
+#endif  // CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
 
 #ifndef CU_MEMORYTYPE_HOST
 #define CU_MEMORYTYPE_HOST hipMemoryTypeHost
@@ -577,3 +660,18 @@ using CUDA_RESOURCE_VIEW_DESC = hipResourceViewDesc;
 #ifndef CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED
 #define CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED ((CUdevice_attribute)-1)
 #endif  // CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED
+#ifndef CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS
+#define CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS hipDeviceAttributePageableMemoryAccess
+#endif  // CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS
+#ifndef CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST
+#define CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST hipDeviceAttributeDirectManagedMemAccessFromHost
+#endif  // CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST
+#ifndef CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED
+#define CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED hipDeviceAttributeHostNativeAtomicSupported
+#endif  // CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED
+#ifndef CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY
+#define CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY hipDeviceAttributeManagedMemory
+#endif  // CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY
+#ifndef CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS
+#define CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS hipDeviceAttributeConcurrentManagedAccess
+#endif  // CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS

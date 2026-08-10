@@ -22,6 +22,10 @@
 
 #ifdef __CUDACC__
 #include <cudaTypedefs.h>
+#elif defined(__HIPCC__)
+// apic.cu is compiled by hipcc; pull in the CUDA->HIP type aliases so the
+// CUmodule/CUgraph/CUfunction members below resolve to their HIP equivalents.
+#include "hip_util.h"
 #endif
 
 // Byte size of a scalar APICType value: 4 for the 32-bit members, 8 for the
@@ -538,7 +542,7 @@ struct APICGraph {
 
     std::unordered_map<std::string, APICCPUKernel> cpu_kernels;
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     CUgraph cuda_graph = nullptr;
     CUgraphExec cuda_graph_exec = nullptr;
 #else

@@ -18,8 +18,14 @@
 #include <cstring>
 #include <vector>
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
+#else
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#endif
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 
@@ -27,7 +33,18 @@
 // which causes CCCL's _CCCL_HAS_EXCEPTIONS() to be true when typeid.h is later
 // pulled in by CUB. This makes __throw_out_of_range non-constexpr, breaking a
 // static_assert in typeid.h on GCC < 12 (which lacks P2448R2 relaxed constexpr).
+#if defined(__HIP_PLATFORM_AMD__)
+#include <hipcub/hipcub.hpp>
+// Match cuBQL's builder_common.h, which reopens `namespace cub` with a
+// `using namespace hipcub;` directive. Using the same form (rather than a
+// namespace alias) avoids a "redefinition of 'cub' as different kind of
+// symbol" clash when cuBQL's headers are pulled in below.
+namespace cub {
+using namespace hipcub;
+}
+#else
 #include <cub/cub.cuh>
+#endif
 
 #ifndef WP_DISABLE_CUBQL
 #include "cuBQL/bvh.h"
