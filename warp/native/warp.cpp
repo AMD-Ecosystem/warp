@@ -1079,7 +1079,7 @@ WP_API void wp_nvrtc_supported_archs(int* archs) { }
 WP_API int wp_cuda_device_get_count() { return 0; }
 WP_API void* wp_cuda_device_get_primary_context(int ordinal) { return NULL; }
 WP_API const char* wp_cuda_device_get_name(int ordinal) { return NULL; }
-WP_API int wp_cuda_device_get_arch(int ordinal) { return 0; }
+WP_API const char* wp_cuda_device_get_arch(int ordinal) { return NULL; }
 WP_API int wp_cuda_device_get_sm_count(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal) { return 0; }
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]) { }
