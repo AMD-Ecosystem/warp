@@ -3234,27 +3234,33 @@ class ModuleExec:
 
             def configure_smem(kernel_func, direction: str, requested: int) -> str | None:
                 """Configure dynamic shared memory, warning and returning a shortfall clause on failure."""
-                if runtime.core.wp_cuda_configure_kernel_shared_memory(kernel_func, requested):
-                    return None
+                configured = runtime.core.wp_cuda_configure_kernel_shared_memory(kernel_func, requested)
 
+                # Detect an over-budget request even when the driver accepted the configuration.
+                # HIP's hipFuncSetAttribute reports success regardless of the device LDS limit, so
+                # an over-budget kernel would otherwise dispatch and fault asynchronously (an
+                # invalid-allocation queue abort that corrupts the context). Comparing against the
+                # device budget here catches that case up front on both platforms.
                 static_smem_bytes = runtime.core.wp_cuda_get_kernel_static_shared_memory(
                     self.device.context, kernel_func
                 )
                 shortfall = _smem_shortfall_clause(self.block_dim, requested, static_smem_bytes, max_smem_bytes)
-                if shortfall is None:
+                if shortfall is not None:
+                    log_warning(
+                        f"Failed to configure dynamic shared memory for kernel '{kernel.key}' ({direction}) on "
+                        f"{self.device.alias}: requests {requested} bytes, {shortfall}."
+                    )
+                    return shortfall
+
+                if not configured:
                     # The driver rejected the request for some reason other than overflow, or the
                     # static size is unknown, so there is no budget to report.
                     log_warning(
                         f"Failed to configure {requested} bytes of dynamic shared memory for kernel "
                         f"'{kernel.key}' ({direction}) on {self.device.alias}."
                     )
-                    return None
 
-                log_warning(
-                    f"Failed to configure dynamic shared memory for kernel '{kernel.key}' ({direction}) on "
-                    f"{self.device.alias}: requests {requested} bytes, {shortfall}."
-                )
-                return shortfall
+                return None
 
             forward_smem_shortfall = configure_smem(forward_kernel, "forward", forward_smem_bytes)
             backward_smem_shortfall = (
@@ -3924,7 +3930,9 @@ class Module:
 
         # Reject cluster_dim > 1 when the compile target drops the cluster
         # attribute (status == "dropped"); see _cluster_dim_target_status.
-        if not is_cpu and output_arch < 90:
+        # Thread block clusters are a CUDA-only feature; on HIP ``output_arch``
+        # is a gfx string (e.g. "gfx942"), so skip the numeric cluster check.
+        if not is_cpu and not isinstance(output_arch, str) and output_arch < 90:
             device_arch = device.arch if device is not None else None
             if _cluster_dim_target_status(device_arch, output_arch) == "dropped":
                 # Validate the same live unique-kernel set that codegen emits.
@@ -8367,6 +8375,10 @@ def _is_graph_capture_allocation_supported(device: DeviceLike) -> bool:
     device = runtime.get_device(device)
     if device.is_cpu:
         return True
+    # HIP/ROCm does not support native CUDA graph capture (and therefore no
+    # capture-time allocation); see Device.supports_graph_capture.
+    if device.is_hip:
+        return False
     return device.is_mempool_supported
 
 
@@ -10207,6 +10219,19 @@ def _raise_cuda_launch_error(kernel: Kernel, device: Device, hooks: KernelHooks,
     raise RuntimeError(f"Error launching kernel: {kernel.key} on device {device}: {err}")
 
 
+def _check_cuda_smem_shortfall(kernel: Kernel, device: Device, hooks: KernelHooks, adjoint: bool) -> None:
+    """Raise before dispatch if the kernel's dynamic shared memory could not be configured.
+
+    On CUDA an over-budget launch fails synchronously and is reported via the launch-error
+    path, but HIP dispatches the kernel and faults asynchronously (an invalid-allocation
+    queue abort) which corrupts the context and cascades to every subsequent launch. When a
+    shortfall was already detected at load time, raise a clean error here instead of dispatching.
+    """
+    shortfall = hooks.backward_smem_shortfall if adjoint else hooks.forward_smem_shortfall
+    if shortfall is not None:
+        _raise_cuda_launch_error(kernel, device, hooks, adjoint)
+
+
 class Launch:
     """Represent all data required for a kernel launch so that launches can be replayed quickly.
 
@@ -10564,6 +10589,7 @@ class Launch:
                 apic_info_ptr = ctypes.byref(apic_info)
 
             if self.adjoint:
+                _check_cuda_smem_shortfall(self.kernel, self.device, self.hooks, True)
                 if runtime.core.wp_cuda_launch_kernel(
                     self.device.context,
                     self.hooks.backward,
@@ -10579,6 +10605,7 @@ class Launch:
                 ):
                     _raise_cuda_launch_error(self.kernel, self.device, self.hooks, True)
             else:
+                _check_cuda_smem_shortfall(self.kernel, self.device, self.hooks, False)
                 if runtime.core.wp_cuda_launch_kernel(
                     self.device.context,
                     self.hooks.forward,
@@ -10885,6 +10912,9 @@ def launch(
                 raise RuntimeError(
                     f"Failed to find {launch_kind} kernel '{kernel.key}' from module '{kernel.module.name}' for device '{device}'"
                 )
+            # The deterministic launcher has its own dispatch site, so guard it against an
+            # over-budget shared-memory request here too (see _check_cuda_smem_shortfall).
+            _check_cuda_smem_shortfall(kernel, device, hooks, adjoint)
             if stream is None:
                 stream = device.stream
             if record_cmd:
@@ -11051,6 +11081,7 @@ def launch(
                             adj_args=adj_args,
                         )
                         apic_info_ptr = ctypes.byref(apic_info)
+                    _check_cuda_smem_shortfall(kernel, device, hooks, True)
                     if runtime.core.wp_cuda_launch_kernel(
                         device.context,
                         hooks.backward,
@@ -11099,6 +11130,7 @@ def launch(
                             False,
                         )
                         apic_info_ptr = ctypes.byref(apic_info)
+                    _check_cuda_smem_shortfall(kernel, device, hooks, False)
                     if runtime.core.wp_cuda_launch_kernel(
                         device.context,
                         hooks.forward,
@@ -14859,7 +14891,7 @@ def print_diagnostics() -> dict:
             {
                 "alias": cuda_device.alias,
                 "name": cuda_device.name,
-                "arch": f"sm_{cuda_device.arch}",
+                "arch": cuda_device.arch_str or f"sm_{cuda_device.arch}",
                 "sm_count": cuda_device.sm_count,
                 "memory_gb": round(cuda_device.total_memory / (1024**3), 1),
                 "mempool_enabled": cuda_device.is_mempool_enabled if cuda_device.is_mempool_supported else False,
