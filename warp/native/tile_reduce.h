@@ -11,13 +11,21 @@
 #pragma clang diagnostic ignored "-Wc++17-extensions"
 #endif  // __clang__
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__)
 #define WP_TILE_WARP_SIZE 64
 #else
 #define WP_TILE_WARP_SIZE 32
 #endif
 
 namespace wp {
+
+// Warp/wavefront ballot masks must match the hardware lane count: 64-bit on AMD
+// (64-lane wavefronts) and 32-bit on NVIDIA (32-lane warps).
+#if defined(__HIP_PLATFORM_AMD__)
+using wp_tile_mask_t = unsigned long long;
+#else
+using wp_tile_mask_t = unsigned int;
+#endif
 
 
 template <typename T> CUDA_CALLABLE int argmax_tracker(T champion_value, T current_value, int champion_index, int current_index)
@@ -33,10 +41,30 @@ template <typename T> CUDA_CALLABLE int argmin_tracker(T champion_value, T curre
 
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
+// find-first-set over a warp mask, portable across 32-bit (NVIDIA) and 64-bit (AMD) masks
+inline CUDA_CALLABLE_DEVICE int wp_tile_ffs(wp_tile_mask_t mask)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    return __ffsll(static_cast<unsigned long long>(mask));
+#else
+    return __ffs(mask);
+#endif
+}
+
+// population count over a warp mask, portable across 32-bit and 64-bit masks
+inline CUDA_CALLABLE_DEVICE int wp_tile_popcount(wp_tile_mask_t mask)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    return __popcll(static_cast<unsigned long long>(mask));
+#else
+    return __popc(mask);
+#endif
+}
+
 // half / float16 needs a dedicated overload: the generic template below builds an
 // anonymous union over T, whose default constructor is deleted when T has a
 // non-trivial default constructor (as half does). Shuffle the raw bits instead.
-inline CUDA_CALLABLE half warp_shuffle_down(half val, int offset, int mask)
+inline CUDA_CALLABLE half warp_shuffle_down(half val, int offset, wp_tile_mask_t mask)
 {
     unsigned int bits = static_cast<unsigned int>(val.u);
     bits = __shfl_down_sync(mask, bits, offset, WP_TILE_WARP_SIZE);
@@ -47,7 +75,7 @@ inline CUDA_CALLABLE half warp_shuffle_down(half val, int offset, int mask)
 }
 
 #ifndef WP_NO_BFLOAT16
-inline CUDA_CALLABLE bfloat16 warp_shuffle_down(bfloat16 val, int offset, int mask)
+inline CUDA_CALLABLE bfloat16 warp_shuffle_down(bfloat16 val, int offset, wp_tile_mask_t mask)
 {
     unsigned int bits = static_cast<unsigned int>(val.u);
     bits = __shfl_down_sync(mask, bits, offset, WP_TILE_WARP_SIZE);
@@ -58,7 +86,7 @@ inline CUDA_CALLABLE bfloat16 warp_shuffle_down(bfloat16 val, int offset, int ma
 }
 #endif  // WP_NO_BFLOAT16
 
-template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset, int mask)
+template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset, wp_tile_mask_t mask)
 {
     // Shuffle word-by-word over the raw bytes so any trivially-copyable value type is
     // supported. A plain word buffer (rather than a union over T) avoids the deleted
@@ -89,7 +117,7 @@ template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset
 
 // vector overload
 template <unsigned Length, typename T>
-inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T> val, int offset, tile_mask_t mask)
+inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T> val, int offset, wp_tile_mask_t mask)
 {
     wp::vec_t<Length, T> result;
 
@@ -100,7 +128,7 @@ inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T>
 }
 
 template <unsigned Length>
-inline CUDA_CALLABLE wp::vec_t<Length, half> warp_shuffle_down(wp::vec_t<Length, half> val, int offset, int mask)
+inline CUDA_CALLABLE wp::vec_t<Length, half> warp_shuffle_down(wp::vec_t<Length, half> val, int offset, wp_tile_mask_t mask)
 {
     wp::vec_t<Length, half> result;
 
@@ -113,7 +141,7 @@ inline CUDA_CALLABLE wp::vec_t<Length, half> warp_shuffle_down(wp::vec_t<Length,
 #ifndef WP_NO_BFLOAT16
 template <unsigned Length>
 inline CUDA_CALLABLE wp::vec_t<Length, bfloat16>
-warp_shuffle_down(wp::vec_t<Length, bfloat16> val, int offset, int mask)
+warp_shuffle_down(wp::vec_t<Length, bfloat16> val, int offset, wp_tile_mask_t mask)
 {
     wp::vec_t<Length, bfloat16> result;
 
@@ -126,7 +154,7 @@ warp_shuffle_down(wp::vec_t<Length, bfloat16> val, int offset, int mask)
 
 // matrix overload
 template <unsigned Rows, unsigned Cols, typename T>
-inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, tile_mask_t mask)
+inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, wp_tile_mask_t mask)
 {
     wp::mat_t<Rows, Cols, T> result;
 
@@ -139,7 +167,7 @@ inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, 
 
 template <unsigned Rows, unsigned Cols>
 inline CUDA_CALLABLE wp::mat_t<Rows, Cols, half>
-warp_shuffle_down(wp::mat_t<Rows, Cols, half> val, int offset, int mask)
+warp_shuffle_down(wp::mat_t<Rows, Cols, half> val, int offset, wp_tile_mask_t mask)
 {
     wp::mat_t<Rows, Cols, half> result;
 
@@ -153,7 +181,7 @@ warp_shuffle_down(wp::mat_t<Rows, Cols, half> val, int offset, int mask)
 #ifndef WP_NO_BFLOAT16
 template <unsigned Rows, unsigned Cols>
 inline CUDA_CALLABLE wp::mat_t<Rows, Cols, bfloat16>
-warp_shuffle_down(wp::mat_t<Rows, Cols, bfloat16> val, int offset, int mask)
+warp_shuffle_down(wp::mat_t<Rows, Cols, bfloat16> val, int offset, wp_tile_mask_t mask)
 {
     wp::mat_t<Rows, Cols, bfloat16> result;
 
@@ -166,7 +194,7 @@ warp_shuffle_down(wp::mat_t<Rows, Cols, bfloat16> val, int offset, int mask)
 #endif  // WP_NO_BFLOAT16
 
 
-template <typename T> inline CUDA_CALLABLE T* warp_shuffle_down(T* val, int offset, int mask)
+template <typename T> inline CUDA_CALLABLE T* warp_shuffle_down(T* val, int offset, wp_tile_mask_t mask)
 {
     unsigned long long ptr = reinterpret_cast<unsigned long long>(val);
     unsigned int ptr_lo = static_cast<unsigned int>(ptr);
@@ -177,7 +205,7 @@ template <typename T> inline CUDA_CALLABLE T* warp_shuffle_down(T* val, int offs
     return reinterpret_cast<T*>(ptr);
 }
 
-inline CUDA_CALLABLE wp::shape_t warp_shuffle_down(wp::shape_t val, int offset, int mask)
+inline CUDA_CALLABLE wp::shape_t warp_shuffle_down(wp::shape_t val, int offset, wp_tile_mask_t mask)
 {
     wp::shape_t result;
 
@@ -187,7 +215,7 @@ inline CUDA_CALLABLE wp::shape_t warp_shuffle_down(wp::shape_t val, int offset, 
     return result;
 }
 
-template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::array_t<T> val, int offset, int mask)
+template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::array_t<T> val, int offset, wp_tile_mask_t mask)
 {
     wp::array_t<T> result;
 
@@ -206,7 +234,7 @@ template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::
 }
 
 template <typename T>
-inline CUDA_CALLABLE wp::indexedarray_t<T> warp_shuffle_down(wp::indexedarray_t<T> val, int offset, int mask)
+inline CUDA_CALLABLE wp::indexedarray_t<T> warp_shuffle_down(wp::indexedarray_t<T> val, int offset, wp_tile_mask_t mask)
 {
     wp::indexedarray_t<T> result;
 
@@ -219,11 +247,11 @@ inline CUDA_CALLABLE wp::indexedarray_t<T> warp_shuffle_down(wp::indexedarray_t<
 }
 
 
-template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op f, tile_mask_t mask)
+template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op f, wp_tile_mask_t mask)
 {
     T sum = val;
 
-    if (mask == tile_full_mask) {
+    if (mask == (~wp_tile_mask_t(0))) {
         // handle case where entire warp is active
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             sum = f(sum, warp_shuffle_down(sum, offset, mask));
@@ -232,7 +260,7 @@ template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op 
         // handle partial warp case - works for contiguous masks
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             T shfl_val = warp_shuffle_down(sum, offset, mask);
-            if ((mask & (tile_mask_t(1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0)
+            if ((mask & (wp_tile_mask_t(1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0)
                 sum = f(sum, shfl_val);
         }
     }
@@ -246,12 +274,12 @@ template <typename T> struct ValueAndIndex {
 };
 
 template <typename T, typename Op, typename OpTrack>
-inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, OpTrack track, tile_mask_t mask)
+inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, OpTrack track, wp_tile_mask_t mask)
 {
     T sum = val;
     int index = idx;
 
-    if (mask == tile_full_mask) {
+    if (mask == (~wp_tile_mask_t(0))) {
         // handle case where entire warp is active
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             auto shfl_val = warp_shuffle_down(sum, offset, mask);
@@ -264,7 +292,7 @@ inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, 
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             T shfl_val = warp_shuffle_down(sum, offset, mask);
             int shfl_index = warp_shuffle_down(index, offset, mask);
-            if ((mask & (tile_mask_t(1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0) {
+            if ((mask & (wp_tile_mask_t(1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0) {
                 index = track(sum, shfl_val, index, shfl_index);
                 sum = f(sum, shfl_val);
             }
@@ -281,22 +309,21 @@ inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, 
 // combines per-thread reduction results across warps and the entire block
 // assumes each thread has already reduced its local data to thread_sum
 // returns the block-wide reduced value (only valid in thread 0)
-//
-// The shared scratch is declared here (rather than passed in) so that no
-// __shared__ pointer crosses a function boundary -- HIP/ROCm address-space
-// inference can mis-handle shared pointers passed as arguments, which produced
-// non-deterministic partial sums for multi-wavefront blocks. Active warps are
-// tracked with an explicit per-warp flag instead of a running count, so that
-// non-contiguous active warps (which occur for partially-filled blocks) are
-// folded correctly.
 template <int WarpCount, typename T, typename Op>
-inline CUDA_CALLABLE T block_combine_thread_results(T thread_sum, bool thread_has_data, Op f)
+inline CUDA_CALLABLE T
+block_combine_thread_results(T thread_sum, bool thread_has_data, Op f)
 {
     const int warp_index = threadIdx.x / WP_TILE_WARP_SIZE;
     const int lane_index = threadIdx.x % WP_TILE_WARP_SIZE;
 
-    WP_TILE_SHARED_ARRAY(T, partials, WarpCount);
-    WP_TILE_SHARED_ARRAY(int, warp_active, WarpCount);
+    // self-contained shared scratch. Active warps are tracked with an explicit
+    // per-warp flag instead of a running count, so that non-contiguous active
+    // warps (which occur for partially-filled multi-wavefront blocks) fold
+    // correctly.
+    // (uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half)
+    __shared__ alignas(T) unsigned char partials_storage[sizeof(T) * WarpCount];
+    T* partials = reinterpret_cast<T*>(partials_storage);
+    __shared__ int warp_active[WarpCount];
 
     // clear per-warp active flags (shared scratch may be reused across calls)
     if (threadIdx.x < WarpCount)
@@ -306,7 +333,7 @@ inline CUDA_CALLABLE T block_combine_thread_results(T thread_sum, bool thread_ha
     // Every lane participates in the warp shuffle (it is convergent and must not
     // be called under divergent control flow); the ballot mask excludes lanes
     // without data inside warp_reduce.
-    tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
+    wp_tile_mask_t mask = __ballot_sync((~wp_tile_mask_t(0)), thread_has_data);
     T warp_sum = warp_reduce(thread_sum, f, mask);
 
     // The first active lane of each active warp publishes its partial. Data
@@ -365,12 +392,12 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
     T block_sum;
     if constexpr (warp_count == 1) {
         // fast path: single warp, just do warp reduction
-        tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
+        wp_tile_mask_t mask = __ballot_sync((~wp_tile_mask_t(0)), thread_has_data);
         if (thread_has_data)
             block_sum = warp_reduce(thread_sum, f, mask);
 
         // write from first active lane (warp_reduce result is only valid there)
-        int first_active = tile_ffs(mask) - 1;
+        int first_active = wp_tile_ffs(mask) - 1;
         if (threadIdx.x == first_active)
             output.data[0] = block_sum;
     } else {
@@ -399,7 +426,9 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
     }
 
     // shared memory buffer for the output (used by all tiers)
-    WP_TILE_SHARED_ARRAY(T, output_buffer, output_size);
+    // (uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half)
+    __shared__ alignas(T) unsigned char output_buffer_storage[sizeof(T) * output_size];
+    T* output_buffer = reinterpret_cast<T*>(output_buffer_storage);
 
     // create output layout for coordinate conversion (used by all tiers)
     using OutputLayout = tile_layout_strided_t<OutputShape>;
@@ -432,22 +461,27 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
         const int warp_index = threadIdx.x / WP_TILE_WARP_SIZE;
         const int lane_index = threadIdx.x % WP_TILE_WARP_SIZE;
 
-        // When block_dim < warp_size (e.g. 32 threads on a 64-wide HIP
-        // wavefront), only block_dim lanes are active per chunk.
-        constexpr int lanes_per_chunk = WP_TILE_BLOCK_DIM < WP_TILE_WARP_SIZE
-                                            ? WP_TILE_BLOCK_DIM : WP_TILE_WARP_SIZE;
-        constexpr int chunks_per_slice = (reduce_dim_size + lanes_per_chunk - 1) / lanes_per_chunk;
+        // Number of lanes cooperating on each slice. A block smaller than the hardware
+        // warp/wavefront only launches that many lanes, so the reduction axis must be
+        // strided by the active-lane count (matches WP_TILE_WARP_SIZE on NVIDIA, where
+        // block_dim >= 32 == warp size; only differs for sub-wavefront blocks on HIP).
+        constexpr int lanes_per_slice =
+            WP_TILE_BLOCK_DIM < WP_TILE_WARP_SIZE ? WP_TILE_BLOCK_DIM : WP_TILE_WARP_SIZE;
+
+        constexpr int chunks_per_slice = (reduce_dim_size + lanes_per_slice - 1) / lanes_per_slice;
 
         // shared memory: one accumulator per warp
-        WP_TILE_SHARED_ARRAY(T, warp_partials, warp_count);
+        // (uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half)
+        __shared__ alignas(T) unsigned char warp_partials_storage[sizeof(T) * warp_count];
+        T* warp_partials = reinterpret_cast<T*>(warp_partials_storage);
 
         // each warp processes output slices
         for (int out_idx = warp_index; out_idx < output_size; out_idx += warp_count) {
             auto out_coord = OutputLayout::coord_from_linear(out_idx);
 
-            // process the reduction axis in chunks of lanes_per_chunk
+            // process the reduction axis in chunks of lanes_per_slice
             for (int chunk = 0; chunk < chunks_per_slice; ++chunk) {
-                int axis_idx = chunk * lanes_per_chunk + lane_index;
+                int axis_idx = chunk * lanes_per_slice + lane_index;
                 bool valid = axis_idx < reduce_dim_size;
 
                 T val;
@@ -457,8 +491,8 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
                 }
 
                 // warp reduce this chunk (only valid lanes may call warp_reduce,
-                // because __shfl_*_sync requires all executing threads to be in the mask)
-                tile_mask_t mask = __ballot_sync(tile_full_mask, valid);
+                // because __shfl_down_sync requires all executing threads to be in the mask)
+                wp_tile_mask_t mask = __ballot_sync((~wp_tile_mask_t(0)), valid);
                 T chunk_result;
                 if (valid)
                     chunk_result = warp_reduce(val, f, mask);
@@ -508,12 +542,12 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
             T block_sum;
             if constexpr (warp_count == 1) {
                 // fast path: single warp, just do warp reduction
-                tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
+                wp_tile_mask_t mask = __ballot_sync((~wp_tile_mask_t(0)), thread_has_data);
                 if (thread_has_data)
                     block_sum = warp_reduce(thread_sum, f, mask);
 
                 // write from first active lane (warp_reduce result is only valid there)
-                int first_active = tile_ffs(mask) - 1;
+                int first_active = wp_tile_ffs(mask) - 1;
                 if (threadIdx.x == first_active)
                     output_buffer[out_idx] = block_sum;
             } else {
@@ -576,13 +610,15 @@ CUDA_CALLABLE_DEVICE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
     // every lane participates in the warp shuffle (it is convergent and must not
     // be called under divergent control flow); the ballot mask excludes lanes
     // without data inside warp_reduce_tracked.
-    tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
+    wp_tile_mask_t mask = __ballot_sync((~wp_tile_mask_t(0)), thread_has_data);
     ValueAndIndex<T> warp_sum = warp_reduce_tracked(thread_sum, champion_index, f, track, mask);
 
     // fixed size scratch pad for partial results in shared memory
-    WP_TILE_SHARED_ARRAY(T, partials, warp_count);
-    WP_TILE_SHARED_ARRAY(int, partials_idx, warp_count);
-    WP_TILE_SHARED_ARRAY(int, warp_active, warp_count);
+    // (uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half)
+    __shared__ alignas(T) unsigned char partials_storage[sizeof(T) * warp_count];
+    T* partials = reinterpret_cast<T*>(partials_storage);
+    __shared__ int partials_idx[warp_count];
+    __shared__ int warp_active[warp_count];
 
     // clear per-warp active flags (shared scratch may be reused across calls)
     if (threadIdx.x < warp_count)
@@ -631,7 +667,7 @@ CUDA_CALLABLE_DEVICE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
 
 // CPU implementation
 
-template <typename Tile, typename Op> auto tile_reduce_impl(Op f, Tile& t)
+template <typename Tile, typename Op> CUDA_CALLABLE auto tile_reduce_impl(Op f, Tile& t)
 {
     using T = typename Tile::Type;
 
@@ -655,7 +691,7 @@ template <typename Tile, typename Op> auto tile_reduce_impl(Op f, Tile& t)
     return output;
 }
 
-template <int Axis, typename Op, typename Tile> auto tile_reduce_axis_impl(Op f, Tile& t)
+template <int Axis, typename Op, typename Tile> CUDA_CALLABLE auto tile_reduce_axis_impl(Op f, Tile& t)
 {
     using T = typename Tile::Type;
     using InputShape = typename Tile::Layout::Shape;
@@ -707,7 +743,7 @@ template <int Axis, typename Op, typename Tile> auto tile_reduce_axis_impl(Op f,
     return output;
 }
 
-template <typename Tile, typename Op, typename OpTrack> auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
+template <typename Tile, typename Op, typename OpTrack> CUDA_CALLABLE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
 {
     using T = typename Tile::Type;
 
@@ -739,7 +775,7 @@ template <typename Tile, typename Op, typename OpTrack> auto tile_arg_reduce_imp
 #define tile_reduce(op, t) tile_reduce_impl([](auto x, auto y) { return op(x, y);}, t)
 
 template <typename Op, typename Tile, typename AdjOp, typename AdjTile, typename AdjRet>
-void adj_tile_reduce(Op op, Tile& t, AdjOp& adj_op, AdjTile& adj_t, AdjRet& adj_ret)
+CUDA_CALLABLE void adj_tile_reduce(Op op, Tile& t, AdjOp& adj_op, AdjTile& adj_t, AdjRet& adj_ret)
 {
     // MISSINGADJOINT: for differentiable ops, distribute adj_ret to all input elements via
     // op's adjoint
@@ -751,7 +787,7 @@ void adj_tile_reduce(Op op, Tile& t, AdjOp& adj_op, AdjTile& adj_t, AdjRet& adj_
 #define tile_reduce_axis(op, t, axis) tile_reduce_axis_impl<axis>([](auto x, auto y) { return op(x, y);}, t)
 
 template <typename Op, typename Tile, typename AdjOp, typename AdjTile, typename AdjRet>
-void adj_tile_reduce_axis(Op op, Tile& t, int axis, AdjOp& adj_op, AdjTile& adj_t, int& adj_axis, AdjRet& adj_ret)
+CUDA_CALLABLE void adj_tile_reduce_axis(Op op, Tile& t, int axis, AdjOp& adj_op, AdjTile& adj_t, int& adj_axis, AdjRet& adj_ret)
 {
     // MISSINGADJOINT: for differentiable ops, distribute adj_ret along the reduction axis
     // via op's adjoint
@@ -760,7 +796,7 @@ void adj_tile_reduce_axis(Op op, Tile& t, int axis, AdjOp& adj_op, AdjTile& adj_
 // convenience methods for specific reductions
 
 // whole-tile sum
-template <typename Tile> inline CUDA_CALLABLE auto tile_sum(Tile& t) { return tile_reduce(add, t); }
+template <typename Tile> CUDA_CALLABLE auto tile_sum(Tile& t) { return tile_reduce(add, t); }
 
 // special case adjoint for summation
 template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile& t, Tile& adj_t, AdjTile& adj_ret)
@@ -773,7 +809,9 @@ template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile&
     T scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block
-    WP_TILE_SHARED_VAR(T, scratch);
+    // (uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half)
+    __shared__ alignas(T) unsigned char scratch_storage[sizeof(T)];
+    T& scratch = *reinterpret_cast<T*>(scratch_storage);
     if (WP_TILE_THREAD_IDX == 0)
         scratch = adj_reg.data[0];
 
@@ -828,14 +866,15 @@ template <typename TileA, typename TileB> CUDA_CALLABLE auto tile_dot(TileA& a, 
 
     ScalarT result {};
     if constexpr (warp_count == 1) {
-        tile_mask_t mask = __ballot_sync(tile_full_mask, has_data);
+        wp_tile_mask_t mask = __ballot_sync((~wp_tile_mask_t(0)), has_data);
         if (has_data)
             result = warp_reduce(thread_sum, add_op, mask);
 
-        int first_active = tile_ffs(mask) - 1;
+        int first_active = wp_tile_ffs(mask) - 1;
         if (threadIdx.x == first_active)
             output.data[0] = result;
     } else {
+        // multi-warp path: cross-warp reduction (self-contained shared scratch)
         result = block_combine_thread_results<warp_count>(thread_sum, has_data, add_op);
 
         if (threadIdx.x == 0)
@@ -864,7 +903,9 @@ CUDA_CALLABLE void adj_tile_dot(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& a
     ScalarT scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block
-    __shared__ ScalarT scratch;
+    // (uninitialized storage: __shared__ cannot run ScalarT's default constructor on HIP for e.g. half)
+    __shared__ alignas(ScalarT) unsigned char scratch_storage[sizeof(ScalarT)];
+    ScalarT& scratch = *reinterpret_cast<ScalarT*>(scratch_storage);
     if (WP_TILE_THREAD_IDX == 0)
         scratch = adj_reg.data[0];
     WP_TILE_SYNC();
@@ -931,13 +972,13 @@ CUDA_CALLABLE void adj_tile_axpy(
 }
 
 // axis-specific sum
-template <int Axis, typename Tile> inline CUDA_CALLABLE auto tile_sum(Tile& t)
+template <int Axis, typename Tile> CUDA_CALLABLE auto tile_sum(Tile& t)
 {
     return tile_reduce_axis_impl<Axis>([](auto x, auto y) { return add(x, y); }, t);
 }
 
 // special case adjoint for axis-specific summation
-template <int Axis, typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_sum(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <int Axis, typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     using InputShape = typename Tile::Layout::Shape;
 
@@ -1010,25 +1051,24 @@ template <int Axis, typename Tile, typename AdjTile> inline CUDA_CALLABLE void a
     }
 }
 
-template <typename Tile> inline CUDA_CALLABLE auto tile_max(Tile& t) { return tile_reduce(max, t); }
+template <typename Tile> CUDA_CALLABLE auto tile_max(Tile& t) { return tile_reduce(max, t); }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_max(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_max(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route adj_ret to the index of the maximum element
 }
 
-template <typename Tile> inline CUDA_CALLABLE auto tile_min(Tile& t) { return tile_reduce(min, t); }
+template <typename Tile> CUDA_CALLABLE auto tile_min(Tile& t) { return tile_reduce(min, t); }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_min(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_min(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route adj_ret to the index of the minimum element
 }
 
 
-template <typename Tile> inline CUDA_CALLABLE auto tile_argmax(Tile& t) { return tile_arg_reduce(max, argmax_tracker, t); }
+template <typename Tile> CUDA_CALLABLE auto tile_argmax(Tile& t) { return tile_arg_reduce(max, argmax_tracker, t); }
 
-template <typename Tile> auto tile_argmin(Tile& t) { return tile_arg_reduce(min, argmin_tracker, t); }
-
+template <typename Tile> CUDA_CALLABLE auto tile_argmin(Tile& t) { return tile_arg_reduce(min, argmin_tracker, t); }
 
 
 }  // namespace wp

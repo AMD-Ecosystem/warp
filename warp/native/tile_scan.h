@@ -58,7 +58,7 @@ template <typename T, typename Op = OpAdd<T>> inline CUDA_CALLABLE T scan_warp_i
     Op op;
 #pragma unroll
     for (int i = 1; i < WP_TILE_WARP_SIZE; i *= 2) {
-        auto n = __shfl_up_sync(tile_full_mask, value, i, WP_TILE_WARP_SIZE);
+        auto n = __shfl_up_sync((~wp_tile_mask_t(0)), value, i, WP_TILE_WARP_SIZE);
 
         if (lane >= i)
             value = op(value, n);
@@ -77,7 +77,7 @@ inline CUDA_CALLABLE T scan_warp_exclusive(int lane, T value, T* inclusive_value
         *inclusive_value = inclusive;
 
     // Shift right by 1 to convert inclusive to exclusive
-    T exclusive = __shfl_up_sync(tile_full_mask, inclusive, 1, WP_TILE_WARP_SIZE);
+    T exclusive = __shfl_up_sync((~wp_tile_mask_t(0)), inclusive, 1, WP_TILE_WARP_SIZE);
 
     // Lane 0 gets the identity value
     if (lane == 0)
@@ -90,16 +90,18 @@ inline CUDA_CALLABLE T scan_warp_exclusive(int lane, T value, T* inclusive_value
 template <typename T, bool exclusive, typename Op = OpAdd<T>>
 inline CUDA_CALLABLE T thread_block_scan(int lane, int warp_index, int num_warps, T value)
 {
-    WP_TILE_SHARED_ARRAY(T, sums, 1024 / WP_TILE_WARP_SIZE);  // 1024 is the maximum number of threads per block
+    // uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half/vec
+    __shared__ alignas(T) unsigned char sums_storage[sizeof(T) * (1024 / WP_TILE_WARP_SIZE)];  // 1024 is the maximum number of threads per block
+    T* sums = reinterpret_cast<T*>(sums_storage);
     Op op;
 
     T orig_value = value;
 
     if constexpr (exclusive) {
-        value = scan_warp_exclusive<T, Op>(lane, value, lane == (WP_TILE_WARP_SIZE - 1) ? &sums[warp_index] : nullptr);
+        value = scan_warp_exclusive<T, Op>(lane, value, lane == WP_TILE_WARP_SIZE - 1 ? &sums[warp_index] : nullptr);
     } else {
         value = scan_warp_inclusive<T, Op>(lane, value);
-        if (lane == (WP_TILE_WARP_SIZE - 1))
+        if (lane == WP_TILE_WARP_SIZE - 1)
             sums[warp_index] = value;
     }
 
@@ -128,7 +130,9 @@ inline CUDA_CALLABLE void thread_block_scan(T* values, int num_elements)
     const int num_iterations = (num_elements + num_threads_in_block - 1) / num_threads_in_block;
     Op op;
 
-    WP_TILE_SHARED_VAR(T, offset);
+    // uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half/vec
+    __shared__ alignas(T) unsigned char offset_storage[sizeof(T)];
+    T& offset = *reinterpret_cast<T*>(offset_storage);
     if (threadIdx.x == 0)
         offset = op.identity();
 
@@ -169,7 +173,9 @@ inline CUDA_CALLABLE auto tile_scan_inclusive_impl(Tile& t)
     constexpr int num_elements_to_scan = Tile::Layout::Shape::size();
 
     // create a temporary shared tile to hold the input values
-    WP_TILE_SHARED_ARRAY(T, smem, num_elements_to_scan);
+    // uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half/vec
+    __shared__ alignas(T) unsigned char smem_storage[sizeof(T) * num_elements_to_scan];
+    T* smem = reinterpret_cast<T*>(smem_storage);
     tile_shared_t<T, tile_layout_strided_t<typename Tile::Layout::Shape>, false> scratch(smem, nullptr);
 
     // copy input values to scratch space
@@ -192,7 +198,9 @@ inline CUDA_CALLABLE auto tile_scan_exclusive_impl(Tile& t)
     constexpr int num_elements_to_scan = Tile::Layout::Shape::size();
 
     // create a temporary shared tile to hold the input values
-    WP_TILE_SHARED_ARRAY(T, smem, num_elements_to_scan);
+    // uninitialized storage: __shared__ cannot run T's default constructor on HIP for e.g. half/vec
+    __shared__ alignas(T) unsigned char smem_storage[sizeof(T) * num_elements_to_scan];
+    T* smem = reinterpret_cast<T*>(smem_storage);
     tile_shared_t<T, tile_layout_strided_t<typename Tile::Layout::Shape>, false> scratch(smem, nullptr);
 
     // copy input values to scratch space
@@ -253,39 +261,39 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
 
 #endif  // !defined(__CUDA_ARCH__)
 
-template <typename Tile> inline CUDA_CALLABLE auto tile_scan_inclusive(Tile& t) { return tile_scan_inclusive_impl(t); }
+template <typename Tile> CUDA_CALLABLE auto tile_scan_inclusive(Tile& t) { return tile_scan_inclusive_impl(t); }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_scan_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_scan_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // MISSINGADJOINT: adjoint of inclusive prefix sum is reverse-suffix sum of adj_ret
 }
 
-template <typename Tile> inline CUDA_CALLABLE auto tile_scan_exclusive(Tile& t) { return tile_scan_exclusive_impl(t); }
+template <typename Tile> CUDA_CALLABLE auto tile_scan_exclusive(Tile& t) { return tile_scan_exclusive_impl(t); }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_scan_exclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_scan_exclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // MISSINGADJOINT: adjoint of exclusive prefix sum is reverse-suffix sum of adj_ret
     // shifted by one
 }
 
 // Max scan operations
-template <typename Tile> inline CUDA_CALLABLE auto tile_scan_max_inclusive(Tile& t)
+template <typename Tile> CUDA_CALLABLE auto tile_scan_max_inclusive(Tile& t)
 {
     return tile_scan_inclusive_impl<Tile, OpMax<typename Tile::Type>>(t);
 }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_scan_max_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_scan_max_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route each adj_ret[i] to argmax over [0, i]
 }
 
 // Min scan operations
-template <typename Tile> inline CUDA_CALLABLE auto tile_scan_min_inclusive(Tile& t)
+template <typename Tile> CUDA_CALLABLE auto tile_scan_min_inclusive(Tile& t)
 {
     return tile_scan_inclusive_impl<Tile, OpMin<typename Tile::Type>>(t);
 }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_scan_min_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_scan_min_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route each adj_ret[i] to argmin over [0, i]
 }

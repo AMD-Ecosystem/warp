@@ -30,16 +30,16 @@ struct bvh_query_thread_block_t {
     BVH bvh;
 
     // BVH traversal stack (shared memory pointers):
-    int* WP_RESTRICT stack_shared_mem;  // [block_size] - buffer to store node indices
-    int* WP_RESTRICT count_shared_mem;  // [1] - counter for number of nodes on the stack
-    int* WP_RESTRICT result_counter_shared_mem;  // [1] - counter for number of results found
-    int* WP_RESTRICT result_buffer_shared_mem;  // [block_size] - buffer to store result indices
+    int* stack_shared_mem;  // [block_size] - buffer to store node indices
+    int* count_shared_mem;  // [1] - counter for number of nodes on the stack
+    int* result_counter_shared_mem;  // [1] - counter for number of results found
+    int* result_buffer_shared_mem;  // [block_size] - buffer to store result indices
     // Flag recording whether the most recent tile_bvh_query_next() produced any valid
     // results (non-zero) or the query is exhausted (zero). Needed because the counters
     // above are decremented after the tile is emitted, so they cannot be used alone to
     // answer tile_query_valid() once the final (possibly partial) batch has been handed
     // out to the caller.
-    int* WP_RESTRICT last_valid_shared_mem;  // [1]
+    int* last_valid_shared_mem;  // [1]
     static const int result_buffer_capacity = WP_TILE_BLOCK_DIM * 5;
     static const int stack_capacity = 64 * BVH_QUERY_STACK_SIZE;
 
@@ -376,7 +376,7 @@ CUDA_CALLABLE inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, co
 #else
 
 // CPU implementation: falls back to single-threaded query, returns index only in first element
-template <int Length> inline CUDA_CALLABLE auto tile_bvh_query_next_impl(bvh_query_thread_block_t& query)
+template <int Length> inline auto tile_bvh_query_next_impl(bvh_query_thread_block_t& query)
 {
     // On CPU, bvh_query_thread_block_t is aliased to bvh_query_t
     // We just call the regular query and put the result in the first element of a tile
@@ -396,7 +396,7 @@ template <int Length> inline CUDA_CALLABLE auto tile_bvh_query_next_impl(bvh_que
 
 // Wrapper - on CPU this needs an explicit block_dim parameter since WP_TILE_BLOCK_DIM is not defined
 // However, for consistency we'll use a default value
-inline CUDA_CALLABLE auto tile_bvh_query_next(bvh_query_thread_block_t& query)
+inline auto tile_bvh_query_next(bvh_query_thread_block_t& query)
 {
     // On CPU, just return a single element tile with the query result
     // Using Length=1 since we don't have block_dim available
@@ -406,14 +406,14 @@ inline CUDA_CALLABLE auto tile_bvh_query_next(bvh_query_thread_block_t& query)
 inline bool tile_query_valid(const bvh_query_thread_block_t& query) { return query.last_query_valid; }
 
 // CPU version: tile_bvh_query_aabb just creates a regular query
-inline CUDA_CALLABLE bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
+inline bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
 {
     // On CPU, this is just bvh_query_aabb since bvh_query_thread_block_t = bvh_query_t
     return bvh_query_aabb(id, lower, upper, -1);
 }
 
 // CPU version: tile_bvh_query_ray just creates a regular ray query
-inline CUDA_CALLABLE bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir)
+inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir)
 {
     // On CPU, this is just bvh_query_ray since bvh_query_thread_block_t = bvh_query_t
     return bvh_query_ray(id, start, dir, -1);

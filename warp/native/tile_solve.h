@@ -245,7 +245,7 @@ CUDA_CALLABLE void adj_tile_lower_solve(
     constexpr int nrhs = (TileZ::Layout::Shape::N == 1) ? 1 : TileZ::Layout::Shape::dim(1);
 
     // Raw scratch for the transposed solve L^T W = adj_ret.
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     __shared__ T W[n * nrhs];
 #else
     T W[n * nrhs];

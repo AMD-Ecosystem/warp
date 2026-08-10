@@ -160,7 +160,7 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut&
     // Lower: Out(row, col), Upper: Out(col, row)
     auto idx = [](int row, int col) { return Upper ? tile_coord(col, row) : tile_coord(row, col); };
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     __shared__ T W1[n * n];
     __shared__ T W2[n * n];
 #else
