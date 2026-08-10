@@ -563,8 +563,10 @@ for src_type, src_ctor in array_constructors.items():
             else:
                 grad_flags = [False]
 
-            # graph capture options (only supported with CUDA devices)
-            if src_device.is_cuda or dst_device.is_cuda:
+            # graph capture options (only supported on CUDA devices that support
+            # native graph capture; HIP/ROCm does not, so only test NoGraph there)
+            cuda_in_copy = [d for d in (src_device, dst_device) if d.is_cuda]
+            if cuda_in_copy and all(d.supports_graph_capture for d in cuda_in_copy):
                 graph_flags = [False, True]
             else:
                 graph_flags = [False]

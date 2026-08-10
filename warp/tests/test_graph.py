@@ -1371,8 +1371,9 @@ def test_cuda_graph_topo_alloc_free_serializes_dependent_streams_only(test, devi
         assert _nodes_independent(node7, node8)
 
 
-devices = get_test_devices()
-devices_with_cuda_graph_module_load = get_test_devices_with_cuda_graph_module_load()
+# HIP/ROCm does not support native CUDA graph capture; exclude HIP devices.
+devices = [d for d in get_test_devices() if not d.is_hip]
+devices_with_cuda_graph_module_load = [d for d in get_test_devices_with_cuda_graph_module_load() if not d.is_hip]
 devices_with_graph_capture_allocation_and_cuda_graph_module_load = (
     get_test_devices_with_graph_capture_allocation_and_cuda_graph_module_load()
 )
@@ -1446,8 +1447,8 @@ add_function_test(
     devices=devices_with_graph_capture_allocation_and_cuda_graph_module_load,
 )
 
-# CUDA-only tests
-cuda_devices = get_selected_cuda_test_devices_with_mempool()
+# CUDA-only tests (HIP excluded: no native graph capture)
+cuda_devices = [d for d in get_selected_cuda_test_devices_with_mempool() if not d.is_hip]
 
 add_function_test(
     TestGraph,

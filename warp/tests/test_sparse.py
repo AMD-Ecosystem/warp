@@ -1296,6 +1296,11 @@ devices = get_test_devices()
 cuda_test_devices = get_selected_cuda_test_devices()
 cuda_test_devices_with_mempool = get_selected_cuda_test_devices_with_mempool()
 
+# Graph-capture tests require a device where capture is a real (deferred)
+# operation. Capture is a no-op on HIP/ROCm (Device.supports_graph_capture is
+# False), so filter to devices that actually support it.
+graph_capture_test_devices = [d for d in cuda_test_devices_with_mempool if d.supports_graph_capture]
+
 
 class TestSparse(unittest.TestCase):
     def test_bsr_copy_scale(self):
@@ -1364,42 +1369,42 @@ add_function_test(TestSparse, "test_csr_mv", make_test_bsr_mv((1, 1), wp.float32
 add_function_test(TestSparse, "test_bsr_mv_1_3", make_test_bsr_mv((1, 3), wp.float32), devices=devices)
 add_function_test(TestSparse, "test_bsr_mv_3_3", make_test_bsr_mv((3, 3), wp.float64), devices=devices)
 
-add_function_test(TestSparse, "test_capturability", test_capturability, devices=cuda_test_devices_with_mempool)
+add_function_test(TestSparse, "test_capturability", test_capturability, devices=graph_capture_test_devices)
 add_function_test(
     TestSparse,
     "test_bsr_compress_compact_capturability",
     test_bsr_compress_compact_capturability,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(
     TestSparse,
     "test_padded_bsr_capture_constructs_matrix",
     test_padded_bsr_capture_constructs_matrix,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(
     TestSparse,
     "test_padded_bsr_capture_triplets_and_overflow",
     test_padded_bsr_capture_triplets_and_overflow,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(
     TestSparse,
     "test_padded_bsr_capture_reblock_copy",
     test_padded_bsr_capture_reblock_copy,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(
     TestSparse,
     "test_padded_bsr_status_sync_cuda_capture_rejected",
     test_padded_bsr_status_sync_cuda_capture_rejected,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(
     TestSparse,
     "test_padded_bsr_capture_per_row_without_nnz_capacity_rejected",
     test_padded_bsr_capture_per_row_without_nnz_capacity_rejected,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(TestSparse, "test_bsr_mm_max_new_nnz", test_bsr_mm_max_new_nnz, devices=devices, check_output=False)
 

@@ -358,6 +358,24 @@ def assert_np_equal(result: np.ndarray, expect: np.ndarray, tol=0.0):
         np.testing.assert_array_equal(result, expect)
 
 
+# Substrings identifying runtime errors for features that are fundamentally
+# unsupported on HIP/ROCm (native CUDA graph capture and conditional graph
+# nodes). Tests that incidentally exercise these on a HIP device are skipped
+# rather than hard-failed. See warp._src.context for the raising sites.
+#
+# The dynamic-shared-memory shortfall marker covers tiles that fit within
+# NVIDIA's large opt-in shared memory budget but exceed gfx942's 64 KB LDS
+# limit (most often the backward pass, which reserves twice the tile bytes).
+# This is a hardware limit rather than a Warp bug, so such launches are skipped
+# on HIP rather than hard-failed.
+_HIP_UNSUPPORTED_ERROR_MARKERS = (
+    "native graph capture is unsupported",
+    "Graph capture is not active on this stream",
+    "Conditional graph nodes are not supported on HIP",
+    "bytes of dynamic shared memory, but only",
+)
+
+
 # if check_output is True any output to stdout will be treated as an error
 def create_test_func(func, device, check_output, device_check=None, **kwargs):
     # pass args to func
@@ -366,11 +384,17 @@ def create_test_func(func, device, check_output, device_check=None, **kwargs):
         if device_check is not None:
             device_check(self, device)
 
-        if check_output:
-            with CheckOutput(self):
+        try:
+            if check_output:
+                with CheckOutput(self):
+                    func(self, device, **kwargs)
+            else:
                 func(self, device, **kwargs)
-        else:
-            func(self, device, **kwargs)
+        except RuntimeError as e:
+            is_hip = device is not None and wp.get_device(device).is_hip
+            if is_hip and any(marker in str(e) for marker in _HIP_UNSUPPORTED_ERROR_MARKERS):
+                self.skipTest(f"Feature unsupported on HIP/ROCm: {e}")
+            raise
 
     return test_func
 

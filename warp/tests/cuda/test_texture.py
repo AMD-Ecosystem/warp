@@ -2835,8 +2835,9 @@ class TestTexture(unittest.TestCase):
 
 
 # Register tests - textures work on both CPU and CUDA devices
-cuda_devices = get_selected_cuda_test_devices()
-all_devices = get_test_devices()
+# (device textures are unsupported on HIP/ROCm, so exclude HIP devices)
+cuda_devices = [d for d in get_selected_cuda_test_devices() if not d.is_hip]
+all_devices = [d for d in get_test_devices() if not d.is_hip]
 
 # Core texture tests - run on all devices (CPU + CUDA)
 add_function_test(TestTexture, "test_texture1d_1channel", test_texture1d_1channel, devices=all_devices)
