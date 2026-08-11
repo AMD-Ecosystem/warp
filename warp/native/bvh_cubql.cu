@@ -88,6 +88,20 @@ __global__ void cubql_copy_nodes_to_native(
         return;
     }
 
+    // cuBQL reserves node index 1 as permanently unused: valid inner-node child
+    // pairs always start at an even index >= 2, and the builder never writes
+    // node 1's Admin word (see cuBQL/bvh.h). Decoding that stale word as a real
+    // inner node would scatter node_parents[] writes at an arbitrary offset. On
+    // HIP the node array is drawn from a reused device allocation, so node 1 can
+    // carry left-over bits from a previously freed (and larger) buffer, and the
+    // resulting out-of-bounds write silently corrupts an adjacent allocation.
+    // Node 1 is never reached during traversal, so emit a harmless empty leaf.
+    if (num_nodes > 1 && tid == 1) {
+        node_lowers[tid] = make_node(vec3(), 0, true);
+        node_uppers[tid] = make_node(vec3(), 0, false);
+        return;
+    }
+
     const CubqlNode node = cubql_nodes[tid];
     const uint16_t leaf_count = uint16_t(node.admin >> 48);
     const uint64_t offset = node.admin & 0x0000FFFFFFFFFFFFull;
@@ -98,8 +112,13 @@ __global__ void cubql_copy_nodes_to_native(
     node_uppers[tid] = make_node(node.upper, int(upper_offset), false);
 
     if (!is_leaf) {
-        node_parents[offset] = tid;
-        node_parents[offset + 1] = tid;
+        // A well-formed inner node has both children inside [0, num_nodes).
+        // Guard defensively so a stale/garbage offset can never index past the
+        // node_parents[] array and corrupt neighbouring memory.
+        if (offset + 1 < uint64_t(num_nodes)) {
+            node_parents[offset] = tid;
+            node_parents[offset + 1] = tid;
+        }
     }
 }
 
@@ -570,11 +589,23 @@ static inline bool cubql_copy_to_native_device(BVH& bvh, const cuBQL::bvh3f& nat
 
 static cuBQL::GpuMemoryResource& cubql_get_mem_resource()
 {
+    static cuBQL::DeviceMemoryResource sync_resource;
+#if defined(__HIP_PLATFORM_AMD__)
+    // On ROCm, cuBQL's async allocator issues hipMallocAsync/hipFreeAsync against
+    // the device's default memory pool -- the same pool Warp's stream-ordered
+    // allocator uses -- and additionally raises that pool's release threshold to
+    // UINT64_MAX. On gfx942 this cross-stream sharing of the default pool
+    // cumulatively corrupts its internal free list, which later surfaces as a
+    // spurious illegal memory access on an unrelated allocation. Give cuBQL its
+    // own plain hipMalloc/hipFree scratch so its transient build buffers never
+    // touch Warp's pool. The CUDA path is unchanged.
+    return sync_resource;
+#else
     int ordinal = wp_cuda_context_get_device_ordinal(wp_cuda_context_get_current());
     if (wp_cuda_device_is_mempool_supported(ordinal))
         return cuBQL::defaultGpuMemResource();
-    static cuBQL::DeviceMemoryResource sync_resource;
     return sync_resource;
+#endif
 }
 
 void cubql_bvh_create_device(
