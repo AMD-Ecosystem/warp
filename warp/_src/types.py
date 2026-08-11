@@ -6024,8 +6024,8 @@ class Mesh:
             raise RuntimeError(
                 "Failed to create wp.Mesh on device "
                 f"'{self.device}' with bvh_constructor='{bvh_constructor.name.lower()}'. "
-                "The native mesh builder returned a null handle; check the "
-                "stderr output for the underlying error."
+                "The native mesh builder returned a null handle: "
+                f"{self.runtime.get_error_string()}"
             )
 
     def __del__(self):

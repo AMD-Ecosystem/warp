@@ -455,7 +455,7 @@ class TestMesh(unittest.TestCase):
             mock.patch.object(runtime.core, "wp_mesh_create_host", return_value=0),
             mock.patch.object(runtime, "get_error_string", return_value="native failure"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "Failed to create mesh: native failure"):
+            with self.assertRaisesRegex(RuntimeError, "Failed to create wp.Mesh.*native failure"):
                 wp.Mesh(points=points, indices=indices)
 
     def test_mesh_refit_raises_on_native_device_failure(self):
