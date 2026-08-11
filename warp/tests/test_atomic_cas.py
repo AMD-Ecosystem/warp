@@ -271,6 +271,14 @@ def test_atomic_cas_4d(test, device, dtype, register_kernels=False):
 
 devices = get_test_devices()
 
+# GPU-wide spinlocks built on atomic_cas require independent thread scheduling
+# (NVIDIA Volta and newer). HIP/ROCm wavefronts execute in lockstep under a
+# shared execution mask, so the lane that wins the lock cannot leave the acquire
+# loop to release it until every other lane also exits the loop -- which never
+# happens, deadlocking the kernel. Restrict these tests to devices that provide
+# forward-progress guarantees (CPU and non-HIP CUDA).
+spinlock_devices = [d for d in devices if not d.is_hip]
+
 
 class TestAtomicCAS(unittest.TestCase):
     pass
@@ -282,17 +290,17 @@ np_test_types = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.float6
 for dtype in np_test_types:
     type_name = dtype.__name__
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_{type_name}", test_atomic_cas, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_{type_name}", test_atomic_cas, devices=spinlock_devices, dtype=dtype
     )
     # Add 2D test for each type
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_2d_{type_name}", test_atomic_cas_2d, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_2d_{type_name}", test_atomic_cas_2d, devices=spinlock_devices, dtype=dtype
     )
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_3d_{type_name}", test_atomic_cas_3d, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_3d_{type_name}", test_atomic_cas_3d, devices=spinlock_devices, dtype=dtype
     )
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_4d_{type_name}", test_atomic_cas_4d, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_4d_{type_name}", test_atomic_cas_4d, devices=spinlock_devices, dtype=dtype
     )
 
 if __name__ == "__main__":
