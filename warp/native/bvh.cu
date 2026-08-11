@@ -890,6 +890,14 @@ void LinearBVHBuilderGPU::build(
 
     wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_parents, 0xFF, sizeof(int) * bvh.max_nodes);
 
+    // A single-item tree has no internal nodes, so build_karras_topology (which
+    // only writes *root from the internal node covering [0, n-1]) never sets it.
+    // Seed the root with node 0 -- the lone leaf, which is the root in that case.
+    // For multi-item trees build_karras_topology overwrites this with the true
+    // root index. Without this the root pointer keeps stale bits from the reused
+    // device allocation and traversal/refit dereferences a garbage node index.
+    wp_memset_device(WP_CURRENT_CONTEXT, bvh.root, 0, sizeof(int));
+
     wp_launch_device(
         WP_CURRENT_CONTEXT, build_karras_topology, num_items,
         (num_items, bvh.root, keys, range_lefts, range_rights, bvh.node_parents, bvh.node_lowers, bvh.node_uppers)
