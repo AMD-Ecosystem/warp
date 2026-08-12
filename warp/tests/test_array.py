@@ -4258,7 +4258,12 @@ add_function_test(TestArray, "test_array4d_slicing", test_array4d_slicing, devic
 add_function_test(TestArray, "test_dynamic_array_slice", test_dynamic_array_slice, devices=devices)
 add_function_test(TestArray, "test_array_runtime_zero_step", test_array_runtime_zero_step, devices=devices)
 
-add_function_test(TestArray, "test_graph_fill_vecmat", test_graph_fill_vecmat, devices=cuda_devices)
+# Graph capture is unsupported on HIP/ROCm and this test raises inside subTest blocks
+# (which unittest records as errors before the central skip hook can see them), so gate
+# it on graph-capture-capable devices.
+add_function_test(
+    TestArray, "test_graph_fill_vecmat", test_graph_fill_vecmat, devices=get_cuda_graph_capture_test_devices()
+)
 
 try:
     import torch

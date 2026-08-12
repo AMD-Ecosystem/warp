@@ -196,6 +196,23 @@ def get_cuda_device_pair_with_mempool_access_support(devices=None):
     return None
 
 
+def get_graph_capture_test_devices(mode: str | None = None):
+    """Like :func:`get_test_devices`, but drops devices without native graph-capture support.
+
+    Native CUDA-style graph capture is unavailable on HIP/ROCm (``ScopedCapture`` is a
+    no-op there and ``Device.supports_graph_capture`` is ``False``), so tests that build
+    and replay captured graphs must gate on this. Filtering here (rather than relying on
+    the central skip-on-HIP hook) is required for tests whose capture errors are raised
+    inside ``subTest`` blocks, which unittest records as errors before they can propagate.
+    """
+    return [d for d in get_test_devices(mode) if d.supports_graph_capture]
+
+
+def get_cuda_graph_capture_test_devices(mode: str | None = None):
+    """Like :func:`get_cuda_test_devices`, but drops devices without native graph-capture support (HIP)."""
+    return [d for d in get_cuda_test_devices(mode) if d.supports_graph_capture]
+
+
 def get_test_devices_with_graph_capture_allocation(mode: str | None = None):
     """Like :func:`get_test_devices`, but drops devices that cannot allocate during graph capture.
 

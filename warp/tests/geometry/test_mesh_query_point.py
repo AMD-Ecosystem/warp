@@ -11,6 +11,15 @@ import warp as wp
 import warp.examples
 from warp.tests.unittest_utils import *
 
+# On HIP, -ffp-contract=fast (the default when fuse_fp=True) can contract the two
+# inlined mesh_query_point calls in sample_mesh_query differently. At points
+# equidistant to two faces this resolves to different faces and breaks the exact
+# face/u/v cross-check (wp.expect_eq); the distances themselves stay correct within
+# tolerance. Disable FP contraction for this determinism-sensitive module on HIP so
+# both invocations are bit-identical, matching NVIDIA's consistent contraction.
+if any(d.is_hip for d in wp.get_cuda_devices()):
+    wp.set_module_options({"fuse_fp": False})
+
 
 @wp.kernel
 def sample_mesh_query(

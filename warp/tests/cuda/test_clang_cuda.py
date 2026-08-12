@@ -155,7 +155,9 @@ class TestClangCUDA(unittest.TestCase):
         wp.config.llvm_cuda = cls._saved_llvm_cuda
 
 
-devices = get_selected_cuda_test_devices()
+# The Clang/LLVM CUDA path targets NVIDIA (sm_*) and produces a CUDA device image
+# that cannot load on HIP/ROCm (gfx*) devices, so restrict this suite to real CUDA.
+devices = [d for d in get_selected_cuda_test_devices() if not d.is_hip]
 add_function_test(TestClangCUDA, "test_trivial_kernel", test_trivial_kernel, devices=devices)
 add_function_test(TestClangCUDA, "test_math_kernel", test_math_kernel, devices=devices)
 add_function_test(TestClangCUDA, "test_vec_kernel", test_vec_kernel, devices=devices)

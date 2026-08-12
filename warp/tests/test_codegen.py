@@ -1456,7 +1456,10 @@ def test_augassign_no_double_eval_pow_subscript(test, device):
     test.assertEqual(
         counter.numpy()[0], 1, "RHS of augmented assignment with **= on subscript was evaluated more than once"
     )
-    test.assertAlmostEqual(data.numpy()[0], 25.0)
+    # gfx942's powf differs from NVIDIA's by ~1e-6 for 5**2; relax the precision
+    # check on HIP (the assertion's purpose is the single-evaluation count above).
+    places = 4 if wp.get_device(device).is_hip else 7
+    test.assertAlmostEqual(data.numpy()[0], 25.0, places=places)
 
 
 # Mul on vec component (v[0] *= expr)
