@@ -2242,7 +2242,12 @@ class ModuleBuilder:
 
         kernel.adj.build(self)
 
-        if kernel.adj.return_var is not None:
+        # `build()` returns early (without setting `return_var`) when the kernel's
+        # adjoint is flagged `skip_build` — the mechanism used to sideline kernels
+        # that intentionally raised during a prior build (e.g. negative unit tests).
+        # Use `getattr` so we skip such kernels gracefully instead of raising an
+        # AttributeError that would abort the entire module build.
+        if getattr(kernel.adj, "return_var", None) is not None:
             raise WarpCodegenTypeError(f"'{kernel.key}': Error, kernels can't have return values")
 
     def build_function(self, func):

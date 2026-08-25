@@ -477,8 +477,19 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
-#if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
-        if (wp_cuda_driver_version() >= 12040) {
+        //
+        // Prefer pausing the capture (HIP/ROCm, and CUDA 12.4+) so the staging allocation and copy
+        // happen outside the graph. Capturing the device allocation as a graph memory-allocation
+        // node fails to instantiate on secondary devices (ordinal != 0) on HIP/ROCm (CUDA error
+        // 801, "operation not supported"); staging outside the capture avoids creating such a node.
+        bool staged_via_pause = false;
+#if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12040
+#if defined(__HIP_PLATFORM_AMD__)
+        const bool can_pause_capture = true;
+#else
+        const bool can_pause_capture = wp_cuda_driver_version() >= 12040;
+#endif
+        if (can_pause_capture) {
             // pause the capture so that the alloc/memcpy won't be captured
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(WP_CURRENT_CONTEXT, stream, &graph))
@@ -510,10 +521,12 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
                 return false;
 
             free_devptr = false;  // memory is owned by the graph, doesn't need to be freed
-        } else
+            staged_via_pause = true;
+        }
 #endif
+        if (!staged_via_pause)
         {
-            // older CUDA can't pause/resume the capture, so stage in CPU memory
+            // can't pause/resume the capture, so stage in CPU memory
             void* hostptr = wp_alloc_host(size);
             if (!hostptr) {
                 fprintf(
