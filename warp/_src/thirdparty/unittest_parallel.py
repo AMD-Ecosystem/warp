@@ -80,6 +80,14 @@ def main(argv=None):
         help="'autodetect' suite only: Pattern to match tests ('test*.py' default)",  # NVIDIA Modification
     )
     parser.add_argument(
+        "-x",
+        "--exclude",
+        dest="exclude",
+        action="append",
+        metavar="SUBSTRING",
+        help="Exclude any test whose id (module.Class.method) contains SUBSTRING. May be repeated.",
+    )  # NVIDIA Modification
+    parser.add_argument(
         "-t",
         "--top-level-directory",
         metavar="TOP",
@@ -203,6 +211,11 @@ def main(argv=None):
                 )
             else:
                 discover_suite = auto_discover_suite
+
+            # NVIDIA Modification: drop tests whose id matches any --exclude substring
+            if args.exclude:
+                filtered_suite = _filter_excluded_suite(discover_suite, args.exclude)
+                discover_suite = filtered_suite if filtered_suite is not None else unittest.TestSuite()
 
         # Get the parallelizable test suites
         if args.level == "test":
@@ -428,11 +441,11 @@ def main(argv=None):
                 test_duration,
             )
 
-        # Return an error status on failure
-        if not is_success:
-            parser.exit(status=len(errors) + len(failures) + unexpected_successes)
-
         # Coverage?
+        # NVIDIA Modification: generate the coverage report BEFORE the failure
+        # exit below. Coverage data is valid regardless of whether tests pass,
+        # so a single flaky/timed-out test should not discard the whole run's
+        # report (which is expensive to reproduce).
         if args.coverage:
             # Combine the coverage files
             cov_options = {}
@@ -456,6 +469,11 @@ def main(argv=None):
             # Fail under
             if args.coverage_fail_under and percent_covered < args.coverage_fail_under:
                 parser.exit(status=2)
+
+        # Return an error status on failure (after the coverage report above has
+        # been written, so flaky failures still yield a usable report).
+        if not is_success:
+            parser.exit(status=len(errors) + len(failures) + unexpected_successes)
 
 
 def _convert_select_pattern(pattern):
@@ -495,6 +513,25 @@ def _coverage(args, temp_dir):
     else:
         # Not running tests with coverage - yield for unit test running
         yield None
+
+
+# NVIDIA Modification: recursively rebuild a suite, dropping test cases whose id
+# contains any of the given substrings. Preserves the nested module/class structure
+# so class-level parallelism is unaffected. Returns None if nothing remains.
+def _filter_excluded_suite(test_suite, patterns):
+    if isinstance(test_suite, unittest.TestCase):
+        test_id = test_suite.id()
+        if any(pattern in test_id for pattern in patterns):
+            return None
+        return test_suite
+
+    filtered = unittest.TestSuite()
+    for child in test_suite:
+        kept = _filter_excluded_suite(child, patterns)
+        if kept is not None:
+            filtered.addTest(kept)
+
+    return filtered if filtered.countTestCases() > 0 else None
 
 
 # Iterate module-level test suites - all top-level test suites returned from TestLoader.discover

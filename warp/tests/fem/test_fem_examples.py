@@ -87,6 +87,12 @@ def add_fem_example_test(
         # as an actual CLI flag, so the ordering is harmless in practice.
         test_timeout = options.pop("test_timeout", 600)
 
+        # Coverage instrumentation ("coverage run") slows the subprocess
+        # substantially, so scale the timeout to avoid spurious timeouts under
+        # --coverage (e.g. example_adaptive_grid exceeding the 600s default).
+        if warp.tests.unittest_utils.coverage_enabled:
+            test_timeout *= 4
+
         result = subprocess.run(
             command, capture_output=True, text=True, env=env_vars, timeout=test_timeout, check=False
         )

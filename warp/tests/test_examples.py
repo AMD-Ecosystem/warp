@@ -158,6 +158,12 @@ def add_example_test(
         # Set the test timeout in seconds
         test_timeout = options.pop("test_timeout", 600)
 
+        # Coverage instrumentation ("coverage run") slows the subprocess
+        # substantially, so scale the timeout to avoid spurious timeouts under
+        # --coverage.
+        if warp.tests.unittest_utils.coverage_enabled:
+            test_timeout *= 4
+
         # with wp.ScopedTimer(f"{name}_{sanitize_identifier(device)}"):
         # Run the script as a subprocess
         result = subprocess.run(

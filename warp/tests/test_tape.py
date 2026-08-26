@@ -36,6 +36,24 @@ def dot_product(x: wp.array(dtype=float), y: wp.array(dtype=float), z: wp.array(
     wp.atomic_add(z, 0, x[tid] * y[tid])
 
 
+@wp.kernel
+def _tape_step(a: wp.array(dtype=float), b: wp.array(dtype=float)):
+    tid = wp.tid()
+    b[tid] = a[tid] * 2.0
+
+
+@wp.kernel(enable_backward=False)
+def _tape_no_backward(a: wp.array(dtype=float), b: wp.array(dtype=float)):
+    tid = wp.tid()
+    b[tid] = a[tid] + 1.0
+
+
+@wp.kernel
+def _tape_scalar_kernel(a: wp.array(dtype=float), s: float, b: wp.array(dtype=float)):
+    tid = wp.tid()
+    b[tid] = a[tid] * s
+
+
 def test_tape_mul_constant(test, device):
     dim = 8
     iters = 16
@@ -312,6 +330,163 @@ class TestTape(unittest.TestCase):
             with wp.Tape():
                 with wp.Tape():
                     pass
+
+    def test_tape_visualize_options(self):
+        device = "cpu"
+        dim = 4
+        tape = wp.Tape()
+        with tape:
+            a = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            # iterative chain where each output feeds the next launch (repeated
+            # sequence + wrap-around connections)
+            cur = a
+            for _ in range(6):
+                nxt = wp.zeros_like(cur)
+                wp.launch(_tape_step, dim=dim, inputs=[cur], outputs=[nxt], device=device)
+                cur = nxt
+        out = cur
+
+        code = tape.visualize(
+            simplify_graph=True,
+            hide_readonly_arrays=True,
+            array_labels={a: "start", out: "end"},
+            choose_longest_node_name=False,
+            track_inputs=[a],
+            track_outputs=[out],
+            track_input_names=["x_in"],
+            track_output_names=["x_out"],
+            graph_direction="TB",
+        )
+        self.assertIn("digraph", code)
+        # array_labels take precedence over the auto-generated track names
+        self.assertIn("start", code)
+        self.assertIn("end", code)
+        self.assertIn("repeated 6x", code)
+
+        # no simplification, ignore scopes
+        code2 = tape.visualize(simplify_graph=False, ignore_graph_scopes=True)
+        self.assertIn("_tape_step", code2)
+
+        # writing to a file
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            fn = os.path.join(d, "tape.dot")
+            tape.visualize(filename=fn)
+            self.assertTrue(os.path.exists(fn))
+
+    def test_tape_visualize_scalar_and_struct(self):
+        device = "cpu"
+        dim = 4
+
+        # kernel with a scalar (non-array) input argument
+        tape = wp.Tape()
+        with tape:
+            a = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            b = wp.zeros_like(a)
+            wp.launch(_tape_scalar_kernel, dim=dim, inputs=[a, 2.5], outputs=[b], device=device)
+        self.assertIn("dtype=", tape.visualize())
+
+        # kernel with a struct input argument
+        tape2 = wp.Tape()
+        with tape2:
+            m = Multiplicands()
+            m.x = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            m.y = wp.array(np.ones(dim) * 2.0, dtype=wp.float32, device=device, requires_grad=True)
+            z = wp.zeros_like(m.x)
+            wp.launch(mul_variable, dim=dim, inputs=[m], outputs=[z], device=device)
+        self.assertIn("mul_variable", tape2.visualize())
+
+    def test_tape_visitors(self):
+        from warp._src.tape import ArrayStatsVisitor, TapeVisitor, visit_tape
+
+        device = "cpu"
+        dim = 4
+        tape = wp.Tape()
+        with tape:
+            a = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            b = wp.zeros_like(a)
+            wp.launch(_tape_step, dim=dim, inputs=[a], outputs=[b], device=device)
+        b.grad = wp.array(np.ones(dim), dtype=wp.float32, device=device)
+        tape.backward()
+
+        # base visitor with no-op emit methods
+        visit_tape(tape, TapeVisitor())
+
+        # stats visitor computes numpy statistics over outputs and gradients
+        stats = ArrayStatsVisitor()
+        visit_tape(tape, stats)
+        self.assertGreaterEqual(len(stats.launches), 1)
+        self.assertGreaterEqual(len(stats.array_value_stats), 1)
+
+    def test_tape_record_func_and_backward_errors(self):
+        device = "cpu"
+        dim = 4
+
+        # record_func with a valid gradient-tracked array
+        tape = wp.Tape()
+        a = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+        called = []
+        tape.record_func(lambda: called.append(True), [a])
+        tape.backward()
+        self.assertEqual(called, [True])
+
+        # record_func error when an array has no gradient
+        tape2 = wp.Tape()
+        no_grad = wp.array(np.ones(dim), dtype=wp.float32, device=device)
+        with self.assertRaisesRegex(RuntimeError, "missing a gradient"):
+            tape2.record_func(lambda: None, [no_grad])
+
+        # backward loss validation errors
+        tape3 = wp.Tape()
+        big_loss = wp.zeros(dim, dtype=wp.float32, device=device, requires_grad=True)
+        with self.assertRaisesRegex(RuntimeError, "scalar loss"):
+            tape3.backward(loss=big_loss)
+
+        loss_no_grad = wp.zeros(1, dtype=wp.float32, device=device)
+        with self.assertRaisesRegex(RuntimeError, "requires_grad"):
+            tape3.backward(loss=loss_no_grad)
+
+        # supplying incoming gradients through the grads dict
+        tape4 = wp.Tape()
+        with tape4:
+            x = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            y = wp.zeros_like(x)
+            wp.launch(_tape_step, dim=dim, inputs=[x], outputs=[y], device=device)
+        g = wp.array(np.ones(dim), dtype=wp.float32, device=device)
+        tape4.backward(grads={y: g})
+        assert_np_equal(x.grad.numpy(), np.ones(dim) * 2.0)
+
+    def test_tape_backward_enable_backward_false_warns(self):
+        device = "cpu"
+        dim = 4
+        tape = wp.Tape()
+        with tape:
+            a = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            b = wp.zeros_like(a)
+            wp.launch(_tape_no_backward, dim=dim, inputs=[a], outputs=[b], device=device)
+        # running backward on a kernel with enable_backward=False exercises the
+        # warning path; it should complete without raising
+        tape.backward()
+
+    def test_tape_reset_and_scope_removal(self):
+        device = "cpu"
+        dim = 4
+        tape = wp.Tape()
+        with tape:
+            a = wp.array(np.ones(dim), dtype=wp.float32, device=device, requires_grad=True)
+            b = wp.zeros_like(a)
+            # empty scope that should be removed on end
+            tape.record_scope_begin("empty")
+            tape.record_scope_end()
+            tape.record_scope_begin("work")
+            wp.launch(_tape_step, dim=dim, inputs=[a], outputs=[b], device=device)
+            tape.record_scope_end()
+        self.assertGreater(len(tape.launches), 0)
+        tape.reset()
+        self.assertEqual(tape.launches, [])
+        self.assertEqual(tape.scopes, [])
 
 
 add_function_test(TestTape, "test_tape_mul_constant", test_tape_mul_constant, devices=devices)

@@ -621,7 +621,84 @@ def test_dlpack_bf16_round_trip(test, device):
 
 
 class TestDLPack(unittest.TestCase):
-    pass
+    def test_dlpack_helpers_and_errors(self):
+        import warp._src.dlpack as dl
+        from warp._src.thirdparty.dlpack import DLDataType, DLDataTypeCode, DLDevice, DLDeviceType
+
+        # device_to_dlpack
+        self.assertEqual(dl.device_to_dlpack("cpu").device_type.value, DLDeviceType.kDLCPU)
+
+        # dtype_to_dlpack: bool and the unsupported-type error
+        self.assertEqual(dl.dtype_to_dlpack(wp.bool)[0], DLDataTypeCode.kDLBool)
+        with self.assertRaisesRegex(RuntimeError, "No conversion"):
+            dl.dtype_to_dlpack("not-a-dtype")
+
+        # dtype_from_dlpack error paths
+        with self.assertRaisesRegex(RuntimeError, "bit boolean"):
+            dl.dtype_from_dlpack(DLDataType(DLDataTypeCode.kDLUInt, 1, 1))
+        with self.assertRaisesRegex(RuntimeError, "complex"):
+            dl.dtype_from_dlpack(DLDataType(DLDataTypeCode.kDLComplex, 64, 1))
+        with self.assertRaisesRegex(RuntimeError, "complex"):
+            dl.dtype_from_dlpack(DLDataType(DLDataTypeCode.kDLComplex, 128, 1))
+        with self.assertRaisesRegex(RuntimeError, "Unknown DLPack datatype"):
+            dl.dtype_from_dlpack(DLDataType(DLDataTypeCode.kDLFloat, 8, 1))
+
+        # device_from_dlpack: unknown device type
+        with self.assertRaisesRegex(RuntimeError, "Unknown device type"):
+            dl.device_from_dlpack(DLDevice(DLDeviceType.kDLOpenCL, 0))
+
+        # shape/strides helpers
+        self.assertEqual(list(dl.shape_to_dlpack((2, 3))), [2, 3])
+        self.assertEqual(list(dl.strides_to_dlpack((8, 4), wp.float32)), [2, 1])
+
+        # dtype_is_compatible error/False branches
+        with self.assertRaisesRegex(RuntimeError, "less than 8 bits"):
+            dl.dtype_is_compatible(DLDataType(DLDataTypeCode.kDLInt, 1, 1), wp.int8)
+        self.assertFalse(dl.dtype_is_compatible(DLDataType(DLDataTypeCode.kDLBfloat, 32, 1), wp.bfloat16))
+        with self.assertRaisesRegex(RuntimeError, "Complex"):
+            dl.dtype_is_compatible(DLDataType(DLDataTypeCode.kDLComplex, 64, 1), wp.float32)
+        with self.assertRaisesRegex(RuntimeError, "Unsupported DLPack dtype"):
+            dl.dtype_is_compatible(DLDataType(DLDataTypeCode.kDLOpaquePointer, 8, 1), wp.float32)
+
+        # _DLPackTensorHolder with a null pointer is a no-op on delete
+        holder = dl._DLPackTensorHolder(0)
+        holder.__del__()
+
+    def test_dlpack_struct_and_noncontiguous(self):
+        # structured arrays cannot be converted
+        @wp.struct
+        class MyStruct:
+            x: float
+
+        s = wp.zeros(2, dtype=MyStruct, device="cpu")
+        with self.assertRaisesRegex(RuntimeError, "structured Warp arrays"):
+            wp.to_dlpack(s)
+
+        # non-contiguous arrays go through the explicit-strides branch
+        a = wp.array(np.arange(12, dtype=np.float32).reshape(3, 4), device="cpu")
+        at = a.transpose([1, 0])
+        self.assertFalse(at.is_contiguous)
+        b = wp.from_dlpack(wp.to_dlpack(at))
+        assert_np_equal(b.numpy(), at.numpy())
+
+    def test_dlpack_from_dlpack_dtype_handling(self):
+        # reinterpret a scalar float32 array as a vector type (round trip)
+        va = wp.zeros(4, dtype=wp.vec3, device="cpu")
+        vb = wp.from_dlpack(wp.to_dlpack(va), dtype=wp.vec3)
+        self.assertEqual(vb.shape, (4,))
+        self.assertEqual(vb.dtype, wp.vec3)
+
+        # incompatible scalar dtype requested
+        with self.assertRaisesRegex(RuntimeError, "Incompatible data types"):
+            wp.from_dlpack(wp.to_dlpack(wp.zeros(3, dtype=wp.float32, device="cpu")), dtype=wp.int32)
+
+        # incompatible vector scalar dtype requested
+        with self.assertRaisesRegex(RuntimeError, "Incompatible data types"):
+            wp.from_dlpack(wp.to_dlpack(wp.zeros(3, dtype=wp.float32, device="cpu")), dtype=wp.vec3d)
+
+        # inner shape does not match the requested vector type
+        with self.assertRaisesRegex(RuntimeError, "ensure that source inner shape"):
+            wp.from_dlpack(wp.to_dlpack(wp.zeros(2, dtype=wp.float32, device="cpu")), dtype=wp.vec3)
 
 
 devices = get_test_devices()

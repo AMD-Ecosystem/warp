@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
+from unittest import mock
 
 import numpy as np
 
@@ -393,6 +394,88 @@ class TestColoring(unittest.TestCase):
             self.assertGreater(len(group), 0, f"Color group {i} in graph 1 should not be empty")
         for i, group in enumerate(color_groups_2):
             self.assertGreater(len(group), 0, f"Color group {i} in graph 2 should not be empty")
+
+
+    def test_graph_coloring_input_validation(self):
+        """Exercise the input-validation and edge-case branches of the coloring utilities."""
+        good_edges = wp.array([[0, 1], [1, 2]], dtype=wp.int32, device="cpu")
+        good_colors = wp.empty(shape=(3,), dtype=wp.int32, device="cpu")
+
+        float_edges = wp.array([[0.0, 1.0]], dtype=wp.float32, device="cpu")
+        float_colors = wp.empty(shape=(3,), dtype=wp.float32, device="cpu")
+        edges_1d = wp.array([0, 1, 2], dtype=wp.int32, device="cpu")
+        edges_wide = wp.zeros(shape=(2, 3), dtype=wp.int32, device="cpu")
+        colors_2d = wp.zeros(shape=(3, 1), dtype=wp.int32, device="cpu")
+
+        gpu_available = wp.is_cuda_available()
+        if gpu_available:
+            gpu_edges = wp.array([[0, 1]], dtype=wp.int32, device="cuda:0")
+            gpu_colors = wp.empty(shape=(3,), dtype=wp.int32, device="cuda:0")
+
+        # --- graph_coloring_assign ---
+        if gpu_available:
+            with self.assertRaisesRegex(RuntimeError, "edges array must be on the CPU"):
+                wp.utils.graph_coloring_assign(gpu_edges, good_colors)
+            with self.assertRaisesRegex(RuntimeError, "node_colors array must be on the CPU"):
+                wp.utils.graph_coloring_assign(good_edges, gpu_colors)
+        with self.assertRaisesRegex(RuntimeError, "edges array must have dtype int32"):
+            wp.utils.graph_coloring_assign(float_edges, good_colors)
+        with self.assertRaisesRegex(RuntimeError, "node_colors array must have dtype int32"):
+            wp.utils.graph_coloring_assign(good_edges, float_colors)
+        with self.assertRaisesRegex(RuntimeError, "edges array must be 2-dimensional"):
+            wp.utils.graph_coloring_assign(edges_1d, good_colors)
+        with self.assertRaisesRegex(RuntimeError, r"edges array must have shape"):
+            wp.utils.graph_coloring_assign(edges_wide, good_colors)
+        with self.assertRaisesRegex(RuntimeError, "node_colors array must be 1-dimensional"):
+            wp.utils.graph_coloring_assign(good_edges, colors_2d)
+        with self.assertRaisesRegex(RuntimeError, "Cannot color an empty graph"):
+            wp.utils.graph_coloring_assign(good_edges, wp.empty(shape=(0,), dtype=wp.int32, device="cpu"))
+
+        # coloring failure path: the native routine returns a negative color count
+        from warp._src.context import runtime  # noqa: PLC0415
+
+        with mock.patch.object(runtime.core, "wp_graph_coloring", return_value=-1):
+            with self.assertRaisesRegex(RuntimeError, "Graph coloring failed"):
+                wp.utils.graph_coloring_assign(good_edges, good_colors)
+
+        # a valid coloring, reused below
+        num_colors = wp.utils.graph_coloring_assign(good_edges, good_colors)
+
+        # --- graph_coloring_balance ---
+        if gpu_available:
+            with self.assertRaisesRegex(RuntimeError, "edges array must be on the CPU"):
+                wp.utils.graph_coloring_balance(gpu_edges, good_colors, num_colors, 1.1)
+            with self.assertRaisesRegex(RuntimeError, "node_colors array must be on the CPU"):
+                wp.utils.graph_coloring_balance(good_edges, gpu_colors, num_colors, 1.1)
+        with self.assertRaisesRegex(RuntimeError, "edges array must have dtype int32"):
+            wp.utils.graph_coloring_balance(float_edges, good_colors, num_colors, 1.1)
+        with self.assertRaisesRegex(RuntimeError, "node_colors array must have dtype int32"):
+            wp.utils.graph_coloring_balance(good_edges, float_colors, num_colors, 1.1)
+        with self.assertRaisesRegex(RuntimeError, "edges array must be 2-dimensional"):
+            wp.utils.graph_coloring_balance(edges_1d, good_colors, num_colors, 1.1)
+        with self.assertRaisesRegex(RuntimeError, r"edges array must have shape"):
+            wp.utils.graph_coloring_balance(edges_wide, good_colors, num_colors, 1.1)
+        with self.assertRaisesRegex(RuntimeError, "node_colors array must be 1-dimensional"):
+            wp.utils.graph_coloring_balance(good_edges, colors_2d, num_colors, 1.1)
+
+        # --- graph_coloring_get_groups ---
+        with self.assertRaisesRegex(RuntimeError, "color_count must be non-negative"):
+            wp.utils.graph_coloring_get_groups(good_colors, -1)
+        self.assertEqual(wp.utils.graph_coloring_get_groups(good_colors, 0), ())
+        if gpu_available:
+            with self.assertRaisesRegex(RuntimeError, "node_colors array must be on the CPU"):
+                wp.utils.graph_coloring_get_groups(gpu_colors, 1)
+        with self.assertRaisesRegex(RuntimeError, "node_colors array must have dtype int32"):
+            wp.utils.graph_coloring_get_groups(float_colors, 1)
+        with self.assertRaisesRegex(RuntimeError, "node_colors array must be 1-dimensional"):
+            wp.utils.graph_coloring_get_groups(colors_2d, 1)
+
+        # return_wp_array=False returns numpy arrays instead of Warp arrays
+        groups_np = wp.utils.graph_coloring_get_groups(good_colors, num_colors, return_wp_array=False)
+        self.assertEqual(len(groups_np), num_colors)
+        for g in groups_np:
+            self.assertIsInstance(g, np.ndarray)
+        self.assertEqual(sum(len(g) for g in groups_np), good_colors.shape[0])
 
 
 if __name__ == "__main__":

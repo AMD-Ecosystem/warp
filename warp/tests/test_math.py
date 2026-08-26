@@ -353,6 +353,37 @@ class TestMath(unittest.TestCase):
 
         self.assertEqual(str(v), "[0.0, 1.0, 1.0, 1.0, 1.0]", "vec to string error")
 
+    def test_transform_matrix_helpers(self):
+        # Exercise the Python-scope implementations of the transform<->matrix
+        # helper functions defined in warp/_src/math.py.
+        q = wp.normalize(wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.5))
+        p = wp.vec3(1.0, 2.0, 3.0)
+        s = wp.vec3(2.0, 3.0, 4.0)
+
+        # compose -> decompose roundtrip (covers transform_compose / transform_decompose)
+        m = wp.transform_compose(p, q, s)
+        pos, rot, scale = wp.transform_decompose(m)
+        assert_np_equal(np.array([*pos], dtype=np.float32), np.array([*p], dtype=np.float32), tol=1e-5)
+        assert_np_equal(np.array([*scale], dtype=np.float32), np.array([*s], dtype=np.float32), tol=1e-5)
+
+        # transform <-> matrix roundtrip (covers transform_to_matrix / transform_from_matrix)
+        xf = wp.transform(p, q)
+        mat = wp.transform_to_matrix(xf)
+        xf_back = wp.transform_from_matrix(mat)
+        assert_np_equal(np.array([*xf_back], dtype=np.float32), np.array([*xf], dtype=np.float32), tol=1e-5)
+
+        # decompose should also handle a matrix with a zero-scale axis without dividing by it
+        m_zero = wp.transform_compose(p, q, wp.vec3(0.0, 1.0, 1.0))
+        _pos0, _rot0, scale0 = wp.transform_decompose(m_zero)
+        self.assertAlmostEqual(float(scale0[0]), 0.0, places=5)
+
+    def test_lang_module_import(self):
+        # warp/_src/lang.py is a documentation placeholder module that re-exports
+        # the built-in functions; importing it exercises its module body.
+        import warp._src.lang as lang
+
+        self.assertTrue(hasattr(lang, "transform_compose"))
+
     def test_mat_type(self):
         mat55 = wp.types.matrix(shape=(5, 5), dtype=float)
         m1 = mat55()

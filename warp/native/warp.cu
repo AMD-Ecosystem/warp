@@ -1257,10 +1257,13 @@ bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, siz
 
 __global__ void memset_kernel(int* dest, int value, size_t n)
 {
-    const size_t tid
-        = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
-
-    if (tid < n) {
+    // Grid-stride loop: the launch may clamp the grid (notably on HIP, where the
+    // total work-item count is limited to 2^32-1), so each thread must process
+    // multiple elements to cover all of `n`.
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x);
+    for (size_t tid
+         = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+         tid < n; tid += grid_stride) {
         dest[tid] = value;
     }
 }
@@ -1310,8 +1313,10 @@ bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stre
 // fill memory buffer with a value: generic memtile kernel using memcpy for each element
 __global__ void memtile_kernel(void* dst, const void* src, size_t srcsize, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
-    if (tid < n) {
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x);
+    for (size_t tid
+         = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+         tid < n; tid += grid_stride) {
         memcpy((int8_t*)dst + srcsize * tid, src, srcsize);
     }
 }
@@ -1319,8 +1324,10 @@ __global__ void memtile_kernel(void* dst, const void* src, size_t srcsize, size_
 // this should be faster than memtile_kernel, but requires proper alignment of dst
 template <typename T> __global__ void memtile_value_kernel(T* dst, T value, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
-    if (tid < n) {
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x);
+    for (size_t tid
+         = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+         tid < n; tid += grid_stride) {
         dst[tid] = value;
     }
 }
@@ -1378,8 +1385,11 @@ static __global__ void array_copy_1d_kernel(
     size_t elem_size
 )
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-    if (i < n) {
+    // Grid-stride loop: the launch may clamp the grid (notably on HIP, where the
+    // total work-item count is limited to 2^32-1), so each thread must process
+    // multiple elements to cover all of `n`.
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); i < n; i += grid_stride) {
         size_t src_idx = src_indices ? src_indices[i] : i;
         size_t dst_idx = dst_indices ? dst_indices[i] : i;
         const char* p = (const char*)src + src_idx * src_stride;
@@ -1399,11 +1409,12 @@ static __global__ void array_copy_2d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
     size_t n = shape[1];
-    size_t i = tid / n;
-    size_t j = tid % n;
-    if (i < shape[0] /*&& j < shape[1]*/) {
+    size_t total = shape[0] * n;
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < total; tid += grid_stride) {
+        size_t i = tid / n;
+        size_t j = tid % n;
         size_t src_idx0 = src_indices[0] ? src_indices[0][i] : i;
         size_t dst_idx0 = dst_indices[0] ? dst_indices[0][i] : i;
         size_t src_idx1 = src_indices[1] ? src_indices[1][j] : j;
@@ -1425,13 +1436,14 @@ static __global__ void array_copy_3d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
     size_t n = shape[1];
     size_t o = shape[2];
-    size_t i = tid / (n * o);
-    size_t j = tid % (n * o) / o;
-    size_t k = tid % o;
-    if (i < shape[0] && j < shape[1] /*&& k < shape[2]*/) {
+    size_t total = shape[0] * n * o;
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < total; tid += grid_stride) {
+        size_t i = tid / (n * o);
+        size_t j = tid % (n * o) / o;
+        size_t k = tid % o;
         size_t src_idx0 = src_indices[0] ? src_indices[0][i] : i;
         size_t dst_idx0 = dst_indices[0] ? dst_indices[0][i] : i;
         size_t src_idx1 = src_indices[1] ? src_indices[1][j] : j;
@@ -1456,15 +1468,16 @@ static __global__ void array_copy_4d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
     size_t n = shape[1];
     size_t o = shape[2];
-    size_t p = shape[3];
-    size_t i = tid / (n * o * p);
-    size_t j = tid % (n * o * p) / (o * p);
-    size_t k = tid % (o * p) / p;
-    size_t l = tid % p;
-    if (i < shape[0] && j < shape[1] && k < shape[2] /*&& l < shape[3]*/) {
+    size_t pdim = shape[3];
+    size_t total = shape[0] * n * o * pdim;
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < total; tid += grid_stride) {
+        size_t i = tid / (n * o * pdim);
+        size_t j = tid % (n * o * pdim) / (o * pdim);
+        size_t k = tid % (o * pdim) / pdim;
+        size_t l = tid % pdim;
         size_t src_idx0 = src_indices[0] ? src_indices[0][i] : i;
         size_t dst_idx0 = dst_indices[0] ? dst_indices[0][i] : i;
         size_t src_idx1 = src_indices[1] ? src_indices[1][j] : j;
@@ -1486,9 +1499,8 @@ static __global__ void array_copy_from_fabric_kernel(
     wp::fabricarray_t<void> src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < src.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < src.size; tid += grid_stride) {
         size_t dst_idx = dst_indices ? dst_indices[tid] : tid;
         void* dst_ptr = (char*)dst_data + dst_idx * dst_stride;
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
@@ -1500,9 +1512,8 @@ static __global__ void array_copy_from_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < src.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < src.size; tid += grid_stride) {
         size_t src_index = src.indices[tid];
         size_t dst_idx = dst_indices ? dst_indices[tid] : tid;
         void* dst_ptr = (char*)dst_data + dst_idx * dst_stride;
@@ -1515,9 +1526,8 @@ static __global__ void array_copy_to_fabric_kernel(
     wp::fabricarray_t<void> dst, const void* src_data, size_t src_stride, const int* src_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < dst.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < dst.size; tid += grid_stride) {
         size_t src_idx = src_indices ? src_indices[tid] : tid;
         const void* src_ptr = (const char*)src_data + src_idx * src_stride;
         void* dst_ptr = fabricarray_element_ptr(dst, tid, elem_size);
@@ -1533,9 +1543,8 @@ static __global__ void array_copy_to_fabric_indexed_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < dst.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < dst.size; tid += grid_stride) {
         size_t src_idx = src_indices ? src_indices[tid] : tid;
         const void* src_ptr = (const char*)src_data + src_idx * src_stride;
         size_t dst_idx = dst.indices[tid];
@@ -1548,9 +1557,8 @@ static __global__ void array_copy_to_fabric_indexed_kernel(
 static __global__ void
 array_copy_fabric_to_fabric_kernel(wp::fabricarray_t<void> dst, wp::fabricarray_t<void> src, size_t elem_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < dst.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < dst.size; tid += grid_stride) {
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
         void* dst_ptr = fabricarray_element_ptr(dst, tid, elem_size);
         memcpy(dst_ptr, src_ptr, elem_size);
@@ -1562,9 +1570,8 @@ static __global__ void array_copy_fabric_to_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> dst, wp::fabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < dst.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < dst.size; tid += grid_stride) {
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
         size_t dst_index = dst.indices[tid];
         void* dst_ptr = fabricarray_element_ptr(dst.fa, dst_index, elem_size);
@@ -1577,9 +1584,8 @@ static __global__ void array_copy_fabric_indexed_to_fabric_kernel(
     wp::fabricarray_t<void> dst, wp::indexedfabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < dst.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < dst.size; tid += grid_stride) {
         size_t src_index = src.indices[tid];
         const void* src_ptr = fabricarray_element_ptr(src.fa, src_index, elem_size);
         void* dst_ptr = fabricarray_element_ptr(dst, tid, elem_size);
@@ -1592,9 +1598,8 @@ static __global__ void array_copy_fabric_indexed_to_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> dst, wp::indexedfabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-
-    if (tid < dst.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < dst.size; tid += grid_stride) {
         size_t src_index = src.indices[tid];
         size_t dst_index = dst.indices[tid];
         const void* src_ptr = fabricarray_element_ptr(src.fa, src_index, elem_size);
@@ -1854,8 +1859,8 @@ WP_API bool wp_array_copy_device(void* context, void* dst, void* src, int dst_ty
 static __global__ void
 array_fill_1d_kernel(void* data, size_t n, size_t stride, const int* indices, const void* value, size_t value_size)
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-    if (i < n) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); i < n; i += grid_stride) {
         size_t idx = indices ? indices[i] : i;
         char* p = (char*)data + idx * stride;
         memcpy(p, value, value_size);
@@ -1871,11 +1876,12 @@ static __global__ void array_fill_2d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
     size_t n = shape[1];
-    size_t i = tid / n;
-    size_t j = tid % n;
-    if (i < shape[0] /*&& j < shape[1]*/) {
+    size_t total = shape[0] * n;
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < total; tid += grid_stride) {
+        size_t i = tid / n;
+        size_t j = tid % n;
         size_t idx0 = indices[0] ? indices[0][i] : i;
         size_t idx1 = indices[1] ? indices[1][j] : j;
         char* p = (char*)data + idx0 * strides[0] + idx1 * strides[1];
@@ -1892,13 +1898,14 @@ static __global__ void array_fill_3d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
     size_t n = shape[1];
     size_t o = shape[2];
-    size_t i = tid / (n * o);
-    size_t j = tid % (n * o) / o;
-    size_t k = tid % o;
-    if (i < shape[0] && j < shape[1] /*&& k < shape[2]*/) {
+    size_t total = shape[0] * n * o;
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < total; tid += grid_stride) {
+        size_t i = tid / (n * o);
+        size_t j = tid % (n * o) / o;
+        size_t k = tid % o;
         size_t idx0 = indices[0] ? indices[0][i] : i;
         size_t idx1 = indices[1] ? indices[1][j] : j;
         size_t idx2 = indices[2] ? indices[2][k] : k;
@@ -1916,15 +1923,16 @@ static __global__ void array_fill_4d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
     size_t n = shape[1];
     size_t o = shape[2];
-    size_t p = shape[3];
-    size_t i = tid / (n * o * p);
-    size_t j = tid % (n * o * p) / (o * p);
-    size_t k = tid % (o * p) / p;
-    size_t l = tid % p;
-    if (i < shape[0] && j < shape[1] && k < shape[2] /*&& l < shape[3]*/) {
+    size_t pdim = shape[3];
+    size_t total = shape[0] * n * o * pdim;
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < total; tid += grid_stride) {
+        size_t i = tid / (n * o * pdim);
+        size_t j = tid % (n * o * pdim) / (o * pdim);
+        size_t k = tid % (o * pdim) / pdim;
+        size_t l = tid % pdim;
         size_t idx0 = indices[0] ? indices[0][i] : i;
         size_t idx1 = indices[1] ? indices[1][j] : j;
         size_t idx2 = indices[2] ? indices[2][k] : k;
@@ -1937,8 +1945,8 @@ static __global__ void array_fill_4d_kernel(
 
 static __global__ void array_fill_fabric_kernel(wp::fabricarray_t<void> fa, const void* value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-    if (tid < fa.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < fa.size; tid += grid_stride) {
         void* dst_ptr = fabricarray_element_ptr(fa, tid, value_size);
         memcpy(dst_ptr, value, value_size);
     }
@@ -1948,8 +1956,8 @@ static __global__ void array_fill_fabric_kernel(wp::fabricarray_t<void> fa, cons
 static __global__ void
 array_fill_fabric_indexed_kernel(wp::indexedfabricarray_t<void> ifa, const void* value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
-    if (tid < ifa.size) {
+    const size_t grid_stride = size_t(gridDim.x) * size_t(blockDim.x);
+    for (size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x); tid < ifa.size; tid += grid_stride) {
         size_t idx = size_t(ifa.indices[tid]);
         if (idx < ifa.fa.size) {
             void* dst_ptr = fabricarray_element_ptr(ifa.fa, idx, value_size);

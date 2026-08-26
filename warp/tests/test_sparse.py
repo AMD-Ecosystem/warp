@@ -824,7 +824,231 @@ class TestSparse(unittest.TestCase):
         diag_pruned = _bsr_pruned(diag_copy)
         self.assertEqual(diag_pruned.nnz_sync(), 0)
 
+    def test_bsr_operators_and_expressions(self):
+        from warp._src.sparse import _extract_matrix_and_scale
 
+        n = 4
+        block = wp.mat22
+
+        A = bsr_diag(diag=block(np.eye(2) * 2.0), rows_of_blocks=n)
+        B = bsr_identity(rows_of_blocks=n, block_type=block, device=A.device)
+        dense_A = _bsr_to_dense(A)
+        dense_B = _bsr_to_dense(B)
+
+        # matrix +/- matrix
+        assert_np_equal(_bsr_to_dense(A + B), dense_A + dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense(A - B), dense_A - dense_B, 1e-5)
+
+        # scalar scaling expressions
+        assert_np_equal(_bsr_to_dense((A * 2.0).eval()), dense_A * 2.0, 1e-5)
+        assert_np_equal(_bsr_to_dense((2.0 * A).eval()), dense_A * 2.0, 1e-5)
+        assert_np_equal(_bsr_to_dense((A / 2.0).eval()), dense_A / 2.0, 1e-5)
+        assert_np_equal(_bsr_to_dense((-A).eval()), -dense_A, 1e-5)
+
+        # expression arithmetic
+        expr = 2.0 * A
+        # for scaling expressions, axpy applies the scale to the added operand
+        assert_np_equal(_bsr_to_dense(expr + B), dense_A + 2.0 * dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense(expr - B), dense_A - 2.0 * dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense((expr * 3.0).eval()), dense_A * 6.0, 1e-5)
+        assert_np_equal(_bsr_to_dense((3.0 * expr).eval()), dense_A * 6.0, 1e-5)
+        assert_np_equal(_bsr_to_dense((expr / 2.0).eval()), dense_A, 1e-5)
+        assert_np_equal(_bsr_to_dense((-expr).eval()), -dense_A * 2.0, 1e-5)
+
+        # expression properties
+        self.assertEqual(expr.nrow, n)
+        self.assertEqual(expr.ncol, n)
+        self.assertEqual(expr.nnz, A.nnz)
+        self.assertEqual(expr.shape, A.shape)
+        self.assertEqual(expr.block_shape, A.block_shape)
+        self.assertEqual(expr.block_size, A.block_size)
+        self.assertEqual(expr.device, A.device)
+        self.assertEqual(expr.requires_grad, A.requires_grad)
+        self.assertTrue(wp.types.types_equal(expr.dtype, A.dtype))
+        self.assertEqual(expr.offsets.ptr, A.offsets.ptr)
+        self.assertEqual(expr.columns.ptr, A.columns.ptr)
+        self.assertEqual(expr.scalar_type, A.scalar_type)
+
+        # matrix-matrix products
+        assert_np_equal(_bsr_to_dense(A @ B), dense_A @ dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense(expr @ B), (dense_A * 2.0) @ dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense(B @ expr), dense_B @ (dense_A * 2.0), 1e-5)
+
+        # transpose (matrix and expression)
+        assert_np_equal(_bsr_to_dense(A.transpose()), dense_A.T, 1e-5)
+        assert_np_equal(_bsr_to_dense(expr.transpose().eval()), (dense_A * 2.0).T, 1e-5)
+
+        # in-place operators
+        C = bsr_copy(A)
+        C += B
+        assert_np_equal(_bsr_to_dense(C), dense_A + dense_B, 1e-5)
+        C -= B
+        assert_np_equal(_bsr_to_dense(C), dense_A, 1e-5)
+        C *= 2.0
+        assert_np_equal(_bsr_to_dense(C), dense_A * 2.0, 1e-5)
+
+        D = bsr_copy(A)
+        D @= B
+        assert_np_equal(_bsr_to_dense(D), dense_A @ dense_B, 1e-5)
+
+        # extract error for unsupported argument
+        with self.assertRaisesRegex(ValueError, "cannot be interpreted"):
+            _extract_matrix_and_scale(object())
+
+    def test_bsr_mv_variants(self):
+        n = 4
+        A = bsr_diag(diag=2.0, rows_of_blocks=n)  # scalar CSR
+        dense = _bsr_to_dense(A)
+        xnp = np.arange(n, dtype=float)
+        x = wp.array(xnp, dtype=float, device=A.device)
+
+        # basic mv via operator (allocates y)
+        y = A @ x
+        assert_np_equal(y.numpy(), dense @ xnp, 1e-5)
+
+        # scaled expression mv
+        y2 = (2.0 * A) @ x
+        assert_np_equal(y2.numpy(), 2.0 * (dense @ xnp), 1e-5)
+
+        # transpose mv
+        yt = bsr_mv(A, x, transpose=True)
+        assert_np_equal(yt.numpy(), dense.T @ xnp, 1e-5)
+
+        # explicit alpha/beta with provided y
+        y3 = wp.array(np.ones(n, dtype=float), dtype=float, device=A.device)
+        bsr_mv(A, x, y3, alpha=2.0, beta=1.0)
+        assert_np_equal(y3.numpy(), 2.0 * (dense @ xnp) + 1.0, 1e-5)
+
+        # explicitly disable tiled computation
+        y4 = bsr_mv(A, x, tile_size=-1)
+        assert_np_equal(y4.numpy(), dense @ xnp, 1e-5)
+
+        # aliasing x and y (uses a work buffer internally)
+        xy = wp.array(xnp, dtype=float, device=A.device)
+        bsr_mv(A, xy, xy, alpha=1.0, beta=0.0)
+        assert_np_equal(xy.numpy(), dense @ xnp, 1e-5)
+
+        # work buffer too small
+        with self.assertRaisesRegex(ValueError, "Work buffer size"):
+            small = wp.empty(1, dtype=float, device=A.device)
+            z = wp.array(xnp, dtype=float, device=A.device)
+            bsr_mv(A, z, z, work_buffer=small)
+
+        # work buffer with wrong dtype
+        with self.assertRaisesRegex(ValueError, "same data type"):
+            wbuf = wp.empty(n, dtype=wp.float64, device=A.device)
+            z2 = wp.array(xnp, dtype=float, device=A.device)
+            bsr_mv(A, z2, z2, work_buffer=wbuf)
+
+    def test_bsr_matrix_methods(self):
+        n = 4
+        A = bsr_diag(diag=wp.mat22(np.eye(2) * 3.0), rows_of_blocks=n)
+
+        # dtype property and 3d scalar view
+        self.assertTrue(wp.types.types_equal(A.dtype, wp.mat22))
+        sv = A.scalar_values
+        self.assertEqual(sv.shape[0], A.nnz)
+
+        # uncompress_rows into a provided output array
+        out = wp.empty(A.nnz, dtype=int, device=A.device)
+        rows = A.uncompress_rows(out=out)
+        self.assertEqual(rows.ptr, out.ptr)
+
+        # exact nnz synchronization
+        self.assertEqual(A.nnz_sync(), n)
+
+        # notify_nnz_changed with explicit upper bound
+        A.notify_nnz_changed(nnz=A.nnz)
+
+        # deprecated copy_nnz_async still works (emits a DeprecationWarning)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            A.copy_nnz_async()
+
+
+def _other_device(device):
+    """Return a device different from ``device`` if the system has one, else None."""
+    if device.is_cuda:
+        return "cpu" if wp.is_cpu_available() else None
+    cudas = wp.get_cuda_devices()
+    return cudas[0] if cudas else None
+
+
+def test_bsr_set_from_triplets_validation(test, device):
+    block_type = wp.types.matrix(shape=(2, 2), dtype=wp.float32)
+    dest = bsr_zeros(3, 3, block_type, device=device)
+    rows = wp.array([0, 1], dtype=wp.int32, device=device)
+    cols = wp.array([0, 1], dtype=wp.int32, device=device)
+
+    # rows/columns length mismatch
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, wp.array([0], dtype=wp.int32, device=device))
+    # rows/columns must be int32
+    with test.assertRaises(TypeError):
+        bsr_set_from_triplets(dest, wp.array([0.0, 1.0], dtype=wp.float32, device=device), cols)
+    # count array must be single-element / int32
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, cols, count=wp.array([0, 0], dtype=wp.int32, device=device))
+    with test.assertRaises(TypeError):
+        bsr_set_from_triplets(dest, rows, cols, count=wp.array([0.0], dtype=wp.float32, device=device))
+    # values length must match the triplet count
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, cols, values=wp.zeros(1, dtype=block_type, device=device))
+    # 1d values must have the matrix block type
+    with test.assertRaises(ValueError):
+        wrong_block = wp.types.matrix(shape=(3, 3), dtype=wp.float32)
+        bsr_set_from_triplets(dest, rows, cols, values=wp.zeros(2, dtype=wrong_block, device=device))
+    # 3d values must match the block shape ...
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, cols, values=wp.zeros((2, 3, 3), dtype=wp.float32, device=device))
+    # ... and the scalar type
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, cols, values=wp.zeros((2, 2, 2), dtype=wp.float64, device=device))
+    # values must be 1d or 3d
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, cols, values=wp.zeros((2, 2), dtype=wp.float32, device=device))
+    # zero-pruning requires contiguous values
+    big = wp.zeros((4, 2, 2), dtype=wp.float32, device=device)
+    with test.assertRaises(ValueError):
+        bsr_set_from_triplets(dest, rows, cols, values=big[::2])
+
+    # cross-device arrays are rejected
+    other = _other_device(device)
+    if other is not None:
+        with test.assertRaises(ValueError):
+            bsr_set_from_triplets(dest, wp.array([0, 1], dtype=wp.int32, device=other), cols)
+        with test.assertRaises(ValueError):
+            bsr_set_from_triplets(dest, rows, cols, count=wp.array([2], dtype=wp.int32, device=other))
+        with test.assertRaises(ValueError):
+            bsr_set_from_triplets(dest, rows, cols, values=wp.zeros(2, dtype=block_type, device=other))
+
+
+def test_bsr_assign_validation(test, device):
+    block_type = wp.types.matrix(shape=(2, 2), dtype=wp.float32)
+    dest = bsr_zeros(2, 2, block_type, device=device)
+
+    # block columns must evenly divide one another
+    src_23 = bsr_zeros(2, 2, wp.types.matrix(shape=(2, 3), dtype=wp.float32), device=device)
+    with test.assertRaises(ValueError):
+        bsr_assign(dest, src_23)
+
+    # masked assignment requires matching destination size
+    src_33 = bsr_zeros(3, 3, block_type, device=device)
+    with test.assertRaises(ValueError):
+        bsr_assign(dest, src_33, masked=True)
+
+    # cross-device assignment is rejected
+    other = _other_device(device)
+    if other is not None:
+        src_other = bsr_zeros(2, 2, block_type, device=other)
+        with test.assertRaises(ValueError):
+            bsr_assign(dest, src_other)
+
+
+add_function_test(TestSparse, "test_bsr_set_from_triplets_validation", test_bsr_set_from_triplets_validation, devices=devices)
+add_function_test(TestSparse, "test_bsr_assign_validation", test_bsr_assign_validation, devices=devices)
 add_function_test(TestSparse, "test_csr_from_triplets", test_csr_from_triplets, devices=devices)
 add_function_test(TestSparse, "test_bsr_from_triplets", test_bsr_from_triplets, devices=devices)
 add_function_test(

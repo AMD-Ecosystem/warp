@@ -6,6 +6,7 @@ import types
 import unittest
 from enum import IntEnum
 from typing import get_origin
+from unittest import mock
 
 import numpy as np
 
@@ -282,6 +283,53 @@ devices = [x for x in get_test_devices() if x.is_cpu]
 
 
 class TestTypes(unittest.TestCase):
+    def test_bfloat16_manual_fallback(self):
+        # Force the manual bit-manipulation path (used when ml_dtypes is unavailable)
+        # for the vectorized bfloat16 <-> float32 conversions.
+        import warp._src.types as wpt
+
+        values = np.array([0.0, 1.0, -2.5, 3.14159, float("nan"), float("inf")], dtype=np.float32)
+        with mock.patch.object(wpt, "_get_ml_dtypes_bfloat16", return_value=None):
+            bits = wpt._np_float32_to_bfloat16_bits(values)
+            back = wpt._np_bfloat16_bits_to_float32(bits)
+
+        self.assertEqual(bits.dtype, np.uint16)
+        self.assertTrue(np.isnan(back[4]))
+        self.assertTrue(np.isinf(back[5]))
+        # finite values round-trip within bfloat16 precision
+        np.testing.assert_allclose(back[:4], values[:4], atol=2e-2)
+
+    def test_array_nd_class_getitem(self):
+        # wp.arrayNd[dtype] accepts a single type parameter; a tuple is an error.
+        for cls in (wp.array1d, wp.array2d, wp.array3d, wp.array4d):
+            annotation = cls[wp.float32]
+            self.assertIsNotNone(annotation)
+            with self.assertRaisesRegex(TypeError, "expects a single type parameter"):
+                cls[wp.float32, wp.float32]
+
+    def test_ipc_handle_requires_cuda(self):
+        a = wp.zeros(4, dtype=wp.float32, device="cpu")
+        with self.assertRaisesRegex(RuntimeError, "IPC requires a CUDA device"):
+            a.ipc_handle()
+
+    def test_flatten_and_safe_len(self):
+        import warp._src.types as wpt
+
+        arr, shape = wpt.flatten([[1, 2, 3], [4, 5, 6]])
+        self.assertEqual(shape, (2, 3))
+        self.assertEqual(arr, [1, 2, 3, 4, 5, 6])
+        self.assertEqual(wpt.safe_len([1, 2, 3]), 3)
+        self.assertEqual(wpt.safe_len(5), -1)
+        # ragged nested sequences are rejected: mismatched inner length
+        with self.assertRaisesRegex(ValueError, "Ragged array"):
+            wpt.flatten([[1, 2], [3, 4, 5]])
+        # ragged nested sequences are rejected: scalar found before deepest level
+        with self.assertRaisesRegex(ValueError, "scalar found before deepest level"):
+            wpt.flatten([[1, 2], 3])
+        # strings are treated as invalid leaf elements
+        with self.assertRaisesRegex(TypeError, "invalid element"):
+            wpt.flatten(["ab", "cd"])
+
     def test_bool(self):
         value = wp.bool(False)
         self.assertIsInstance(bool(value), bool)
@@ -828,6 +876,192 @@ class TestTypes(unittest.TestCase):
                 with self.subTest(float_type=float_type, op=op):
                     with self.assertRaises(OverflowError):
                         getattr(float_type(1.0), op)(huge)
+
+    def test_scalar_reflected_operators(self):
+        """Reflected arithmetic dunders on Warp scalars (Python scope)."""
+        f = wp.float32(2.0)
+        self.assertAlmostEqual(float(1.0 + f), 3.0)
+        self.assertAlmostEqual(float(1.0 - f), -1.0)
+        self.assertAlmostEqual(float(3.0 * f), 6.0)
+        self.assertAlmostEqual(float(6.0 / f), 3.0)
+        self.assertAlmostEqual(float(7.0 % f), 1.0)
+        self.assertAlmostEqual(float(2.0**f), 4.0)  # float_base.__rpow__
+
+    def test_scalar_unary_and_hash(self):
+        """Unary ops, rounding and hashing on Warp scalars."""
+        self.assertAlmostEqual(float(abs(wp.float32(-2.0))), 2.0)
+        self.assertAlmostEqual(float(round(wp.float32(2.567), 1)), 2.6)
+        self.assertEqual(hash(wp.float32(2.0)), hash(2.0))
+        self.assertEqual(int(abs(wp.int32(-5))), 5)
+        self.assertEqual(hash(wp.int32(5)), hash(5))
+
+    def test_scalar_comparison_not_implemented(self):
+        """Comparisons against incompatible objects must return NotImplemented.
+
+        This drives the ``except (TypeError, ValueError)`` fall-through branches
+        in ``float_base`` / ``int_base`` rich-comparison dunders.
+        """
+        incompatible = object()
+        for op in ("__ne__", "__ge__", "__gt__", "__le__", "__lt__"):
+            with self.subTest(kind="float", op=op):
+                self.assertIs(getattr(wp.float32(1.0), op)(incompatible), NotImplemented)
+            with self.subTest(kind="int", op=op):
+                self.assertIs(getattr(wp.int32(1), op)(incompatible), NotImplemented)
+
+    def test_scalar_op_with_array_not_implemented(self):
+        """Arithmetic between a Warp scalar and an array yields NotImplemented,
+        deferring to the array's reflected operator."""
+        arr = wp.zeros(2, dtype=wp.float32, device="cpu")
+        self.assertIs(wp.float32(2.0).__add__(arr), NotImplemented)
+        self.assertIs(wp.float32(2.0).__sub__(arr), NotImplemented)
+        self.assertIs(wp.float32(2.0).__mul__(arr), NotImplemented)
+        self.assertIs(wp.float32(2.0).__truediv__(arr), NotImplemented)
+        self.assertIs(wp.float32(2.0).__mod__(arr), NotImplemented)
+        self.assertIs(wp.float32(2.0).__pow__(arr), NotImplemented)
+
+    def test_type_ctype_size_and_conversion_helpers(self):
+        """Pure dtype-introspection helpers on canonical Python and Warp types."""
+        import ctypes
+
+        self.assertIs(wp._src.types.type_ctype(float), ctypes.c_float)
+        self.assertIs(wp._src.types.type_ctype(int), ctypes.c_int32)
+        self.assertIs(wp._src.types.type_ctype(wp.bool), ctypes.c_bool)
+
+        self.assertIs(wp._src.types.type_to_warp(float), wp.float32)
+        self.assertIs(wp._src.types.type_to_warp(int), wp.int32)
+        self.assertIs(wp._src.types.type_to_warp(bool), wp.bool)
+
+        self.assertEqual(wp._src.types.type_size(float), 1)
+        self.assertEqual(wp._src.types.type_length(wp.vec3), 3)
+
+        # Error paths for unresolved / invalid dtypes.
+        with self.assertRaises(TypeError):
+            wp._src.types.type_size_in_bytes(wp._src.types.Any)
+        with self.assertRaises(TypeError):
+            wp._src.types.type_size_in_bytes(str)
+
+    def test_scalars_equal_generic_matching(self):
+        """Generic scalar matching across canonical aliases and generic hints."""
+        seg = wp._src.types.scalars_equal_generic
+        self.assertTrue(seg(int, wp.int32))
+        self.assertTrue(seg(bool, wp.bool))
+        self.assertTrue(seg(wp._src.types.Int, wp.int32))
+        self.assertTrue(seg(wp.int32, wp._src.types.Int))
+        self.assertTrue(seg(wp._src.types.Int, wp._src.types.Int))
+        self.assertTrue(seg(wp._src.types.Scalar, wp.float32))
+        self.assertTrue(seg(wp.float32, wp._src.types.Scalar))
+        self.assertTrue(seg(wp._src.types.Scalar, wp._src.types.Scalar))
+        self.assertTrue(seg(wp._src.types.Float, wp.float32))
+        self.assertTrue(seg(wp.float32, wp._src.types.Float))
+        self.assertTrue(seg(wp._src.types.Float, wp._src.types.Float))
+
+    def test_types_equal_generic_tuples(self):
+        """Tuple / ellipsis handling in the generic type matcher."""
+        import typing
+
+        teg = wp._src.types.types_equal_generic
+        self.assertTrue(teg(typing.Tuple[wp.int32, wp.float32], typing.Tuple[wp.int32, wp.float32]))
+        self.assertFalse(teg(typing.Tuple[wp.int32], typing.Tuple[wp.int32, wp.float32]))
+        self.assertTrue(teg(tuple, typing.Tuple[wp.int32]))
+        self.assertTrue(teg(typing.Tuple[wp.int32, ...], typing.Tuple[wp.int32, wp.int32]))
+        self.assertTrue(teg(typing.Tuple[wp.int32, wp.int32], typing.Tuple[wp.int32, ...]))
+        self.assertFalse(teg(typing.Tuple[wp.int32, ...], typing.Tuple[wp.int32, wp.float32]))
+        self.assertFalse(teg(typing.Tuple[wp.int32], wp.int32))
+
+        tt = wp._src.types.tuple_t((wp.int32, wp.float32), (None, None))
+        self.assertTrue(wp._src.types.is_tuple(tt))
+        self.assertFalse(wp._src.types.is_tuple(5))
+        self.assertFalse(wp._src.types.is_slice(5))
+        self.assertEqual(wp._src.types.type_length(tt), 2)
+
+    def test_scalar_short_name(self):
+        """Short type codes for every scalar/bool type, plus the None fallback."""
+        t = wp._src.types
+        expected = {
+            "int8": "b",
+            "uint8": "ub",
+            "int16": "s",
+            "uint16": "us",
+            "int32": "i",
+            "uint32": "ui",
+            "int64": "l",
+            "uint64": "ul",
+            "float16": "h",
+            "float32": "f",
+            "float64": "d",
+        }
+        for st in t.scalar_and_bool_types:
+            code = t.scalar_short_name(st)
+            if st.__name__ in expected:
+                self.assertEqual(code, expected[st.__name__])
+        self.assertIsNone(t.scalar_short_name(t.bool))
+
+    def test_type_repr_all_categories(self):
+        """``type_repr`` across tuples, quats, transforms, big vec/mat, and aliases."""
+        import builtins as _builtins
+        import typing
+
+        t = wp._src.types
+        tt = t.tuple_t((wp.int32, wp.float32), (None, None))
+        self.assertEqual(t.type_repr(tt), "tuple(int32, float32)")
+        self.assertEqual(t.type_repr(typing.Tuple[wp.int32, wp.float32]), "tuple(int32, float32)")
+        self.assertEqual(t.type_repr(typing.Tuple), "tuple")
+        self.assertEqual(t.type_repr(wp.quatf), "quatf")
+        self.assertEqual(t.type_repr(wp.transformf), "transformf")
+        self.assertEqual(t.type_repr(t.vector(length=5, dtype=wp.float32)), "vector(length=5, dtype=float32)")
+        self.assertEqual(
+            t.type_repr(t.matrix(shape=(5, 5), dtype=wp.float32)),
+            "matrix(shape=(5, 5), dtype=float32)",
+        )
+        self.assertEqual(t.type_repr(_builtins.bool), "bool")
+        self.assertEqual(t.type_repr(float), "float")
+        self.assertEqual(t.type_repr(int), "int")
+        self.assertEqual(t.type_repr(5), "5")
+
+    def test_type_and_value_predicates(self):
+        """Type- and instance-level predicate helpers."""
+        t = wp._src.types
+        self.assertTrue(t.type_is_tuple(t.tuple_t))
+        self.assertTrue(t.type_is_slice(t.slice_t))
+        self.assertFalse(t.type_is_tuple(wp.int32))
+        self.assertTrue(t.is_transformation(wp.transformf()))
+        self.assertTrue(t.is_quaternion(wp.quatf()))
+        self.assertTrue(t.is_matrix(wp.mat33()))
+        self.assertTrue(t.is_vector(wp.vec3()))
+        self.assertFalse(t.is_vector(wp.vec3))
+
+    def test_array_matmul_unsupported(self):
+        """The ``@`` operator is unsupported for arrays but defers for non-arrays."""
+        a = wp.zeros(3, dtype=wp.float32, device="cpu")
+        self.assertIs(a.__matmul__(5), NotImplemented)
+        self.assertIs(a.__rmatmul__(5), NotImplemented)
+        with self.assertRaises(TypeError):
+            a.__matmul__(a)
+        with self.assertRaises(TypeError):
+            a.__rmatmul__(a)
+
+    def test_array_grad_setter_validation(self):
+        """Assigning an incompatible gradient array must be rejected."""
+        a = wp.zeros(3, dtype=wp.float32, device="cpu")
+        with self.assertRaises(ValueError):
+            a.grad = wp.zeros(3, dtype=wp.int32, device="cpu")
+        with self.assertRaises(ValueError):
+            a.grad = wp.zeros(4, dtype=wp.float32, device="cpu")
+        a.grad = None
+        self.assertIsNone(a.grad)
+        self.assertFalse(a.requires_grad)
+
+    def test_vector_reflected_broadcast_ops(self):
+        """Reflected scalar/vector operators exercise the broadcast/component paths."""
+        v = wp.vec3(1.0, 2.0, 3.0)
+        scaled = 2.0 * v  # __rmul__ -> scalar broadcast
+        self.assertEqual(tuple(scaled), (2.0, 4.0, 6.0))
+        summed = v.__radd__(wp.vec3(1.0, 1.0, 1.0))  # component-wise
+        self.assertEqual(tuple(summed), (2.0, 3.0, 4.0))
+        diff = v.__rsub__(wp.vec3(5.0, 5.0, 5.0))
+        self.assertEqual(tuple(diff), (4.0, 3.0, 2.0))
+        modded = v.__rmod__(wp.vec3(5.0, 5.0, 5.0))
+        self.assertEqual(tuple(modded), (0.0, 1.0, 2.0))
 
 
 for dtype in wp._src.types.int_types:

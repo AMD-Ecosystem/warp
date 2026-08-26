@@ -4104,9 +4104,29 @@ class array(Array[DType, NDim]):
                 )
 
         if self.ptr:
+            # On CUDA, reading back through the null (default) stream implicitly
+            # serializes with work queued on other streams, so the gather below
+            # observes a consistent snapshot.  HIP's null stream does not provide
+            # that implicit cross-stream ordering, so if this array was last
+            # written on a different stream (e.g. a copy issued on the device's
+            # current stream, which an earlier test may have left as a non-null
+            # stream), the gather could read stale/partial data.  Drain the whole
+            # device first so we read a fully-materialized snapshot.  We use a
+            # device/context-level wait rather than a stream wait because, under
+            # HSA signal-pool pressure in long serial runs, hipStreamSynchronize
+            # has been observed to return before the queued work is complete,
+            # whereas hipCtx/DeviceSynchronize reliably drains outstanding work.
+            if self.device.is_hip:
+                warp.synchronize_device(self.device)
             # use the CUDA default stream for synchronous behaviour with other streams
             with warp.ScopedStream(self.device.null_stream):
                 a = self.to("cpu", requires_grad=False)
+            # The gather + device-to-host copy above is asynchronous on HIP and is
+            # not implicitly synchronous the way it is on CUDA, so it may still be
+            # in flight here.  Drain the device again before reading the host buffer
+            # to honor numpy()'s documented synchronous-readback contract.
+            if self.device.is_hip:
+                warp.synchronize_device(self.device)
             # convert through __array_interface__
             # Note: this handles arrays of structs using `descr`, so the result will be a structured NumPy array
             result = np.asarray(a)
