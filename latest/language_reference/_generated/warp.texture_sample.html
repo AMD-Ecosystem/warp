@@ -9,7 +9,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>warp.texture_sample &#8212; Warp 1.17.0.dev2</title>
+    <title>warp.texture_sample &#8212; Warp 1.18.0.dev2</title>
   
   
   
@@ -34,7 +34,7 @@
     <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=8f2a1f02" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/nvidia-sphinx-theme.css?v=933278ad" />
     <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
-    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=3d681599" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=2a8757ae" />
   
   <!-- So that users can add custom icons -->
   <script defer src="../../_static/scripts/fontawesome.js?digest=90905a2f556bf617f1a9"></script>
@@ -44,7 +44,7 @@
 
 
 
-    <script src="../../_static/documentation_options.js?v=a5afd832"></script>
+    <script src="../../_static/documentation_options.js?v=583ed324"></script>
     <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -58,6 +58,7 @@
             true;
         </script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <script src="../../_static/copy-page-source.js?v=f9064be3"></script>
 
     <link rel="icon" href="../../_static/favicon.png"/>
 
@@ -69,7 +70,7 @@
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="1.17.0.dev2" />
+  <meta name="docsearch:version" content="1.18.0.dev2" />
   
     
     <script src="../../_static/searchtools.js"></script>
@@ -146,11 +147,11 @@
       
     
     
-    <img src="../../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Warp 1.17.0.dev2 - Home"/>
-    <img src="../../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Warp 1.17.0.dev2 - Home"/>
+    <img src="../../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Warp 1.18.0.dev2 - Home"/>
+    <img src="../../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Warp 1.18.0.dev2 - Home"/>
   
   
-    <p class="title logo__title">Warp 1.17.0.dev2</p>
+    <p class="title logo__title">Warp 1.18.0.dev2</p>
   
 </a></div>
     
@@ -290,11 +291,11 @@
       
     
     
-    <img src="../../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Warp 1.17.0.dev2 - Home"/>
-    <img src="../../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Warp 1.17.0.dev2 - Home"/>
+    <img src="../../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Warp 1.18.0.dev2 - Home"/>
+    <img src="../../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Warp 1.18.0.dev2 - Home"/>
   
   
-    <p class="title logo__title">Warp 1.17.0.dev2</p>
+    <p class="title logo__title">Warp 1.18.0.dev2</p>
   
 </a>
 
@@ -413,6 +414,7 @@
 <li class="toctree-l2"><a class="reference internal" href="../../user_guide/execution_and_performance/memory_management.html">Memory Allocation and Access</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../user_guide/execution_and_performance/profiling.html">Profiling</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../user_guide/execution_and_performance/deterministic_execution.html">Deterministic Execution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../user_guide/execution_and_performance/reducing_compilation_and_startup_time.html">Reducing Compilation and Startup Time</a></li>
 </ul>
 </details></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user_guide/configuration.html">Configuration</a></li>
@@ -428,6 +430,7 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../api_reference/warp.html">warp</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../api_reference/warp_autograd.html">warp.autograd</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api_reference/warp_build_experimental.html">warp.build_experimental</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../api_reference/warp_config.html">warp.config</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../api_reference/warp_fem.html">warp.fem</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../api_reference/warp_optim.html">warp.optim</a></li>
@@ -496,10 +499,43 @@
       
         <div class="header-article-item">
 
+
+
 <div class="d-flex justify-content-end w-100">
-  <a href="../../_sources/language_reference/_generated/warp.texture_sample.rst.txt">
-    <i class="fa-solid fa-file-code"></i> View page source
-  </a>
+  <div class="btn-group copy-page-source pst-js-only" data-page-source-control role="group" aria-label="Page source">
+    <button
+      type="button"
+      class="btn btn-sm btn-outline-secondary"
+      data-copy-page-source
+      data-page-source-url="../../_sources/language_reference/_generated/warp.texture_sample.rst.txt"
+      disabled
+    >
+      <i class="fa-solid fa-copy" aria-hidden="true"></i>
+      <span data-copy-page-source-label>Copy source</span>
+    </button>
+    <button
+      type="button"
+      class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split"
+      data-bs-toggle="dropdown"
+      aria-expanded="false"
+    >
+      <span class="visually-hidden">Page source options</span>
+    </button>
+    <ul class="dropdown-menu dropdown-menu-end">
+      <li>
+        <a class="dropdown-item" href="../../_sources/language_reference/_generated/warp.texture_sample.rst.txt">
+          <i class="fa-solid fa-file-code" aria-hidden="true"></i>
+          View source
+        </a>
+      </li>
+    </ul>
+    <span class="visually-hidden" role="status" aria-live="polite" data-copy-page-source-status></span>
+  </div>
+  <noscript>
+    <a href="../../_sources/language_reference/_generated/warp.texture_sample.rst.txt">
+      <i class="fa-solid fa-file-code" aria-hidden="true"></i> View source
+    </a>
+  </noscript>
 </div>
 </div>
       
@@ -524,7 +560,7 @@
 <dd><em class="sig-param"><span class="n"><span class="pre">tex</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.Texture1D.html#warp.Texture1D" title="warp.Texture1D"><span class="pre">Texture1D</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">u</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>,</dd>
-<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
+<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">-1.0</span></span></em>,</dd>
 </dl>
 
 <span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span><a class="headerlink" href="#warp._src.lang.texture_sample" title="Link to this definition">#</a></dt>
@@ -558,34 +594,33 @@
 <li><p><strong>u</strong> – U coordinate. With <code class="docutils literal notranslate"><span class="pre">normalized_coords=True</span></code>, texel <code class="docutils literal notranslate"><span class="pre">i</span></code> at a mip level of width
 <code class="docutils literal notranslate"><span class="pre">level_width</span></code> is centered at <code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_width</span></code>. With
 <code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code>, texel <code class="docutils literal notranslate"><span class="pre">i</span></code> of a single-level texture is centered at
-<code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">+</span> <span class="pre">0.5</span></code> on both backends. For a mipmapped texture on the CPU backend, coordinates
-remain in base-level texel space and the center is
-<code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_width</span> <span class="pre">/</span> <span class="pre">level_width</span></code>. CUDA mipmapped textures require normalized
-coordinates. Coordinates and filtering footprints beyond the texture are handled by its
-address mode.</p></li>
+<code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">+</span> <span class="pre">0.5</span></code>. Mipmapped textures should use normalized coordinates. Unnormalized
+coordinates for mipmapped textures are currently accepted only on the CPU backend and
+may be unsupported in a future release. Coordinates and filtering footprints beyond the
+texture are handled by its address mode.</p></li>
 <li><p><strong>dtype</strong> – The return type, which selects how many channels are read: <code class="docutils literal notranslate"><span class="pre">float</span></code> (1 channel),
 <a class="reference internal" href="../../api_reference/_generated/warp.vec2f.html#warp.vec2f" title="warp.vec2f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec2f</span></code></a> (2), or <a class="reference internal" href="../../api_reference/_generated/warp.vec4f.html#warp.vec4f" title="warp.vec4f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec4f</span></code></a> (4). Use the type matching the texture’s
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>. The CPU backend normalizes unsigned integer data to
-<code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. The CUDA backend does the same for
-8- and 16-bit integer formats but does not promote 32-bit ones, so an <code class="docutils literal notranslate"><span class="pre">int32</span></code> or
-<code class="docutils literal notranslate"><span class="pre">uint32</span></code> texture yields neither a normalized nor a numerically converted value there;
-use an 8- or 16-bit or a floating-point format instead. Floating-point texture data is
-returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel values without normalization.</p></li>
-<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. When omitted or negative, mip level 0 is sampled.
-Nonnegative values are clamped to the texture’s available mip-level range. Fractional
-values blend between neighbouring mip levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>.</p></li>
+<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. The default selects mip level 0. Currently, any
+negative value also selects mip level 0. Nonnegative values are clamped to the
+texture’s available mip-level range. Fractional values blend between neighbouring mip
+levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
 <a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode.LINEAR" title="warp.TextureFilterMode.LINEAR"><code class="xref py py-attr docutils literal notranslate"><span class="pre">warp.TextureFilterMode.LINEAR</span></code></a>; the coordinate is evaluated independently at
-each level used in the blend. Ignored for textures created with a single mip level.</p></li>
+each level used in the blend. The <code class="docutils literal notranslate"><span class="pre">lod</span></code> argument is ignored for textures created with a single mip level.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>.</p>
+<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>. The CPU backend normalizes unsigned integer
+data to <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. On CUDA devices, normalized
+integer sampling is supported only for 8- and 16-bit formats; use an 8- or 16-bit integer
+or floating-point texture. Floating-point texture data is returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel
+values without normalization.</p>
 </dd>
 </dl>
 <p>The filtering mode (<a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode" title="warp.TextureFilterMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureFilterMode</span></code></a>) and the addressing of out-of-range
 coordinates (<a class="reference internal" href="../../api_reference/_generated/warp.TextureAddressMode.html#warp.TextureAddressMode" title="warp.TextureAddressMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureAddressMode</span></code></a>) are those set when the texture was created; see
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. On CUDA, <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> and <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code> are treated as <code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> when
-<code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code> (the CPU sampler honors them).</p>
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. Currently, CUDA textures with unnormalized coordinates support only
+<code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> and <code class="docutils literal notranslate"><span class="pre">BORDER</span></code> address modes. Use normalized coordinates with <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> or <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code>.</p>
 <p class="rubric">Example</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@wp</span><span class="o">.</span><span class="n">kernel</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">sample</span><span class="p">(</span><span class="n">t1</span><span class="p">:</span> <span class="n">wp</span><span class="o">.</span><span class="n">Texture1D</span><span class="p">,</span> <span class="n">t2</span><span class="p">:</span> <span class="n">wp</span><span class="o">.</span><span class="n">Texture2D</span><span class="p">,</span> <span class="n">t3</span><span class="p">:</span> <span class="n">wp</span><span class="o">.</span><span class="n">Texture3D</span><span class="p">,</span> <span class="n">out</span><span class="p">:</span> <span class="n">wp</span><span class="o">.</span><span class="n">array</span><span class="p">[</span><span class="n">wp</span><span class="o">.</span><span class="n">float32</span><span class="p">]):</span>
@@ -621,7 +656,7 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <dd><em class="sig-param"><span class="n"><span class="pre">tex</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.Texture2D.html#warp.Texture2D" title="warp.Texture2D"><span class="pre">Texture2D</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">uv</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.vec2f.html#warp.vec2f" title="warp.vec2f"><span class="pre">vec2f</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>,</dd>
-<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
+<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">-1.0</span></span></em>,</dd>
 </dl>
 
 <span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span></dt>
@@ -656,34 +691,33 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <code class="docutils literal notranslate"><span class="pre">(i,</span> <span class="pre">j)</span></code> at a mip level of size <code class="docutils literal notranslate"><span class="pre">(level_width,</span> <span class="pre">level_height)</span></code> is centered at
 <code class="docutils literal notranslate"><span class="pre">((i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_width,</span> <span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_height)</span></code>. With
 <code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code>, texel <code class="docutils literal notranslate"><span class="pre">(i,</span> <span class="pre">j)</span></code> of a single-level texture is centered at
-<code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5,</span> <span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5)</span></code> on both backends. For a mipmapped texture on the CPU backend,
-coordinates remain in base-level texel space and the center is
-<code class="docutils literal notranslate"><span class="pre">((i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_width</span> <span class="pre">/</span> <span class="pre">level_width,</span> <span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_height</span> <span class="pre">/</span> <span class="pre">level_height)</span></code>. CUDA
-mipmapped textures require normalized coordinates. Coordinates and filtering footprints
-beyond the texture are handled by its per-axis address modes.</p></li>
+<code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5,</span> <span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5)</span></code>. Mipmapped textures should use normalized coordinates.
+Unnormalized coordinates for mipmapped textures are currently accepted only on the CPU
+backend and may be unsupported in a future release. Coordinates and filtering
+footprints beyond the texture are handled by its per-axis address modes.</p></li>
 <li><p><strong>dtype</strong> – The return type, which selects how many channels are read: <code class="docutils literal notranslate"><span class="pre">float</span></code> (1 channel),
 <a class="reference internal" href="../../api_reference/_generated/warp.vec2f.html#warp.vec2f" title="warp.vec2f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec2f</span></code></a> (2), or <a class="reference internal" href="../../api_reference/_generated/warp.vec4f.html#warp.vec4f" title="warp.vec4f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec4f</span></code></a> (4). Use the type matching the texture’s
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>. The CPU backend normalizes unsigned integer data to
-<code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. The CUDA backend does the same for
-8- and 16-bit integer formats but does not promote 32-bit ones, so an <code class="docutils literal notranslate"><span class="pre">int32</span></code> or
-<code class="docutils literal notranslate"><span class="pre">uint32</span></code> texture yields neither a normalized nor a numerically converted value there;
-use an 8- or 16-bit or a floating-point format instead. Floating-point texture data is
-returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel values without normalization.</p></li>
-<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. When omitted or negative, mip level 0 is sampled.
-Nonnegative values are clamped to the texture’s available mip-level range. Fractional
-values blend between neighbouring mip levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>.</p></li>
+<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. The default selects mip level 0. Currently, any
+negative value also selects mip level 0. Nonnegative values are clamped to the
+texture’s available mip-level range. Fractional values blend between neighbouring mip
+levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
 <a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode.LINEAR" title="warp.TextureFilterMode.LINEAR"><code class="xref py py-attr docutils literal notranslate"><span class="pre">warp.TextureFilterMode.LINEAR</span></code></a>; the coordinates are evaluated independently at
-each level used in the blend. Ignored for textures created with a single mip level.</p></li>
+each level used in the blend. The <code class="docutils literal notranslate"><span class="pre">lod</span></code> argument is ignored for textures created with a single mip level.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>.</p>
+<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>. The CPU backend normalizes unsigned integer
+data to <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. On CUDA devices, normalized
+integer sampling is supported only for 8- and 16-bit formats; use an 8- or 16-bit integer
+or floating-point texture. Floating-point texture data is returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel
+values without normalization.</p>
 </dd>
 </dl>
 <p>The filtering mode (<a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode" title="warp.TextureFilterMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureFilterMode</span></code></a>) and the addressing of out-of-range
 coordinates (<a class="reference internal" href="../../api_reference/_generated/warp.TextureAddressMode.html#warp.TextureAddressMode" title="warp.TextureAddressMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureAddressMode</span></code></a>) are those set when the texture was created; see
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. On CUDA, <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> and <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code> are treated as <code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> when
-<code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code> (the CPU sampler honors them).</p>
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. Currently, CUDA textures with unnormalized coordinates support only
+<code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> and <code class="docutils literal notranslate"><span class="pre">BORDER</span></code> address modes. Use normalized coordinates with <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> or <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code>.</p>
 </dd></dl>
 
 <dl class="py function">
@@ -695,7 +729,7 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <dd><em class="sig-param"><span class="n"><span class="pre">u</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">v</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>,</dd>
-<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
+<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">-1.0</span></span></em>,</dd>
 </dl>
 
 <span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span></dt>
@@ -728,39 +762,37 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <li><p><strong>tex</strong> – The 2D texture to sample.</p></li>
 <li><p><strong>u</strong> – U coordinate. At a mip level of width <code class="docutils literal notranslate"><span class="pre">level_width</span></code>, texel column <code class="docutils literal notranslate"><span class="pre">i</span></code> is centered at
 <code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_width</span></code> when <code class="docutils literal notranslate"><span class="pre">normalized_coords=True</span></code>. With unnormalized
-coordinates, its center is <code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture on both backends; for a
-mipmapped texture on the CPU backend, its center is
-<code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_width</span> <span class="pre">/</span> <span class="pre">level_width</span></code>.</p></li>
+coordinates, its center is <code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture.</p></li>
 <li><p><strong>v</strong> – V coordinate. At a mip level of height <code class="docutils literal notranslate"><span class="pre">level_height</span></code>, texel row <code class="docutils literal notranslate"><span class="pre">j</span></code> is centered at
 <code class="docutils literal notranslate"><span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_height</span></code> when <code class="docutils literal notranslate"><span class="pre">normalized_coords=True</span></code>. With unnormalized
-coordinates, its center is <code class="docutils literal notranslate"><span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture on both backends; for a
-mipmapped texture on the CPU backend, its center is
-<code class="docutils literal notranslate"><span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_height</span> <span class="pre">/</span> <span class="pre">level_height</span></code>. CUDA mipmapped textures require normalized
-coordinates. Coordinates and filtering footprints beyond the texture are handled by its
-per-axis address modes.</p></li>
+coordinates, its center is <code class="docutils literal notranslate"><span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture. Mipmapped textures
+should use normalized coordinates. Unnormalized coordinates for mipmapped textures are
+currently accepted only on the CPU backend and may be unsupported in a future release.
+Coordinates and filtering footprints beyond the texture are handled by its per-axis
+address modes.</p></li>
 <li><p><strong>dtype</strong> – The return type, which selects how many channels are read: <code class="docutils literal notranslate"><span class="pre">float</span></code> (1 channel),
 <a class="reference internal" href="../../api_reference/_generated/warp.vec2f.html#warp.vec2f" title="warp.vec2f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec2f</span></code></a> (2), or <a class="reference internal" href="../../api_reference/_generated/warp.vec4f.html#warp.vec4f" title="warp.vec4f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec4f</span></code></a> (4). Use the type matching the texture’s
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>. The CPU backend normalizes unsigned integer data to
-<code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. The CUDA backend does the same for
-8- and 16-bit integer formats but does not promote 32-bit ones, so an <code class="docutils literal notranslate"><span class="pre">int32</span></code> or
-<code class="docutils literal notranslate"><span class="pre">uint32</span></code> texture yields neither a normalized nor a numerically converted value there;
-use an 8- or 16-bit or a floating-point format instead. Floating-point texture data is
-returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel values without normalization.</p></li>
-<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. When omitted or negative, mip level 0 is sampled.
-Nonnegative values are clamped to the texture’s available mip-level range. Fractional
-values blend between neighbouring mip levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>.</p></li>
+<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. The default selects mip level 0. Currently, any
+negative value also selects mip level 0. Nonnegative values are clamped to the
+texture’s available mip-level range. Fractional values blend between neighbouring mip
+levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
 <a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode.LINEAR" title="warp.TextureFilterMode.LINEAR"><code class="xref py py-attr docutils literal notranslate"><span class="pre">warp.TextureFilterMode.LINEAR</span></code></a>; the coordinates are evaluated independently at
-each level used in the blend. Ignored for textures created with a single mip level.</p></li>
+each level used in the blend. The <code class="docutils literal notranslate"><span class="pre">lod</span></code> argument is ignored for textures created with a single mip level.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>.</p>
+<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>. The CPU backend normalizes unsigned integer
+data to <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. On CUDA devices, normalized
+integer sampling is supported only for 8- and 16-bit formats; use an 8- or 16-bit integer
+or floating-point texture. Floating-point texture data is returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel
+values without normalization.</p>
 </dd>
 </dl>
 <p>The filtering mode (<a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode" title="warp.TextureFilterMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureFilterMode</span></code></a>) and the addressing of out-of-range
 coordinates (<a class="reference internal" href="../../api_reference/_generated/warp.TextureAddressMode.html#warp.TextureAddressMode" title="warp.TextureAddressMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureAddressMode</span></code></a>) are those set when the texture was created; see
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. On CUDA, <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> and <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code> are treated as <code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> when
-<code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code> (the CPU sampler honors them).</p>
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. Currently, CUDA textures with unnormalized coordinates support only
+<code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> and <code class="docutils literal notranslate"><span class="pre">BORDER</span></code> address modes. Use normalized coordinates with <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> or <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code>.</p>
 </dd></dl>
 
 <dl class="py function">
@@ -771,7 +803,7 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <dd><em class="sig-param"><span class="n"><span class="pre">tex</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.Texture3D.html#warp.Texture3D" title="warp.Texture3D"><span class="pre">Texture3D</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">uvw</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.vec3f.html#warp.vec3f" title="warp.vec3f"><span class="pre">vec3f</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>,</dd>
-<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
+<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">-1.0</span></span></em>,</dd>
 </dl>
 
 <span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span></dt>
@@ -806,35 +838,33 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <code class="docutils literal notranslate"><span class="pre">(i,</span> <span class="pre">j,</span> <span class="pre">k)</span></code> at a mip level of size <code class="docutils literal notranslate"><span class="pre">(level_width,</span> <span class="pre">level_height,</span> <span class="pre">level_depth)</span></code> is
 centered at <code class="docutils literal notranslate"><span class="pre">((i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_width,</span> <span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_height,</span> <span class="pre">(k</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_depth)</span></code>.
 With <code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code>, texel <code class="docutils literal notranslate"><span class="pre">(i,</span> <span class="pre">j,</span> <span class="pre">k)</span></code> of a single-level texture is
-centered at <code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5,</span> <span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5,</span> <span class="pre">k</span> <span class="pre">+</span> <span class="pre">0.5)</span></code> on both backends. For a mipmapped texture on
-the CPU backend, coordinates remain in base-level texel space and the center is
-<code class="docutils literal notranslate"><span class="pre">((i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_width</span> <span class="pre">/</span> <span class="pre">level_width,</span> <span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_height</span> <span class="pre">/</span> <span class="pre">level_height,</span>
-<span class="pre">(k</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_depth</span> <span class="pre">/</span> <span class="pre">level_depth)</span></code>. CUDA mipmapped textures require normalized
-coordinates. Coordinates and filtering footprints beyond the texture are handled by its
-per-axis address modes.</p></li>
+centered at <code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5,</span> <span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5,</span> <span class="pre">k</span> <span class="pre">+</span> <span class="pre">0.5)</span></code>. Mipmapped textures should use normalized
+coordinates. Unnormalized coordinates for mipmapped textures are currently accepted
+only on the CPU backend and may be unsupported in a future release. Coordinates and
+filtering footprints beyond the texture are handled by its per-axis address modes.</p></li>
 <li><p><strong>dtype</strong> – The return type, which selects how many channels are read: <code class="docutils literal notranslate"><span class="pre">float</span></code> (1 channel),
 <a class="reference internal" href="../../api_reference/_generated/warp.vec2f.html#warp.vec2f" title="warp.vec2f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec2f</span></code></a> (2), or <a class="reference internal" href="../../api_reference/_generated/warp.vec4f.html#warp.vec4f" title="warp.vec4f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec4f</span></code></a> (4). Use the type matching the texture’s
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>. The CPU backend normalizes unsigned integer data to
-<code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. The CUDA backend does the same for
-8- and 16-bit integer formats but does not promote 32-bit ones, so an <code class="docutils literal notranslate"><span class="pre">int32</span></code> or
-<code class="docutils literal notranslate"><span class="pre">uint32</span></code> texture yields neither a normalized nor a numerically converted value there;
-use an 8- or 16-bit or a floating-point format instead. Floating-point texture data is
-returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel values without normalization.</p></li>
-<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. When omitted or negative, mip level 0 is sampled.
-Nonnegative values are clamped to the texture’s available mip-level range. Fractional
-values blend between neighbouring mip levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>.</p></li>
+<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. The default selects mip level 0. Currently, any
+negative value also selects mip level 0. Nonnegative values are clamped to the
+texture’s available mip-level range. Fractional values blend between neighbouring mip
+levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
 <a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode.LINEAR" title="warp.TextureFilterMode.LINEAR"><code class="xref py py-attr docutils literal notranslate"><span class="pre">warp.TextureFilterMode.LINEAR</span></code></a>; the coordinates are evaluated independently at
-each level used in the blend. Ignored for textures created with a single mip level.</p></li>
+each level used in the blend. The <code class="docutils literal notranslate"><span class="pre">lod</span></code> argument is ignored for textures created with a single mip level.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>.</p>
+<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>. The CPU backend normalizes unsigned integer
+data to <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. On CUDA devices, normalized
+integer sampling is supported only for 8- and 16-bit formats; use an 8- or 16-bit integer
+or floating-point texture. Floating-point texture data is returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel
+values without normalization.</p>
 </dd>
 </dl>
 <p>The filtering mode (<a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode" title="warp.TextureFilterMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureFilterMode</span></code></a>) and the addressing of out-of-range
 coordinates (<a class="reference internal" href="../../api_reference/_generated/warp.TextureAddressMode.html#warp.TextureAddressMode" title="warp.TextureAddressMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureAddressMode</span></code></a>) are those set when the texture was created; see
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. On CUDA, <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> and <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code> are treated as <code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> when
-<code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code> (the CPU sampler honors them).</p>
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. Currently, CUDA textures with unnormalized coordinates support only
+<code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> and <code class="docutils literal notranslate"><span class="pre">BORDER</span></code> address modes. Use normalized coordinates with <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> or <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code>.</p>
 </dd></dl>
 
 <dl class="py function">
@@ -847,7 +877,7 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <dd><em class="sig-param"><span class="n"><span class="pre">v</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
 <dd><em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>,</dd>
-<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span></em>,</dd>
+<dd><em class="sig-param"><span class="n"><span class="pre">lod</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../../api_reference/_generated/warp.float32.html#warp.float32" title="warp.float32"><span class="pre">float32</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">-1.0</span></span></em>,</dd>
 </dl>
 
 <span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span></dt>
@@ -880,44 +910,40 @@ coordinates (<a class="reference internal" href="../../api_reference/_generated/
 <li><p><strong>tex</strong> – The 3D texture to sample.</p></li>
 <li><p><strong>u</strong> – U coordinate. At a mip level of width <code class="docutils literal notranslate"><span class="pre">level_width</span></code>, texel column <code class="docutils literal notranslate"><span class="pre">i</span></code> is centered at
 <code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_width</span></code> when <code class="docutils literal notranslate"><span class="pre">normalized_coords=True</span></code>. With unnormalized
-coordinates, its center is <code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture on both backends; for a
-mipmapped texture on the CPU backend, its center is
-<code class="docutils literal notranslate"><span class="pre">(i</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_width</span> <span class="pre">/</span> <span class="pre">level_width</span></code>.</p></li>
+coordinates, its center is <code class="docutils literal notranslate"><span class="pre">i</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture.</p></li>
 <li><p><strong>v</strong> – V coordinate. At a mip level of height <code class="docutils literal notranslate"><span class="pre">level_height</span></code>, texel row <code class="docutils literal notranslate"><span class="pre">j</span></code> is centered at
 <code class="docutils literal notranslate"><span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_height</span></code> when <code class="docutils literal notranslate"><span class="pre">normalized_coords=True</span></code>. With unnormalized
-coordinates, its center is <code class="docutils literal notranslate"><span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture on both backends; for a
-mipmapped texture on the CPU backend, its center is
-<code class="docutils literal notranslate"><span class="pre">(j</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_height</span> <span class="pre">/</span> <span class="pre">level_height</span></code>.</p></li>
+coordinates, its center is <code class="docutils literal notranslate"><span class="pre">j</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture.</p></li>
 <li><p><strong>w</strong> – W coordinate. At a mip level of depth <code class="docutils literal notranslate"><span class="pre">level_depth</span></code>, texel depth index <code class="docutils literal notranslate"><span class="pre">k</span></code> is centered
 at <code class="docutils literal notranslate"><span class="pre">(k</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">/</span> <span class="pre">level_depth</span></code> when <code class="docutils literal notranslate"><span class="pre">normalized_coords=True</span></code>. With unnormalized
-coordinates, its center is <code class="docutils literal notranslate"><span class="pre">k</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture on both backends; for a
-mipmapped texture on the CPU backend, its center is
-<code class="docutils literal notranslate"><span class="pre">(k</span> <span class="pre">+</span> <span class="pre">0.5)</span> <span class="pre">*</span> <span class="pre">base_depth</span> <span class="pre">/</span> <span class="pre">level_depth</span></code>. CUDA mipmapped textures require normalized
-coordinates. Coordinates and filtering footprints beyond the texture are handled by its
-per-axis address modes.</p></li>
+coordinates, its center is <code class="docutils literal notranslate"><span class="pre">k</span> <span class="pre">+</span> <span class="pre">0.5</span></code> in a single-level texture. Mipmapped textures
+should use normalized coordinates. Unnormalized coordinates for mipmapped textures are
+currently accepted only on the CPU backend and may be unsupported in a future release.
+Coordinates and filtering footprints beyond the texture are handled by its per-axis
+address modes.</p></li>
 <li><p><strong>dtype</strong> – The return type, which selects how many channels are read: <code class="docutils literal notranslate"><span class="pre">float</span></code> (1 channel),
 <a class="reference internal" href="../../api_reference/_generated/warp.vec2f.html#warp.vec2f" title="warp.vec2f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec2f</span></code></a> (2), or <a class="reference internal" href="../../api_reference/_generated/warp.vec4f.html#warp.vec4f" title="warp.vec4f"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.vec4f</span></code></a> (4). Use the type matching the texture’s
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>. The CPU backend normalizes unsigned integer data to
-<code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. The CUDA backend does the same for
-8- and 16-bit integer formats but does not promote 32-bit ones, so an <code class="docutils literal notranslate"><span class="pre">int32</span></code> or
-<code class="docutils literal notranslate"><span class="pre">uint32</span></code> texture yields neither a normalized nor a numerically converted value there;
-use an 8- or 16-bit or a floating-point format instead. Floating-point texture data is
-returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel values without normalization.</p></li>
-<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. When omitted or negative, mip level 0 is sampled.
-Nonnegative values are clamped to the texture’s available mip-level range. Fractional
-values blend between neighbouring mip levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture.num_channels" title="warp.Texture.num_channels"><code class="xref py py-attr docutils literal notranslate"><span class="pre">num_channels</span></code></a>.</p></li>
+<li><p><strong>lod</strong> – Mipmap level-of-detail as a float. The default selects mip level 0. Currently, any
+negative value also selects mip level 0. Nonnegative values are clamped to the
+texture’s available mip-level range. Fractional values blend between neighbouring mip
+levels when <code class="docutils literal notranslate"><span class="pre">mip_filter_mode</span></code> is
 <a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode.LINEAR" title="warp.TextureFilterMode.LINEAR"><code class="xref py py-attr docutils literal notranslate"><span class="pre">warp.TextureFilterMode.LINEAR</span></code></a>; the coordinates are evaluated independently at
-each level used in the blend. Ignored for textures created with a single mip level.</p></li>
+each level used in the blend. The <code class="docutils literal notranslate"><span class="pre">lod</span></code> argument is ignored for textures created with a single mip level.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>.</p>
+<dd class="field-even"><p>The sampled value of the specified <code class="docutils literal notranslate"><span class="pre">dtype</span></code>. The CPU backend normalizes unsigned integer
+data to <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1]</span></code> and signed integer data to <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code>. On CUDA devices, normalized
+integer sampling is supported only for 8- and 16-bit formats; use an 8- or 16-bit integer
+or floating-point texture. Floating-point texture data is returned as <code class="docutils literal notranslate"><span class="pre">float32</span></code> channel
+values without normalization.</p>
 </dd>
 </dl>
 <p>The filtering mode (<a class="reference internal" href="../../api_reference/_generated/warp.TextureFilterMode.html#warp.TextureFilterMode" title="warp.TextureFilterMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureFilterMode</span></code></a>) and the addressing of out-of-range
 coordinates (<a class="reference internal" href="../../api_reference/_generated/warp.TextureAddressMode.html#warp.TextureAddressMode" title="warp.TextureAddressMode"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.TextureAddressMode</span></code></a>) are those set when the texture was created; see
-<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. On CUDA, <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> and <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code> are treated as <code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> when
-<code class="docutils literal notranslate"><span class="pre">normalized_coords=False</span></code> (the CPU sampler honors them).</p>
+<a class="reference internal" href="../../api_reference/_generated/warp.Texture.html#warp.Texture" title="warp.Texture"><code class="xref py py-class docutils literal notranslate"><span class="pre">warp.Texture</span></code></a>. Currently, CUDA textures with unnormalized coordinates support only
+<code class="docutils literal notranslate"><span class="pre">CLAMP</span></code> and <code class="docutils literal notranslate"><span class="pre">BORDER</span></code> address modes. Use normalized coordinates with <code class="docutils literal notranslate"><span class="pre">WRAP</span></code> or <code class="docutils literal notranslate"><span class="pre">MIRROR</span></code>.</p>
 </dd></dl>
 
 </section>
