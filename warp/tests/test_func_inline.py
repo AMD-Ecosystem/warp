@@ -37,6 +37,12 @@ def test_noinline_func_runs(test, device):
     assert_np_equal(values.numpy(), np.arange(128, dtype=np.float32) * 2.0)
 
 
+# PTX is an NVIDIA-only artifact. HIP/ROCm devices report is_cuda_available()=True
+# but emit AMD GPU ISA, so the PTX-text assertions below don't apply there. Gate
+# these on the presence of a real NVIDIA CUDA device.
+_NVIDIA_CUDA_AVAILABLE = wp.is_cuda_available() and any(not d.is_hip for d in wp.get_cuda_devices())
+
+
 class TestFuncInline(unittest.TestCase):
     def test_invalid_inline_hint_rejected(self):
         """Reject non-bool values for the inline hint."""
@@ -167,7 +173,7 @@ class TestFuncInline(unittest.TestCase):
         called = re.search(rf"call\.uni[^;]*?{name}", ptx, re.S) is not None
         return defined, called
 
-    @unittest.skipUnless(wp.is_cuda_available(), "requires CUDA support")
+    @unittest.skipUnless(_NVIDIA_CUDA_AVAILABLE, "requires NVIDIA CUDA (PTX is NVIDIA-only; HIP emits AMD ISA)")
     def test_noinline_honored_in_ptx(self):
         """Check ``inline=False`` keeps a helper out of line in an optimized build.
 
@@ -180,7 +186,7 @@ class TestFuncInline(unittest.TestCase):
         self.assertTrue(defined, "inline=False helper was inlined away")
         self.assertTrue(called, "inline=False helper has no call site")
 
-    @unittest.skipUnless(wp.is_cuda_available(), "requires CUDA support")
+    @unittest.skipUnless(_NVIDIA_CUDA_AVAILABLE, "requires NVIDIA CUDA (PTX is NVIDIA-only; HIP emits AMD ISA)")
     def test_forceinline_honored_in_ptx(self):
         """Check ``inline=True`` inlines a helper in a debug build.
 
