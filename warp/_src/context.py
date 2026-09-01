@@ -13902,6 +13902,18 @@ def capture_save(graph: Graph, path: str, inputs: dict | None = None, outputs: d
     import os  # noqa: PLC0415
     import shutil  # noqa: PLC0415
 
+    if graph is None:
+        # ScopedCapture leaves ``graph=None`` when ``capture_begin`` returned
+        # False (currently only on HIP, where graph capture is unsupported;
+        # see ``Device.supports_graph_capture``). Mirror capture_launch() so the
+        # HIP-unsupported marker propagates and call sites/tests skip cleanly.
+        raise RuntimeError(
+            "capture_save() received graph=None: capture was not started. "
+            "On HIP/ROCm, native graph capture is unsupported "
+            "(Device.supports_graph_capture is False); guard call sites or "
+            "filter test devices with get_graph_capture_test_devices()."
+        )
+
     if not graph.apic:
         raise RuntimeError(
             "Graph was not captured with apic=True. Pass apic=True to capture_begin() or ScopedCapture()."

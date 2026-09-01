@@ -34,6 +34,7 @@ from warp.sparse import (
 from warp.tests.unittest_utils import (
     add_function_test,
     get_cuda_test_devices,
+    get_graph_capture_test_devices,
     get_test_devices,
     get_test_devices_with_cuda_graph_module_load,
     get_test_devices_with_graph_capture_allocation,
@@ -3332,6 +3333,16 @@ devices_with_graph_capture_allocation_and_cuda_graph_module_load = (
 cuda_devices_with_graph_capture_allocation_and_cuda_graph_module_load = [
     d for d in devices_with_graph_capture_allocation_and_cuda_graph_module_load if d.is_cuda
 ]
+# Native graph capture (and thus APIC graph save/replay and capture-time
+# rejection paths) is unsupported on HIP -- capture_begin() is a no-op there and
+# ScopedCapture leaves graph=None. Tests that require an active capture or a
+# non-None captured graph are gated to these device lists so they skip on HIP
+# while still running on CPU (APIC recording) and non-HIP CUDA.
+devices_with_graph_capture = get_graph_capture_test_devices()
+cuda_devices_with_graph_capture = [d for d in devices_with_graph_capture if d.is_cuda]
+cuda_devices_with_graph_capture_and_module_load = [
+    d for d in devices_with_cuda_graph_module_load if d.is_cuda and d.supports_graph_capture
+]
 
 add_function_test(
     TestApic,
@@ -3590,7 +3601,7 @@ add_function_test(
     TestApic,
     "test_record_cmd_raw_array_ctype_rejected_during_apic_capture",
     test_record_cmd_raw_array_ctype_rejected_during_apic_capture,
-    devices=devices,
+    devices=devices_with_graph_capture,
 )
 add_function_test(
     TestApic,
@@ -3680,25 +3691,25 @@ add_function_test(
     TestApic,
     "test_save_load_capture_time_scratch_cuda",
     test_save_load_capture_time_scratch_cuda,
-    devices=[d for d in devices if d.is_cuda],
+    devices=cuda_devices_with_graph_capture,
 )
 add_function_test(
     TestApic,
     "test_apic_h2d_rejected_during_capture",
     test_apic_h2d_rejected_during_capture,
-    devices=[d for d in devices if d.is_cuda],
+    devices=cuda_devices_with_graph_capture,
 )
 add_function_test(
     TestApic,
     "test_apic_cuda_copy_gaps_rejected_during_capture",
     test_apic_cuda_copy_gaps_rejected_during_capture,
-    devices=[d for d in devices if d.is_cuda],
+    devices=cuda_devices_with_graph_capture,
 )
 add_function_test(
     TestApic,
     "test_apic_cuda_indexed_fill_rejected_during_capture",
     test_apic_cuda_indexed_fill_rejected_during_capture,
-    devices=[d for d in devices if d.is_cuda],
+    devices=cuda_devices_with_graph_capture,
 )
 add_function_test(
     TestApic,
@@ -3770,7 +3781,7 @@ add_function_test(
     TestApic,
     "test_capture_indexedarray_adjoint_pack",
     test_capture_indexedarray_adjoint_pack,
-    devices=devices,
+    devices=devices_with_graph_capture,
 )
 add_function_test(
     TestApic,
@@ -3805,20 +3816,20 @@ add_function_test(
     TestApic,
     "test_end_recording_null_state_preserves_active",
     test_end_recording_null_state_preserves_active,
-    devices=devices,
+    devices=devices_with_graph_capture,
 )
 add_function_test(TestApic, "test_get_param_ptr", test_get_param_ptr, devices=devices_with_cuda_graph_module_load)
 add_function_test(
     TestApic,
     "test_capture_save_aborts_on_mesh_registration_failure",
     test_capture_save_aborts_on_mesh_registration_failure,
-    devices=devices_with_cuda_graph_module_load,
+    devices=cuda_devices_with_graph_capture_and_module_load,
 )
 add_function_test(
     TestApic,
     "test_capture_save_aborts_on_region_snapshot_failure",
     test_capture_save_aborts_on_region_snapshot_failure,
-    devices=devices_with_cuda_graph_module_load,
+    devices=cuda_devices_with_graph_capture_and_module_load,
 )
 
 
