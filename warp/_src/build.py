@@ -89,6 +89,32 @@ def _hip_extra_include_dirs() -> "list[str]":
     return dirs
 
 
+def _get_extra_include_dirs(extra_include_dirs) -> list[str]:
+    include_dirs: list[str] = []
+    invalid_dirs: list[str] = []
+
+    for entry in extra_include_dirs:
+        path = os.fspath(entry)
+        if not os.path.isabs(path):
+            invalid_dirs.append(f"{path!r} (not absolute)")
+            continue
+
+        normalized_path = os.path.realpath(path)
+        if not os.path.isdir(normalized_path):
+            invalid_dirs.append(f"{path!r} (not a directory)")
+            continue
+
+        include_dirs.append(normalized_path)
+
+    if invalid_dirs:
+        raise ValueError("extra_include_dirs entries must be absolute existing directories: " + ", ".join(invalid_dirs))
+    return include_dirs
+
+
+def _get_extra_include_dir_bytes(extra_include_dirs) -> list[bytes]:
+    return [path.encode("utf-8") for path in _get_extra_include_dirs(extra_include_dirs)]
+
+
 # builds cuda source to PTX or CUBIN using NVRTC (output type determined by output_path extension)
 def build_cuda(
     cu_path,
@@ -108,16 +134,24 @@ def build_cuda(
     arch_suffix="",
     llvm_cuda=False,
     use_precompiled_headers=True,
+    extra_include_dirs=(),
 ) -> None:
     with open(cu_path, "rb") as src_file:
         src = src_file.read()
     cu_path_bytes = cu_path.encode("utf-8")
     program_name_bytes = os.path.basename(cu_path).encode("utf-8")
     inc_path = os.path.join(warp_home, "native").encode("utf-8")
+    extra_cuda_include_dirs = _get_extra_include_dir_bytes(extra_include_dirs)
+    num_cuda_include_dirs = len(extra_cuda_include_dirs)
+    cuda_include_dirs = (
+        (ctypes.c_char_p * num_cuda_include_dirs)(*extra_cuda_include_dirs) if num_cuda_include_dirs else None
+    )
     output_path = output_path.encode("utf-8")
 
     if llvm_cuda:
-        err = warp._src.context.runtime.llvm.wp_compile_cuda(src, cu_path_bytes, inc_path, output_path, False)
+        err = warp._src.context.runtime.llvm.wp_compile_cuda(
+            src, cu_path_bytes, inc_path, num_cuda_include_dirs, cuda_include_dirs, output_path, False
+        )
     else:
         if ltoirs is None:
             ltoirs = []
@@ -148,12 +182,17 @@ def build_cuda(
             arch_int = arch if arch is not None else 0
             arch_suffix_bytes = arch_suffix.encode("utf-8")
 
-        extra_include_dirs: "list[bytes]" = []
+        # Pass the user-provided extra include dirs (upstream feature) together with
+        # the ROCm/HIP header dirs that HIPRTC needs (AMD). Both are routed through
+        # the single include-dir slot of wp_cuda_compile_program.
+        combined_include_dirs = list(extra_cuda_include_dirs)
         runtime = getattr(warp._src.context, "runtime", None)
         if runtime is not None and getattr(runtime, "is_hip", False):
-            extra_include_dirs = [d.encode("utf-8") for d in _hip_extra_include_dirs()]
-        num_extra = len(extra_include_dirs)
-        extra_arr = (ctypes.c_char_p * num_extra)(*extra_include_dirs) if num_extra else None
+            combined_include_dirs += [d.encode("utf-8") for d in _hip_extra_include_dirs()]
+        num_combined_include_dirs = len(combined_include_dirs)
+        combined_include_dirs_arr = (
+            (ctypes.c_char_p * num_combined_include_dirs)(*combined_include_dirs) if num_combined_include_dirs else None
+        )
 
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
@@ -161,8 +200,8 @@ def build_cuda(
             arch_int,
             arch_suffix_bytes,
             inc_path,
-            num_extra,
-            extra_arr,
+            num_combined_include_dirs,
+            combined_include_dirs_arr,
             config == "debug",
             optimization_level,
             warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
@@ -205,6 +244,7 @@ def build_cpu(
     pch_dir=None,
     block_dim=256,
     enable_tiles_in_stack_memory=True,
+    extra_include_dirs=(),
 ):
     with open(cpp_path, "rb") as cpp:
         src = cpp.read()
@@ -213,6 +253,8 @@ def build_cpu(
     obj_path = obj_path.encode("utf-8")
 
     flags_list = extra_flags.split()
+    for include_dir in _get_extra_include_dirs(extra_include_dirs):
+        flags_list.extend(("-I", include_dir))
     flags_array = (ctypes.c_char_p * (len(flags_list) + 1))(*[f.encode("utf-8") for f in flags_list], None)
 
     pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
@@ -817,7 +859,7 @@ def build_lto_fft(arch, size, ept, direction, dir, precision, builder):
             meta[lto_symbol] = shared_memory_bytes
 
             with open(temp_paths[".meta"], "w") as meta_file:
-                json.dump(meta, meta_file)
+                json.dump(meta, meta_file, sort_keys=True)
 
             return True, {".lto": lto_code_data, ".meta": shared_memory_bytes}
 

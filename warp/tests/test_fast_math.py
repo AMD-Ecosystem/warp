@@ -316,7 +316,12 @@ add_function_test(TestFastMath, "test_fast_math_disabled", test_fast_math_disabl
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
 add_function_test(
-    TestFastMath, "test_approx_div_ptx_verification", test_approx_div_ptx_verification, devices=get_cuda_test_devices()
+    TestFastMath,
+    "test_approx_div_ptx_verification",
+    test_approx_div_ptx_verification,
+    # PTX is NVIDIA-only; HIP devices report is_cuda=True but emit AMD GPU ISA,
+    # so the generated artifact is not textual PTX. Skip on HIP.
+    devices=[d for d in get_cuda_test_devices() if not d.is_hip],
 )
 add_function_test(TestFastMath, "test_approx_div_compound", test_approx_div_compound, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_backward", test_approx_div_backward, devices=get_cuda_test_devices())
