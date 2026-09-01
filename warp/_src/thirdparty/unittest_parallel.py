@@ -12,6 +12,9 @@ import argparse
 import concurrent.futures  # NVIDIA Modification
 import multiprocessing
 import os
+import re  # NVIDIA Modification (distributed GPU testing)
+import shutil  # NVIDIA Modification (distributed GPU testing)
+import subprocess  # NVIDIA Modification (distributed GPU testing)
 import sys
 import tempfile
 import time
@@ -41,6 +44,20 @@ START_DIRECTORY = os.path.join(os.path.dirname(__file__), "..")  # The directory
 _SUITE_TIMEOUT = (
     3600  # Timeout in seconds: total wall-clock limit for parallel execution, per-suite limit during isolated fallback
 )
+
+# NVIDIA Modification (distributed GPU testing) follows.
+#
+# Test subdirectories that are treated as a single "module" for the purposes of
+# distributing whole modules onto a GPU. Every top-level ``test_*.py`` file is
+# also treated as its own module (see ``_module_group_key``).
+_TEST_SUBDIR_MODULES = {"aot", "cuda", "fem", "geometry", "interop", "matrix", "tile"}
+
+# Module groups that contain tests requiring more than one visible GPU
+# (e.g. ``cuda/test_multigpu.py``, ``test_peer.py``, multi-GPU stream/async
+# tests). These are gathered into a dedicated bucket that runs with all the
+# selected GPUs visible so their coverage is preserved instead of being
+# skipped under single-GPU pinning.
+_MULTI_GPU_MODULES = {"cuda"}
 
 
 def main(argv=None):
@@ -163,6 +180,36 @@ def main(argv=None):
         "--no-shared-cache", action="store_true", help="Use a separate kernel cache per test process."
     )
     group_warp.add_argument("--warp-debug", action="store_true", help="Set warp.config.mode to 'debug'")
+    # NVIDIA Modification: distributed multi-GPU testing options
+    group_dist = parser.add_argument_group("distributed GPU options")
+    group_dist.add_argument(
+        "--gpus",
+        metavar="N",
+        type=int,
+        default=None,
+        help=(
+            "Distribute whole test modules across N GPUs, pinning each module to a single GPU "
+            "(all of a module's tests run on the same GPU). The effective GPU count is "
+            "min(N, GPUs reported by rocm-smi). Use 0 or a negative value for all detected GPUs. "
+            "When omitted, the legacy single-pool behavior is used."
+        ),
+    )
+    group_dist.add_argument(
+        "--gpu-ids",
+        metavar="IDS",
+        default=None,
+        help=(
+            "Comma-separated physical GPU ids to use for distribution (e.g. '0,2,3'), overriding "
+            "automatic selection. Still capped by --gpus when both are given."
+        ),
+    )
+    group_dist.add_argument(
+        "--jobs-per-gpu",
+        metavar="COUNT",
+        type=int,
+        default=0,
+        help="Number of test processes per GPU (default 0: derive from --jobs/--maxjobs and the GPU count).",
+    )
     args = parser.parse_args(args=argv)
 
     if args.coverage_branch:
@@ -177,6 +224,14 @@ def main(argv=None):
     if process_count == 0:
         process_count = multiprocessing.cpu_count()
     process_count = min(process_count, args.maxjobs)  # NVIDIA Modification
+
+    # NVIDIA Modification: when distributing whole modules across GPUs, discover
+    # tests with a single-GPU device set so only ``cuda:0`` device variants are
+    # generated. Each worker is pinned (masked) to exactly one physical GPU that
+    # appears as ``cuda:0``, so this keeps discovery-time and worker-time test
+    # method names consistent. Must be set before test discovery below.
+    if args.gpus is not None:
+        warp.tests.unittest_utils.test_mode = "basic"
 
     import warp as wp  # noqa: PLC0415 NVIDIA Modification
 
@@ -228,7 +283,20 @@ def main(argv=None):
         # Don't use more processes than test suites
         process_count = max(1, min(len(test_suites), process_count))
 
-        if not args.serial_fallback:
+        if args.gpus is not None and not args.serial_fallback:
+            # NVIDIA Modification: distribute whole modules across GPUs, pinning
+            # each module to a single GPU.
+            print(
+                f"Running {len(test_suites)} test suites ({discover_suite.countTestCases()} total tests) "
+                f"distributed across GPUs",
+                file=sys.stderr,
+            )
+            if args.verbose > 1:
+                print(file=sys.stderr)
+
+            start_time = time.perf_counter()
+            results = _run_distributed(args, temp_dir, test_suites, process_count)
+        elif not args.serial_fallback:
             # Report test suites and processes
             print(
                 f"Running {len(test_suites)} test suites ({discover_suite.countTestCases()} total tests) across {process_count} processes",
@@ -591,6 +659,269 @@ def create_crash_result(test_suite, reason="Process crashed or was terminated un
 
     # Return the same format as run_tests: (test_count, errors, failures, skipped, expected_failures, unexpected_successes, test_records)
     return (test_count, crash_errors, [], 0, 0, 0, [])
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA Modification: distributed multi-GPU testing helpers
+# ---------------------------------------------------------------------------
+
+
+def _detect_rocm_gpu_count():
+    """Return the number of GPUs reported by ``rocm-smi``, or ``None`` if it
+    cannot be determined (rocm-smi missing or unparseable output)."""
+    exe = shutil.which("rocm-smi")
+    if not exe:
+        return None
+
+    try:
+        proc = subprocess.run(  # noqa: PLW1510
+            [exe, "--showid"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        output = proc.stdout.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    # Match lines like "GPU[0] : Device Name: ...". Count the unique ordinals.
+    ordinals = {int(m) for m in re.findall(r"GPU\[(\d+)\]", output)}
+    return len(ordinals) if ordinals else None
+
+
+def _detect_gpu_count():
+    """Best-effort GPU count: prefer rocm-smi, fall back to Warp's device count."""
+    count = _detect_rocm_gpu_count()
+    if count is not None:
+        return count
+
+    try:
+        import warp as wp  # noqa: PLC0415
+
+        return wp.get_cuda_device_count()
+    except Exception:
+        return 0
+
+
+def _resolve_gpu_ids(args):
+    """Resolve the list of physical GPU ordinals to distribute tests across.
+
+    Honors ``--gpu-ids`` when provided, otherwise selects ``0..effective-1``
+    where ``effective = min(--gpus, detected)``. ``--gpus <= 0`` means "use all
+    detected GPUs".
+    """
+    detected = _detect_gpu_count()
+
+    if args.gpu_ids:
+        ids = [int(x) for x in args.gpu_ids.split(",") if x.strip() != ""]
+        if args.gpus is not None and args.gpus > 0:
+            ids = ids[: args.gpus]
+        return ids
+
+    if not detected:
+        # No GPUs detected: fall back to a single (masked) device so the run
+        # still executes CPU tests deterministically.
+        return [0]
+
+    if args.gpus is None or args.gpus <= 0:
+        effective = detected
+    else:
+        effective = min(args.gpus, detected)
+
+    effective = max(1, effective)
+    return list(range(effective))
+
+
+def _module_group_key(test_suite):
+    """Return the "module" grouping key for a class/test suite.
+
+    A test living in a test subdirectory (e.g. ``warp.tests.geometry.test_bvh``)
+    is grouped by its subdirectory (``geometry``). A top-level test file
+    (e.g. ``warp.tests.test_codegen``) is grouped by its module name
+    (``test_codegen``). This keeps whole modules together so they can be pinned
+    to a single GPU.
+    """
+    test_case = next(_iter_test_cases(test_suite), None)
+    if test_case is None:
+        return "unknown"
+
+    module_path = type(test_case).__module__
+    parts = module_path.split(".")
+
+    if "tests" in parts:
+        rest = parts[parts.index("tests") + 1 :]
+    else:
+        rest = parts[-1:]
+
+    if len(rest) >= 2 and rest[0] in _TEST_SUBDIR_MODULES:
+        return rest[0]
+
+    return rest[-1] if rest else "unknown"
+
+
+def _group_suites_by_module(test_suites):
+    """Group class/test suites by module key, preserving discovery order.
+
+    Returns a dict mapping ``module_key -> list[suite]``.
+    """
+    groups = {}
+    for suite in test_suites:
+        key = _module_group_key(suite)
+        groups.setdefault(key, []).append(suite)
+    return groups
+
+
+def _suite_weight(suites):
+    return sum(suite.countTestCases() for suite in suites)
+
+
+def _assign_groups_to_gpus(groups, gpu_ids):
+    """Greedily bin-pack whole module groups onto GPUs to balance test counts.
+
+    Groups are never split: every suite of a module is assigned to the same GPU.
+    Returns ``(assignment, group_to_gpu)`` where ``assignment`` maps
+    ``gpu_id -> list[suite]`` and ``group_to_gpu`` maps ``module_key -> gpu_id``.
+    """
+    loads = {gpu_id: 0 for gpu_id in gpu_ids}
+    assignment = {gpu_id: [] for gpu_id in gpu_ids}
+    group_to_gpu = {}
+
+    # Assign heaviest modules first so lighter ones can fill the gaps.
+    for key in sorted(groups, key=lambda k: _suite_weight(groups[k]), reverse=True):
+        target = min(gpu_ids, key=lambda g: (loads[g], g))
+        assignment[target].extend(groups[key])
+        loads[target] += _suite_weight(groups[key])
+        group_to_gpu[key] = target
+
+    return assignment, group_to_gpu
+
+
+def initialize_test_process_pinned(lock, shared_index, args, temp_dir, visible_devices):
+    """Process initializer that pins the worker to specific GPU(s) before Warp
+    is initialized, then defers to :func:`initialize_test_process`.
+
+    ``visible_devices`` is a string like ``"1"`` or ``"0,1"`` and is applied via
+    both ``HIP_VISIBLE_DEVICES`` (ROCm) and ``CUDA_VISIBLE_DEVICES`` (NVIDIA) so
+    the same mechanism works on either backend. Because ``import warp`` does not
+    initialize the runtime (device enumeration happens lazily in ``wp.init()``),
+    setting these here guarantees the worker only sees the assigned GPU(s).
+    """
+    os.environ["HIP_VISIBLE_DEVICES"] = visible_devices
+    os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+
+    # Force a single-GPU device set so device-parameterized tests only produce a
+    # ``cuda:0`` variant (which, under masking, is the assigned physical GPU).
+    # This keeps the generated test method names identical to those produced
+    # during discovery in the main process (see ``main``), avoiding a mismatch
+    # where a worker is asked to run a ``cuda:1`` test that does not exist in a
+    # single-GPU-pinned process. Multi-GPU-only tests are unaffected: they are
+    # not device-parameterized by ``get_test_devices`` and instead gate on
+    # ``len(wp.get_cuda_devices()) > 1`` at runtime, which still holds for the
+    # multi-GPU bucket (where more than one GPU is visible).
+    warp.tests.unittest_utils.test_mode = "basic"
+
+    initialize_test_process(lock, shared_index, args, temp_dir)
+
+
+def _run_distributed(args, temp_dir, test_suites, process_count):
+    """Run tests distributed across GPUs, pinning whole modules to a single GPU.
+
+    Returns a flat list of per-suite result tuples in the same format as
+    :meth:`ParallelTestManager.run_tests`, so the caller can aggregate them
+    exactly like the non-distributed path.
+    """
+    gpu_ids = _resolve_gpu_ids(args)
+    num_gpus = len(gpu_ids)
+
+    groups = _group_suites_by_module(test_suites)
+
+    # Split the multi-GPU-requiring modules into their own bucket.
+    multi_gpu_suites = []
+    normal_groups = {}
+    for key, suites in groups.items():
+        if key in _MULTI_GPU_MODULES:
+            multi_gpu_suites.extend(suites)
+        else:
+            normal_groups[key] = suites
+
+    assignment, group_to_gpu = _assign_groups_to_gpus(normal_groups, gpu_ids)
+
+    # Derive per-GPU worker count.
+    if args.jobs_per_gpu > 0:
+        jobs_per_gpu = args.jobs_per_gpu
+    else:
+        jobs_per_gpu = max(1, process_count // num_gpus)
+
+    # Report the plan.
+    print(
+        f"Distributing {len(normal_groups)} module(s) across {num_gpus} GPU(s) "
+        f"{gpu_ids} with up to {jobs_per_gpu} process(es) per GPU.",
+        file=sys.stderr,
+    )
+    for gpu_id in gpu_ids:
+        module_keys = sorted(k for k, g in group_to_gpu.items() if g == gpu_id)
+        test_count = _suite_weight(assignment[gpu_id])
+        print(
+            f"  GPU {gpu_id}: {len(module_keys)} module(s), {test_count} test(s) -> {module_keys}",
+            file=sys.stderr,
+        )
+    if multi_gpu_suites:
+        visible_multi = ",".join(str(g) for g in gpu_ids)
+        print(
+            f"  Multi-GPU bucket (HIP_VISIBLE_DEVICES={visible_multi}): "
+            f"{sorted(_MULTI_GPU_MODULES)}, {_suite_weight(multi_gpu_suites)} test(s)",
+            file=sys.stderr,
+        )
+
+    manager = multiprocessing.Manager()
+    shared_index = manager.Value("i", -1)
+    lock = manager.Lock()
+    test_manager = ParallelTestManager(manager, args, temp_dir)
+
+    # Build the list of pools to run concurrently: one per GPU plus an optional
+    # multi-GPU bucket. Each entry is (visible_devices, suites, worker_count).
+    pools = []
+    for gpu_id in gpu_ids:
+        suites = assignment[gpu_id]
+        if suites:
+            pools.append((str(gpu_id), suites, min(jobs_per_gpu, len(suites))))
+    if multi_gpu_suites:
+        visible_multi = ",".join(str(g) for g in gpu_ids)
+        pools.append((visible_multi, multi_gpu_suites, min(jobs_per_gpu, len(multi_gpu_suites))))
+
+    if not pools:
+        return []
+
+    def run_pool(visible_devices, suites, worker_count):
+        pool_results = []
+        try:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context(method="spawn"),
+                initializer=initialize_test_process_pinned,
+                initargs=(lock, shared_index, args, temp_dir, visible_devices),
+            ) as executor:
+                for result in executor.map(test_manager.run_tests, suites, timeout=_SUITE_TIMEOUT):
+                    pool_results.append(result)
+        except Exception as exc:  # noqa: BLE001  (BrokenProcessPool / TimeoutError / pool errors)
+            # Mark any suites that did not report a result as crashed so their
+            # tests are surfaced as errors instead of silently vanishing.
+            for suite in suites[len(pool_results) :]:
+                pool_results.append(
+                    create_crash_result(
+                        suite,
+                        reason=f"GPU pool (HIP_VISIBLE_DEVICES={visible_devices}) failed: {exc}",
+                    )
+                )
+        return pool_results
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(pools)) as driver:
+        futures = [driver.submit(run_pool, *pool) for pool in pools]
+        for future in concurrent.futures.as_completed(futures):
+            results.extend(future.result())
+
+    return results
 
 
 class ParallelTestManager:
