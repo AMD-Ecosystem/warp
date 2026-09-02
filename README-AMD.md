@@ -15,7 +15,7 @@ see [Environment setup](#environment-setup). The short version:
 #    be installed FIRST — the USD/NVDB test and example assets are LFS
 #    objects, and without it the clone silently contains pointer files.
 git lfs install
-git clone -b tomas/port-on-1.17-full git@github.com:tomasthoresen/warp
+git clone -b amd-integration-halo https://github.com/AMD-Ecosystem/warp
 cd warp
 
 # 1. Create and activate an environment (Python 3.12; 3.11 also works)
