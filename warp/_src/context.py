@@ -1153,9 +1153,12 @@ def _cluster_dim_target_status(device_arch: int | None, compile_arch: int | None
         so callers should raise instead of reasoning about clustering that is not
         present in the binary.
     """
-    if compile_arch is not None and compile_arch >= 90:
+    # Thread block clusters are an NVIDIA sm90+ concept. HIP/ROCm targets report a
+    # non-integer arch (e.g. "gfx942"); treat them like a sub-cluster device so the
+    # cluster attribute is silently dropped and the kernel still runs unclustered.
+    if isinstance(compile_arch, int) and compile_arch >= 90:
         return "active"
-    if device_arch is not None and device_arch < 90:
+    if device_arch is not None and (not isinstance(device_arch, int) or device_arch < 90):
         return "ignored"
     return "dropped"
 
@@ -5689,7 +5692,12 @@ class Device:
                 runtime.core.wp_cuda_device_get_concurrent_managed_access_supported(ordinal) > 0
             )
             self.is_mempool_supported = runtime.core.wp_cuda_device_is_mempool_supported(ordinal) > 0
-            if platform.system() == "Linux":
+            if arch_str.startswith("gfx"):
+                # HIP/ROCm: Warp's IPC path is built on CUDA IPC APIs that are not
+                # functional on HIP yet (handle export/import errors out, cross-process
+                # memory does not propagate), so report IPC as unsupported here.
+                self.is_ipc_supported = False
+            elif platform.system() == "Linux":
                 # Use None when IPC support cannot be determined
                 ipc_support_api_query = runtime.core.wp_cuda_device_is_ipc_supported(ordinal)
                 self.is_ipc_supported = bool(ipc_support_api_query) if ipc_support_api_query >= 0 else None
@@ -9031,6 +9039,10 @@ def _is_graph_capture_allocation_enabled(device: DeviceLike) -> bool:
     device = runtime.get_device(device)
     if device.is_cpu:
         return True
+    # HIP/ROCm has no native graph capture, so capture-time allocation is never
+    # enabled there even though the memory pool itself may be enabled.
+    if device.is_hip:
+        return False
     return device.is_mempool_enabled
 
 

@@ -519,6 +519,8 @@ def test_stream_synchronize_cpu(test, _):
 
 
 def test_synchronize_during_capture(test, device):
+    if not device.supports_graph_capture:
+        test.skipTest("Native graph capture is unsupported on this device (HIP/ROCm)")
     with wp.ScopedDevice(device):
         with test.assertRaisesRegex(RuntimeError, "Cannot synchronize device"):
             with wp.ScopedCapture():

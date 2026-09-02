@@ -178,6 +178,12 @@ def test_cuda_kernel_properties_compiles_lazily(test, device):
 
 def test_cuda_kernel_properties_accepts_external_constant_params(test, device):
     """Verify that resource queries find an external constant-params entry point."""
+    if device.is_hip:
+        # HIP reports register_count=0 for the external constant-params entry point
+        # (the attribute query does not resolve register usage for it on ROCm),
+        # unlike the regular-kernel query which does return a nonzero count.
+        test.skipTest("Register-count introspection for external constant-params kernels is unsupported on HIP/ROCm")
+
     external_constant_params_attribute_kernel.module.unload()
 
     properties = wp.get_cuda_kernel_properties(
