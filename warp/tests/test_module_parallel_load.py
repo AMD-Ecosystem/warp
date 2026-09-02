@@ -232,6 +232,12 @@ class TestModuleParallelLoad(unittest.TestCase):
         valid_module = _generate_modules(1)[0]
         device = wp.get_device("cuda:0")
 
+        if device.is_hip:
+            # HIP/ROCm always keeps a current device context on the calling thread;
+            # clearing it to NULL (as this test does to observe restoration) is not
+            # meaningful, so the None-context restoration semantics do not apply.
+            self.skipTest("HIP/ROCm keeps a current device context; CUDA NULL-context semantics do not apply.")
+
         original_context = context.runtime.core.wp_cuda_context_get_current()
         context.runtime.core.wp_cuda_context_set_current(None)
         try:
