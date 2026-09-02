@@ -1582,7 +1582,7 @@ add_function_test(
     TestSparse,
     "test_bsr_compress_trailing_capacity_capturability",
     test_bsr_compress_trailing_capacity_capturability,
-    devices=cuda_test_devices_with_mempool,
+    devices=graph_capture_test_devices,
 )
 add_function_test(
     TestSparse,
