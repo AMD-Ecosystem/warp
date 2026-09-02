@@ -438,8 +438,22 @@ def _add(name, devices=cuda_devices):
     add_function_test(TestDeterministicGraph, name, globals()[name], devices=devices)
 
 
+# Native CUDA-style graph capture is unavailable on HIP/ROCm (``ScopedCapture`` is a
+# no-op and ``Device.supports_graph_capture`` is ``False``). APIC recording during a
+# device capture is coupled to native capture in ``capture_begin`` (it is only set up
+# after the ``supports_graph_capture`` gate), so the APIC-rejection test is a native
+# capture test as well. Filter these onto graph-capture-capable devices; on NVIDIA all
+# CUDA devices qualify, so this is a no-op there.
+graph_capture_cuda_devices = [d for d in cuda_devices if d.supports_graph_capture]
+
+# Launches that do not build/replay a native graph run on all CUDA-like devices.
 for _name in (
     "test_record_cmd_deterministic_launch",
+    "test_counter_large_launch_rejected",
+):
+    _add(_name)
+
+for _name in (
     "test_graph_capture_deterministic_launch",
     "test_graph_capture_sliced_array",
     "test_graph_capture_deterministic_closure_kernel",
@@ -447,12 +461,11 @@ for _name in (
     "test_graph_capture_vec3_atomic_minmax",
     "test_graph_capture_consumed_return_counter",
     "test_graph_capture_indexed_counter",
-    "test_counter_large_launch_rejected",
     "test_apic_capture_rejects_deterministic_cuda_kernel",
     "test_capture_while_deterministic_scatter",
     "test_capture_while_deterministic_counter",
 ):
-    _add(_name)
+    _add(_name, devices=graph_capture_cuda_devices)
 
 
 if __name__ == "__main__":

@@ -59,7 +59,7 @@ namespace deterministic {
 template <typename T>
 inline CUDA_CALLABLE void scatter(det_ctx& ctx, det_scatter_buf_t<T>& buf, int dest_flat_idx, T value)
 {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     int slot = atomicAdd(buf.count, 1);
     if (slot < buf.capacity) {
         buf.keys[slot] = (static_cast<int64_t>(dest_flat_idx) << 32)
@@ -82,7 +82,7 @@ inline CUDA_CALLABLE void scatter(det_ctx& ctx, det_scatter_buf_t<T>& buf, int d
 
 inline CUDA_CALLABLE int counter_add(det_ctx& ctx, det_counter_buf_t& buf, int dest_flat_idx, int value)
 {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     int cursor = atomicAdd(&buf.cursors[ctx.idx], 1);
     if (cursor >= buf.records_per_thread) {
         if (ctx.overflow != nullptr) {
@@ -144,7 +144,7 @@ inline CUDA_CALLABLE int counter_add(det_ctx& ctx, det_counter_buf_t& buf, int d
 
 inline CUDA_CALLABLE bool is_reachable_counter_element(const array_t<int>& target, const void* ptr)
 {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     if (target.data == nullptr || target.ndim <= 0) {
         return false;
     }
@@ -213,7 +213,7 @@ inline CUDA_CALLABLE bool is_reachable_counter_element(const array_t<int>& targe
 
 inline CUDA_CALLABLE bool is_counter_store_target(det_ctx& ctx, const void* ptr)
 {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     if (ctx.counter_targets == nullptr) {
         return false;
     }
@@ -232,7 +232,7 @@ inline CUDA_CALLABLE bool is_counter_store_target(det_ctx& ctx, const void* ptr)
 
 inline CUDA_CALLABLE bool is_global_store_target(const void* ptr)
 {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__)
 #if defined(__clang__)
     uint64_t addr = reinterpret_cast<uint64_t>(ptr);
     unsigned int result = 0;
@@ -241,6 +241,11 @@ inline CUDA_CALLABLE bool is_global_store_target(const void* ptr)
 #else
     return __isGlobal(ptr) != 0;
 #endif
+#elif defined(__HIP_DEVICE_COMPILE__)
+    // AMDGPU: a flat/generic pointer targets global memory when it lies in neither
+    // the shared (LDS) nor the private (scratch) aperture. This mirrors the CUDA
+    // isspacep.global test and keeps Phase 0 from suppressing local scratch writes.
+    return !__builtin_amdgcn_is_shared(ptr) && !__builtin_amdgcn_is_private(ptr);
 #else
     (void)ptr;
     return true;
@@ -286,7 +291,7 @@ inline CUDA_CALLABLE void array_store_if_active(det_ctx& ctx, const A<T>& buf, i
 }  // namespace deterministic
 }  // namespace wp
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define WP_DET_SCATTER_OR_FALLBACK(det_ctx, helper, flat_idx, value, cpu_expr) \
     do { \
         if ((det_ctx).phase != 0 && (helper).count != nullptr) { \
