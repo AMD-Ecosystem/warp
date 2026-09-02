@@ -178,8 +178,8 @@ class Example:
         self.p1 = wp.zeros(shape, dtype=float)
         self.div = wp.zeros(shape, dtype=float)
 
-        # capture pressure solve as a graph
-        self.use_graph_capture = True
+        # capture pressure solve as a graph (native capture is unavailable on HIP/ROCm)
+        self.use_graph_capture = wp.get_device().supports_graph_capture
         if self.use_graph_capture:
             with wp.ScopedCapture() as capture:
                 self.pressure_iterations()

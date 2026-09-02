@@ -58,9 +58,13 @@ class Example:
         self.amplitude = 1.0
 
         # use graph capture to reduce per-kernel launch overhead
-        with wp.ScopedCapture() as capture:
-            self.fbm()
-        self.graph = capture.graph
+        # (native graph capture is unavailable on HIP/ROCm, so fall back to direct launches)
+        self.use_graph = wp.get_device().supports_graph_capture
+        self.graph = None
+        if self.use_graph:
+            with wp.ScopedCapture() as capture:
+                self.fbm()
+            self.graph = capture.graph
 
     def fbm(self):
         for _ in range(16):
@@ -81,7 +85,10 @@ class Example:
         with wp.ScopedTimer("step", active=True):
             wp.launch(kernel=slide, dim=self.width, inputs=[self.x, self.shift])
 
-            wp.capture_launch(self.graph)
+            if self.use_graph:
+                wp.capture_launch(self.graph)
+            else:
+                self.fbm()
 
     def step_and_render(self, frame_num=None, img=None):
         self.step()
