@@ -160,9 +160,14 @@ class TestDevices(unittest.TestCase):
         # Validate the list contents (may be non-empty even without
         # CUDA devices when NVRTC is available without a driver)
         for arch in archs:
-            self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
-            self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
-            self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
+            if isinstance(arch, str):
+                # HIP/ROCm reports architectures as strings (e.g. "gfx942:sramecc+:xnack-")
+                # rather than the integer compute capabilities used by NVIDIA.
+                self.assertTrue(arch.startswith("gfx"), f"Unexpected non-integer architecture {arch!r}")
+            else:
+                self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
+                self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
+                self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
 
         # Check the list is sorted with no duplicates
         self.assertEqual(archs, sorted(archs), "Architecture list should be sorted")
