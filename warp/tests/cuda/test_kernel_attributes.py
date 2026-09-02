@@ -178,6 +178,9 @@ def test_cuda_kernel_properties_compiles_lazily(test, device):
 
 def test_cuda_kernel_properties_accepts_external_constant_params(test, device):
     """Verify that resource queries find an external constant-params entry point."""
+    if device.is_hip:
+        test.skipTest("entry_point_abi='external_constant_params' is supported by CUDA only")
+
     external_constant_params_attribute_kernel.module.unload()
 
     properties = wp.get_cuda_kernel_properties(
