@@ -312,8 +312,8 @@ class Example:
     def __init__(self) -> None:
         self.steps_per_frame = 1  # maximum timesteps per rendered frame
 
-        # use CUDA graph if GPU is available
-        self.use_cuda_graph = wp.get_device().is_cuda
+        # use CUDA graph if the device supports native graph capture (not on HIP/ROCm)
+        self.use_cuda_graph = wp.get_device().supports_graph_capture
         self.graph = None
 
         field_shape = (N_GRID, N_GRID, N_GRID)

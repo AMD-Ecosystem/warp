@@ -310,7 +310,7 @@ class Example:
             lr: Adam learning rate.
         """
         self.lead_steps = lead_steps
-        self.use_cuda_graph = wp.get_device().is_cuda
+        self.use_cuda_graph = wp.get_device().supports_graph_capture
 
         self.rk3_coeffs = [
             [1.0, 0.0, 1.0],

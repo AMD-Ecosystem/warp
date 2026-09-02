@@ -389,8 +389,8 @@ class Example:
         # loss array
         self.loss = wp.zeros(1, dtype=float, requires_grad=True)
 
-        # capture graph
-        self.use_cuda_graph = wp.get_device().is_cuda
+        # capture graph (native capture is unavailable on HIP/ROCm)
+        self.use_cuda_graph = wp.get_device().supports_graph_capture
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
                 self.tape = wp.Tape()
