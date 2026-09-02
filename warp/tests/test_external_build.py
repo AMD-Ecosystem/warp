@@ -86,7 +86,7 @@ def native_struct_kernel(
 
 
 _NATIVE_TEST_PREAMBLE = """
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIP__)
 #define WARP_TEST_CALLABLE __host__ __device__ inline
 #else
 #define WARP_TEST_CALLABLE inline
