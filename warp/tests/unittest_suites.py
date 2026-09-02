@@ -19,6 +19,17 @@ import unittest
 START_DIRECTORY = os.path.realpath(os.path.dirname(__file__))
 TOP_LEVEL_DIRECTORY = os.path.realpath(os.path.join(START_DIRECTORY, "..", ".."))
 
+# Test classes that must not run concurrently with other GPU work on HIP/ROCm.
+# Concurrent multi-process device-to-device copies intermittently deadlock,
+# corrupt data, or raise spurious "invalid argument" errors in the HIP runtime
+# (observed on gfx942/MI325X): the same copies pass reliably when run serially.
+# The parallel runner pulls these classes out of the parallel pool and runs them
+# single-process after the parallel phase so CI is deterministic. This is keyed
+# by class name and only takes effect when HIP devices are present, so CUDA /
+# NVIDIA runs are unaffected. ``TestAsync`` is the large D2D-copy sweep that
+# saturates the copy engines; ``TestTape`` performs strided-view adjoint copies.
+HIP_SERIAL_ONLY_SUITES = frozenset({"TestAsync", "TestTape"})
+
 
 def _create_suite_from_test_classes(test_loader, test_classes):
     suite = unittest.TestSuite()

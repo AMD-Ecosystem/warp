@@ -52,6 +52,21 @@ def _get_warp_cache_base_path():
     return cache_path or None
 
 
+def _hip_devices_present():
+    """Return whether any HIP/ROCm CUDA-compatible device is present.
+
+    NVIDIA/HIP Modification. Used to gate HIP-only serialization of copy-heavy
+    test classes; returns ``False`` on NVIDIA hardware or when Warp cannot be
+    queried, leaving CUDA runs on the full parallel path.
+    """
+    try:
+        import warp as wp  # noqa: PLC0415
+
+        return any(getattr(device, "is_hip", False) for device in wp.get_cuda_devices())
+    except Exception:
+        return False
+
+
 def _kill_process_pool(executor):
     """Kill all executor workers without waiting for running futures.
 
@@ -256,6 +271,32 @@ def main(argv=None):
         else:  # args.level == "module"
             test_suites = list(_iter_module_suites(discover_suite))
 
+        # NVIDIA/HIP Modification: on HIP/ROCm, hold copy-heavy classes out of
+        # the parallel pool and run them single-process after the parallel phase.
+        # Concurrent multi-process device-to-device copies intermittently
+        # deadlock, corrupt data, or raise spurious "invalid argument" errors in
+        # the HIP runtime; the same tests pass reliably when serialized. This is
+        # class-level and HIP-only, so CUDA/NVIDIA runs keep the full parallelism.
+        hip_serial_suites = []
+        if args.level == "class" and not args.serial_fallback and _hip_devices_present():
+            serial_names = warp.tests.unittest_suites.HIP_SERIAL_ONLY_SUITES
+            parallel_suites = []
+            for suite in test_suites:
+                if suite.countTestCases() == 0:
+                    continue
+                if _get_suite_name(suite) in serial_names:
+                    hip_serial_suites.append(suite)
+                else:
+                    parallel_suites.append(suite)
+            test_suites = parallel_suites
+            if hip_serial_suites:
+                names = ", ".join(sorted({_get_suite_name(s) for s in hip_serial_suites}))
+                print(
+                    f"HIP/ROCm: running {len(hip_serial_suites)} copy-heavy suite(s) single-process "
+                    f"after the parallel phase for determinism: {names}",
+                    file=sys.stderr,
+                )
+
         # Don't use more processes than test suites
         process_count = max(1, min(len(test_suites), process_count))
 
@@ -395,6 +436,53 @@ def main(argv=None):
                         )
                         error_result = create_crash_result(suite)
                         results.append(error_result)
+
+            # NVIDIA/HIP Modification: run the copy-heavy suites that were held
+            # out of the parallel pool, now that no other GPU work is running.
+            # Each runs in its own single-process pool so no concurrent HIP
+            # device-to-device copies overlap.
+            if hip_serial_suites:
+                print(
+                    f"Running {len(hip_serial_suites)} HIP serial-only suite(s) single-process...",
+                    file=sys.stderr,
+                )
+                serial_manager = ParallelTestManager(manager, args, temp_dir)
+                for i, suite in enumerate(hip_serial_suites):
+                    suite_name = _get_suite_name(suite)
+                    try:
+                        with concurrent.futures.ProcessPoolExecutor(
+                            max_workers=1,
+                            mp_context=multiprocessing.get_context(method="spawn"),
+                            initializer=initialize_test_process,
+                            initargs=(manager.Lock(), shared_index, args, temp_dir),
+                        ) as serial_executor:
+                            future = serial_executor.submit(serial_manager.run_tests, suite)
+                            try:
+                                results.append(future.result(timeout=_SUITE_TIMEOUT))
+                            except concurrent.futures.TimeoutError:
+                                _kill_process_pool(serial_executor)
+                                print(
+                                    f"Warning: HIP serial suite {i + 1}/{len(hip_serial_suites)} "
+                                    f"({suite_name}) timed out (timeout={_SUITE_TIMEOUT}s). Marking tests as crashed.",
+                                    file=sys.stderr,
+                                )
+                                results.append(
+                                    create_crash_result(suite, reason=f"Process timed out (timeout={_SUITE_TIMEOUT}s)")
+                                )
+                            except BrokenProcessPool:
+                                print(
+                                    f"Warning: HIP serial suite {i + 1}/{len(hip_serial_suites)} "
+                                    f"({suite_name}) crashed or was terminated unexpectedly. Marking tests as crashed.",
+                                    file=sys.stderr,
+                                )
+                                results.append(create_crash_result(suite))
+                    except Exception as e:
+                        print(
+                            f"Warning: Failed to run HIP serial suite {i + 1}/{len(hip_serial_suites)} "
+                            f"({suite_name}): {e}. Marking tests as crashed.",
+                            file=sys.stderr,
+                        )
+                        results.append(create_crash_result(suite))
         else:
             # This entire path is an NVIDIA Modification
 
