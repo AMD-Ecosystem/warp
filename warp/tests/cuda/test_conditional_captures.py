@@ -204,6 +204,7 @@ def test_if_nocapture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
+@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
 def test_if_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -330,6 +331,7 @@ def test_if_else_nocapture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
+@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
 def test_if_else_with_subgraph(test, device):
     with wp.ScopedDevice(device):
         # test different conditions
@@ -455,6 +457,7 @@ def test_else_nocapture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
+@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
 def test_else_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -590,6 +593,7 @@ def test_while_nocapture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
+@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
 def test_while_with_subgraph(test, device):
     with wp.ScopedDevice(device):
         # test different conditions
@@ -856,6 +860,7 @@ def test_complex_nocapture(test, device):
                         np.testing.assert_array_equal(array.numpy(), base)
 
 
+@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
 def test_complex_with_subgraphs(test, device):
     with wp.ScopedDevice(device):
         limit = 1000
@@ -1125,6 +1130,9 @@ def test_error_alloc_while_subgraph(test, device):
 devices = get_test_devices()
 cuda_devices = get_cuda_test_devices()
 cuda_devices_with_mempool = get_cuda_test_devices_with_mempool()
+# Native graph capture is unsupported on HIP (Device.supports_graph_capture is
+# False), so ScopedCapture leaves graph=None; gate plain-capture tests here.
+cuda_devices_with_graph_capture = [d for d in cuda_devices if d.supports_graph_capture]
 
 
 class TestConditionalCaptures(unittest.TestCase):
@@ -1181,7 +1189,7 @@ add_function_test(
 
 
 add_function_test(
-    TestConditionalCaptures, "test_graph_debug_dot_print", test_graph_debug_dot_print, devices=cuda_devices
+    TestConditionalCaptures, "test_graph_debug_dot_print", test_graph_debug_dot_print, devices=cuda_devices_with_graph_capture
 )
 
 add_function_test(

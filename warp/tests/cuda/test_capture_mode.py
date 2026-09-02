@@ -77,6 +77,8 @@ def test_relaxed_allows_capture_unsafe_runtime_call(test, device):
 
 def test_relaxed_capture_allows_side_stream_fill(test, device):
     """Built-in kernels on side streams remain valid during relaxed capture."""
+    if not device.supports_graph_capture:
+        test.skipTest("Native graph capture is unsupported on this device (HIP/ROCm)")
     with wp.ScopedDevice(device):
         capture_stream = wp.Stream(device)
         side_stream = wp.Stream(device)

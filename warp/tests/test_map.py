@@ -461,6 +461,8 @@ def test_kernel_creation(test, device):
 
 
 def test_graph_capture(test, device):
+    if not device.supports_graph_capture:
+        test.skipTest("Native graph capture is unsupported on this device (HIP/ROCm)")
     assert wp._src.context.runtime.driver_version is not None
     if wp._src.context.runtime.driver_version < (12, 3):
         test.skipTest("Module loading during CUDA graph capture is not supported on driver versions < 12.3")
