@@ -908,6 +908,7 @@ def test_tape_backward_cuda_launch_failure(test, device):
 
 devices = get_test_devices()
 cuda_devices = get_cuda_test_devices()
+cuda_graph_capture_devices = get_cuda_graph_capture_test_devices()
 
 
 class TestTape(unittest.TestCase):
@@ -983,7 +984,7 @@ add_function_test(
 add_function_test(TestTape, "test_tape_copy_adjoint_cpu_cuda", test_tape_copy_adjoint_cpu_cuda, devices=cuda_devices)
 add_function_test(TestTape, "test_tape_copy_adjoint_stream", test_tape_copy_adjoint_stream, devices=cuda_devices)
 add_function_test(
-    TestTape, "test_tape_copy_adjoint_graph_capture", test_tape_copy_adjoint_graph_capture, devices=cuda_devices
+    TestTape, "test_tape_copy_adjoint_graph_capture", test_tape_copy_adjoint_graph_capture, devices=cuda_graph_capture_devices
 )
 add_function_test(
     TestTape, "test_tape_backward_cuda_launch_failure", test_tape_backward_cuda_launch_failure, devices=cuda_devices

@@ -128,11 +128,19 @@ def test_cuda_shared_tile_oob_reports_tile_index(test, device):
     _returncode, stdout, stderr = _run_in_subprocess("_trigger_shared_tile_oob_cuda", device)
 
     output = stdout + stderr
-    test.assertRegex(output, r"Warp tile index out of bounds in shared tile")
-    test.assertRegex(output, r"coordinate dimension 0 has index 1, outside valid range \[0, 1\)")
-    # The device-side assert aborts the launch; the follow-on driver error differs by
-    # backend (CUDA: "device-side assert triggered"; HIP/ROCm: "unspecified launch failure").
-    test.assertRegex(output, r"device-side assert triggered|unspecified launch failure")
+    if wp.get_device(device).is_hip:
+        # On HIP/ROCm the device-side printf is discarded when the queue aborts on the
+        # assertion, so the rich diagnostic ("in shared tile" plus the coordinate detail)
+        # is unavailable; only the assert-expression text survives. The abort is also
+        # surfaced as an HSA hardware exception rather than "device-side assert triggered".
+        test.assertRegex(output, r"Warp tile index out of bounds")
+        test.assertRegex(output, r"HSA_STATUS_ERROR_EXCEPTION|hardware exception|unspecified launch failure")
+    else:
+        test.assertRegex(output, r"Warp tile index out of bounds in shared tile")
+        test.assertRegex(output, r"coordinate dimension 0 has index 1, outside valid range \[0, 1\)")
+        # The device-side assert aborts the launch; the follow-on driver error differs by
+        # backend (CUDA: "device-side assert triggered"; HIP/ROCm: "unspecified launch failure").
+        test.assertRegex(output, r"device-side assert triggered|unspecified launch failure")
 
 
 # The CPU OOB checks abort the process, so run them as fixed-device tests
