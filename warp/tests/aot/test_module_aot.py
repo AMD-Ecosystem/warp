@@ -344,6 +344,11 @@ class TestModuleAOT(unittest.TestCase):
 
         arch = supported_archs[0]
 
+        if not isinstance(arch, int):
+            # PTX is NVIDIA-only. HIP/ROCm reports a gfx arch string and emits AMD
+            # GPU ISA rather than textual PTX, so there is no .ptx artifact to check.
+            self.skipTest("PTX is NVIDIA-only; HIP/ROCm reports a gfx arch and emits GPU ISA, not PTX")
+
         try:
             shutil.rmtree(TEST_CACHE_DIR, ignore_errors=True)
             TEST_CACHE_DIR.mkdir(parents=True, exist_ok=True)

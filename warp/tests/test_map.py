@@ -261,8 +261,11 @@ def test_array_ops(test, device):
     assert_np_equal((a * b).numpy(), a_np * b_np)
     assert_np_equal((2.0 * a).numpy(), 2.0 * a_np)
     assert_np_equal((a * 2.0).numpy(), a_np * 2.0)
-    np.testing.assert_allclose((a**b).numpy(), a_np**b_np, rtol=1.5e-7)
-    np.testing.assert_allclose((a**2.0).numpy(), a_np**2.0)
+    # AMD's pow() differs from NVIDIA/NumPy by a few ULPs at fp32; relax the tight
+    # (near-fp32-epsilon) tolerance on HIP/ROCm accordingly.
+    pow_rtol = 2.0e-6 if device.is_hip else 1.5e-7
+    np.testing.assert_allclose((a**b).numpy(), a_np**b_np, rtol=pow_rtol)
+    np.testing.assert_allclose((a**2.0).numpy(), a_np**2.0, rtol=pow_rtol)
     assert_np_equal((a / b).numpy(), a_np / b_np)
     assert_np_equal((a / 2.0).numpy(), a_np / 2.0)
     assert_np_equal((a // b).numpy(), a_np // b_np)

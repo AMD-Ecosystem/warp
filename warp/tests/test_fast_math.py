@@ -311,7 +311,14 @@ class TestFastMath(unittest.TestCase):
 
 devices = get_test_devices()
 
-add_function_test(TestFastMath, "test_fast_math_cuda", test_fast_math_cuda, devices=get_cuda_test_devices())
+add_function_test(
+    TestFastMath,
+    "test_fast_math_cuda",
+    test_fast_math_cuda,
+    # fast-math pow() of a negative base yielding NaN is NVIDIA-specific; HIP/ROCm
+    # returns the correct finite result (e.g. pow(-2,2)=4), so skip on HIP.
+    devices=[d for d in get_cuda_test_devices() if not d.is_hip],
+)
 add_function_test(TestFastMath, "test_fast_math_disabled", test_fast_math_disabled, devices=devices)
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
