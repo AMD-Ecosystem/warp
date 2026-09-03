@@ -155,10 +155,10 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 | Kernel | 7.0.0-28-generic, in-tree `amdgpu` (6.17.0-1017-oem also validated; some other kernels are known bad — see [Troubleshooting](#troubleshooting)) |
 | GPU | AMD Radeon 8060S (gfx1151), 96 GiB unified memory |
 | ROCm | 7.14.0 (recommended; all current recorded numbers). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
-| Newton | 1.4.0, branch `tomas/gfx1151-fixes` of `github.com/tomasthoresen/newton` (two commits on top of the 1.4.0 release — see [Newton integration](#newton-integration)) |
-| MuJoCo | 3.10.0 |
-| MuJoCo-Warp | 3.10.0.2 (Newton 1.4.0 is incompatible with 3.10.0.3, which removed `Model.qLD_dof_simple`) |
-| usd-core | 26.3 (Newton 1.4.0 requires `>=25.5,<26.5`; 26.8 is unusable with it) |
+| Newton | 1.5.1 from PyPI (`newton[sim,importers,examples]`), with the `graph_conditional = False` wrapper — see [Newton integration](#newton-integration) |
+| MuJoCo | 3.11.0 |
+| MuJoCo-Warp | 3.11.0 |
+| usd-core | 26.3 (Newton 1.5.1 requires `>=25.5,<26.5`) |
 | JAX | 0.11.0 |
 | PyTorch | 2.12/2.13 nightlies from `https://rocm.nightlies.amd.com/v2/gfx1151/` on the ROCm 7.2.1 host. Not usable inside the 7.14.0 container: the wheel bundles a rocm-sdk whose `libamd_comgr` conflicts with the container's LLVM. |
 | Python | 3.12 (3.11 also tested) |
@@ -168,8 +168,8 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 
 Historical record of the original 1.12.0.dev0 port, retained for provenance.
 These pins were recorded in May 2026 against Newton 1.0.0 and do **not**
-describe the current tree, which is Warp 1.17.0.dev4 with Newton 1.4.0 and 104
-examples.
+describe the current tree, which is validated with stock Newton 1.5.1 (111
+examples).
 
 ```
 warp-lang             1.12.0.dev0   # editable install of an AMD port branch
@@ -377,33 +377,27 @@ for those classes see `KNOWN_ISSUES-AMD.md`.
 
 ## Newton integration
 
-Install the pinned MuJoCo stack and Newton 1.4.0 from the gfx1151 branch into
-the same environment:
+Install stock Newton 1.5.1 with its simulation, importer and example extras
+into the same environment; this pulls the matching MuJoCo stack:
 
 ```bash
-pip install mujoco==3.10.0 mujoco-warp==3.10.0.2 "usd-core>=25.5,<26.5"
-git clone -b tomas/gfx1151-fixes git@github.com:tomasthoresen/newton
-pip install -e ./newton --no-deps
+pip install "newton[sim,importers,examples]==1.5.1"
+# resolves to mujoco 3.11.0, mujoco-warp 3.11.0, usd-core 26.3, warp-nn 0.3.x
 ```
 
-Pin rationale: Newton 1.4.0 requires `usd-core>=25.5,<26.5` and is
-incompatible with mujoco-warp 3.10.0.3, which removed `Model.qLD_dof_simple`.
-The `tomas/gfx1151-fixes` branch is the 1.4.0 release plus two commits:
-disable mujoco-warp conditional graphs where the platform does not support
-them, and the matching model-comparison test change.
+`pip` also installs the stock `warp-lang` wheel as Newton's dependency. Keep
+this checkout first on `PYTHONPATH` (or install it editable afterwards) so the
+HIP port is the Warp that gets imported; check with
+`python -c "import warp; print(warp.__file__)"`.
 
 **Conditional graph nodes are not supported on HIP** (the API does not exist
-in ROCm's headers). On the branch above, Newton's MuJoCo solver detects this
-and sets `graph_conditional = False` itself, so stock examples run directly:
-
-```bash
-python -m newton.examples robot_anymal_c_walk --viewer null --benchmark --num-frames 1200
-```
-
-With **stock** Newton 1.4.0 instead of the branch, the MuJoCo solver takes the
+in ROCm's headers). Stock Newton 1.5.1's MuJoCo solver takes the
 conditional-graph path and raises at graph capture
-(`Conditional graph nodes are not supported on HIP/ROCm`). Workaround wrapper
-for that case:
+(`Conditional graph nodes are not supported on HIP/ROCm`). Until
+[newton-physics/newton PR #3994](https://github.com/newton-physics/newton/pull/3994)
+(derive graph-conditional usage from platform support) lands, run the MuJoCo
+examples through this wrapper, which turns the option off after the solver
+builds its model:
 
 ```bash
 python -c "
@@ -428,18 +422,27 @@ launches a fixed iteration count with no intermediate syncs, which measures
 as a substantial per-step win on gfx1151.
 
 The `patches/newton/` directory targets Newton 1.0.0 and does not apply to
-1.4.0: the branch above replaces patch 04, and the code patch 03 modified was
-refactored away upstream after 1.0.0.
+1.5.1: the wrapper above (and PR #3994) replaces patch 04, and the code patch
+03 modified was refactored away upstream after 1.0.0.
 
 ### Verifying Newton works
 
-Current per-example status on gfx1151 at this branch head: 96 of 104 Newton
-examples run to completion in benchmark mode. The non-runners are all in
-documented platform classes (the graph-replay fault class, several of them
-intermittent; `cloth_franka`; one diffsim timeout; one benchmark-output
-harness quirk) — see `KNOWN_ISSUES-AMD.md`. Quick
-checks with Newton's own benchmark mode, expected sustained rates from the
-recorded sweep:
+Five robot examples run on every validation pass of this port (stock Newton
+1.5.1 with the wrapper above, 300 frames, warm kernel cache, ROCm 7.14.1).
+Frames per second measured end to end, including interpreter start and model
+load, on the v1.17.0 port stack (2026-09-02):
+
+| Example | FPS |
+|---|---|
+| robot_anymal_c_walk | 45.5 |
+| robot_cartpole | 31.5 |
+| robot_h1 | 55.7 |
+| robot_g1 | 24.2 |
+| robot_allegro_hand | 30.9 |
+
+The steady-state simulation rate, timed in-process around the run loop, is
+roughly double these figures. Examples outside this set are covered by the
+platform classes in `KNOWN_ISSUES-AMD.md`.
 
 Newton's benchmark mode prints its own sustained rate. Run a long frame
 count: on ROCm 7.2.x, graph-replaying examples decay with runtime instead of
@@ -584,8 +587,9 @@ examples and breaks a larger number — see
 
 - `libmathdx` is unsupported on HIP builds.
 - Single-architecture compile time: about 1-2 minutes, plus a one-time LLVM/Clang toolchain download on the first build.
-- Newton MuJoCo examples need the `tomas/gfx1151-fixes` Newton branch (or the
-  `graph_conditional = False` wrapper) — see [Newton integration](#newton-integration).
+- Newton MuJoCo examples need the `graph_conditional = False` wrapper with
+  stock Newton until newton-physics/newton PR #3994 lands — see
+  [Newton integration](#newton-integration).
 - Validated only on gfx1151. Other RDNA architectures are buildable but untested.
 
 ## License
