@@ -10,10 +10,9 @@ turnkey option; if you already have Python 3.11/3.12 a plain `venv` works too �
 see [Environment setup](#environment-setup). The short version:
 
 ```bash
-# 0. Clone this branch. The repository is private: you need access, and the
-#    clone must go over SSH (or an authenticated HTTPS remote). git-lfs must
-#    be installed FIRST — the USD/NVDB test and example assets are LFS
-#    objects, and without it the clone silently contains pointer files.
+# 0. Clone this branch (the repository is public). git-lfs must be installed
+#    FIRST — the USD/NVDB test and example assets are LFS objects, and without
+#    it the clone silently contains pointer files.
 git lfs install
 git clone -b amd-integration-halo https://github.com/AMD-Ecosystem/warp
 cd warp
@@ -385,10 +384,11 @@ pip install "newton[sim,importers,examples]==1.5.1"
 # resolves to mujoco 3.11.0, mujoco-warp 3.11.0, usd-core 26.3, warp-nn 0.3.x
 ```
 
-`pip` also installs the stock `warp-lang` wheel as Newton's dependency. Keep
-this checkout first on `PYTHONPATH` (or install it editable afterwards) so the
-HIP port is the Warp that gets imported; check with
-`python -c "import warp; print(warp.__file__)"`.
+Newton depends on `warp-lang`; because this checkout is already installed
+editable (Build and Install above) and satisfies that requirement, `pip` keeps
+it rather than fetching the stock wheel. Check that the port is the Warp that
+gets imported: `python -c "import warp; print(warp.__file__)"` must print a
+path inside this checkout.
 
 **Conditional graph nodes are not supported on HIP** (the API does not exist
 in ROCm's headers). Stock Newton 1.5.1's MuJoCo solver takes the
