@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Verify the running environment matches the known-good gfx1151 baseline
 # documented in README-AMD.md. Exit 0 = all checks pass.
 #
