@@ -30,6 +30,10 @@ Validation at this base:
     graph-capture-allocation class.
   - `test_optim` `example_fluid_checkpoint` — the platform firmware wedge
     (lost HSA completion signal; the process spins in system time).
+  - `geometry/test_bvh` `test_bvh_aabb` — intermittent wrong query result (the
+    device AABB query misses an intersection the host finds), about 7 % of
+    single-process runs on 2026-09-07; the "Rare wrong BVH query result" open bug
+    below, with the evidence. Open.
 - **CUDA reference at the same commit** (RTX A4000, CUDA 12.9): builds with
   the standard CUDA build; full suite **8590 ok / 62 skip / 0 fail**. No AMD
   failure reproduces on CUDA.
@@ -322,6 +326,10 @@ backend is exactly what caused the graph memory-free crash above.
   re-runs in the same session, the re-runs all passing). A wrong result
   without a fault matches the residual lost-write class documented below;
   the rate is too low for the 12-run protocols used elsewhere in this file.
+  2026-09-07 (kernel 7.0.0-31, ROCm 7.14.1): 3 misses in 40 single-process runs on the 1.17
+  release line and the 1.18 development line alike (2/8, 1/16, 0/16), no memory fault; the
+  BVH query tests (aabb, capsule, sphere, ray) also flip in the pooled runner. Documented as
+  a known intermittent failure in the validation status above; still open.
 
 - **Nominally passing examples can crash intermittently** — examples recorded
   as `ok` in the FPS sweep (`robot_h1`, `sensor_contact`) crashed with
