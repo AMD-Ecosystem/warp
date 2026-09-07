@@ -1,6 +1,6 @@
 # Warp on AMD HIP/ROCm
 
-AMD HIP/ROCm build of NVIDIA Warp 1.17.0.dev4 (upstream main).
+AMD HIP/ROCm build of NVIDIA Warp 1.17.0 (release tag v1.17.0).
 
 ## Quickstart
 
@@ -228,7 +228,7 @@ follows. Confirm the holds with `apt-mark showhold | grep linux`.
 ### Verifying the environment matches the baseline
 
 This subsection applies to the historical 1.12 baseline above, not to the
-current 1.17.0.dev4 stack: on the current configuration the script exits
+current 1.17.0 stack: on the current configuration the script exits
 nonzero by design (it checks the 1.12-era kernel and package pins). Run it only to compare
 against that baseline:
 
