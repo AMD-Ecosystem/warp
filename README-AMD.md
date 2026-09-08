@@ -427,22 +427,10 @@ The `patches/newton/` directory targets Newton 1.0.0 and does not apply to
 
 ### Verifying Newton works
 
-Five robot examples run on every validation pass of this port (stock Newton
-1.5.1 with the wrapper above, 300 frames, warm kernel cache, ROCm 7.14.1).
-Frames per second measured end to end, including interpreter start and model
-load, on the v1.17.0 port stack (2026-09-02):
-
-| Example | FPS |
-|---|---|
-| robot_anymal_c_walk | 45.5 |
-| robot_cartpole | 31.5 |
-| robot_h1 | 55.7 |
-| robot_g1 | 24.2 |
-| robot_allegro_hand | 30.9 |
-
-The steady-state simulation rate, timed in-process around the run loop, is
-roughly double these figures. Examples outside this set are covered by the
-platform classes in `KNOWN_ISSUES-AMD.md`.
+Five robot examples (`robot_anymal_c_walk`, `robot_cartpole`, `robot_h1`, `robot_g1`,
+`robot_allegro_hand`) run to completion on every validation pass of this port with stock
+Newton 1.5.1 and the wrapper above. Examples outside this set are covered by the platform
+classes in `KNOWN_ISSUES-AMD.md`.
 
 Newton's benchmark mode prints its own sustained rate. Run a long frame
 count: on ROCm 7.2.x, graph-replaying examples decay with runtime instead of
