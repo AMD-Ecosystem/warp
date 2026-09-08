@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #define WP_NO_BFLOAT16
 
 #define WP_TILE_BLOCK_DIM 256

@@ -458,7 +458,9 @@ static ContextInfo* get_context_info(CUcontext ctx)
         if (check_cu(cuCtxGetDevice_f(&device))) {
             DeviceInfo* device_info = g_device_map[device];
 
-            // workaround for https://nvbugspro.nvidia.com/bug/4456003
+            // Work around a CUDA driver bug observed with Linux driver 535.54.03: cudaFreeAsync() could crash when
+            // directly freeing a graph allocation on an uninitialized default stream. Prime the stream's allocator
+            // bookkeeping with an ordinary asynchronous allocation and free.
             if (device_info->is_mempool_supported) {
                 void* dummy = NULL;
                 check_cuda(cudaMallocAsync(&dummy, 1, NULL));
@@ -4792,12 +4794,10 @@ bool wp_cuda_graph_insert_if_else(
         return false;
     }
 
-    // int driver_version = wp_cuda_driver_version();
-
-    // IF-ELSE nodes are only supported with CUDA 12.8+
-    // Somehow child graphs produce wrong results when an else branch is used
-    // Seems to be a bug in the CUDA driver: https://nvbugs/5241330
-    if (num_branches == 1 /*|| driver_version >= 12080*/) {
+    // Multi-graph IF-ELSE nodes are supported starting with CUDA 12.8, but CUDA 12.8 and 12.9 drivers
+    // can reparent nodes from child graphs incorrectly during instantiation. Use two single-body conditional nodes
+    // until CUDA 12.x is no longer supported; the driver issue was fixed in CUDA 13.0.
+    if (num_branches == 1) {
         cudaGraphConditionalHandle handle;
         check_cuda(cudaGraphConditionalHandleCreate(&handle, cuda_graph));
 
@@ -5528,14 +5528,9 @@ size_t wp_cuda_compile_program(
 
 #if CUDA_VERSION >= 12080 && CUDA_VERSION < 13000
     // CUDA 12 miscompiles optimized CUBIN texture sampling when texture handles
-    // vary across lanes. Confirmed on CUDA 12.9 for sm_101 and sm_120; sm_121 is
-    // included because it shares the sm_120 family. CUDA 12.8 is covered as a
-    // precaution only: it is a supported build toolkit but is not exercised in
-    // CI, so it has been tested neither way.
-    //
-    // This is the NVRTC target architecture, not the driver-reported one: Warp
-    // remaps Thor's sm_110 to sm_101 when building against CUDA 12.
-    const bool is_affected_texture_cubin_target = arch == 101 || arch == 120 || arch == 121;
+    // vary across lanes on sm_90 and newer targets. CUDA 12.8 is covered as a
+    // precaution because it is not exercised in CI.
+    const bool is_affected_texture_cubin_target = arch >= 90;
 #else
     // CUDA 13 CUBIN has not reproduced the miscompile on any target tested so far.
     const bool is_affected_texture_cubin_target = false;
