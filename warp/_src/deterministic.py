@@ -89,6 +89,13 @@ def det_buffer_allocation_scope(device, stream_is_capturing):
         yield
         return
 
+    if device.is_hip:
+        # HIP rejects pool allocations on a non-capturing stream while another stream captures
+        # (hipErrorStreamCaptureUnsupported), relaxed capture mode or not, and it has no conditional
+        # body graphs to keep allocation-free. Allocate on the capturing stream as plain arrays do.
+        yield
+        return
+
     runtime = warp_context.runtime
     alloc_stream = _det_capture_alloc_stream(device)
     previous_mode = runtime.core.wp_cuda_thread_exchange_capture_mode(int(CaptureMode.RELAXED))
