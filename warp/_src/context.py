@@ -10332,6 +10332,13 @@ def copy(
         elif src.device.is_cuda:
             stream = src.device.stream
 
+    # Keep an explicit reference to an internally-created source staging buffer.
+    # In particular, a CPU staging buffer must remain alive until an asynchronous
+    # H2D copy has finished reading it.
+    temporary_source = None
+    hip_staging_fallback = False
+    staging_stream = stream
+
     # Copying between different devices requires contiguous arrays.  If the arrays
     # are not contiguous, we must use temporary staging buffers for the transfer.
     # TODO: We can skip the staging if device access is enabled.
@@ -10346,10 +10353,12 @@ def copy(
             # This involves an allocation and a kernel launch, which must run on the source device.
             if src.device.is_cuda and stream != src.device.stream:
                 src.device.stream.wait_stream(stream)
-                src = src.contiguous()
+                temporary_source = src.contiguous()
+                src = temporary_source
                 stream.wait_stream(src.device.stream)
             else:
-                src = src.contiguous()
+                temporary_source = src.contiguous()
+                src = temporary_source
 
         # The source is now contiguous.  If the destination is not contiguous,
         # clone a contiguous copy on the destination device.
@@ -10361,13 +10370,33 @@ def copy(
                 raise RuntimeError("Failed to allocate a CPU staging buffer during graph capture")
             # The allocation must run on the destination device
             if dest.device.is_cuda and stream != dest.device.stream:
-                dest.device.stream.wait_stream(stream)
-                tmp = empty_like(src, device=dest.device)
-                stream.wait_stream(dest.device.stream)
+                if dest.device.is_hip and not stream.is_capturing:
+                    # HIP event hand-offs around a temporary staging allocation
+                    # are unreliable under heavy multi-process contention.  Use
+                    # host barriers for this non-capturing fallback so the
+                    # allocation, transfer, and scatter are strictly ordered.
+                    synchronize_stream(stream)
+                    tmp = empty_like(src, device=dest.device)
+                    synchronize_stream(dest.device.stream)
+                    hip_staging_fallback = True
+                    staging_stream = dest.device.stream
+                else:
+                    dest.device.stream.wait_stream(stream)
+                    tmp = empty_like(src, device=dest.device)
+                    stream.wait_stream(dest.device.stream)
             else:
                 tmp = empty_like(src, device=dest.device)
-            # Run the copy on the stream given by the caller
-            copy(tmp, src, stream=stream)
+            # Fill the staging buffer on the selected transfer stream.
+            copy(tmp, src, stream=staging_stream)
+            if temporary_source is not None and temporary_source.device.is_cpu:
+                # H2D copies are asynchronous on HIP even when the source is
+                # pageable host memory.  Synchronize before replacing the last
+                # reference to the temporary source; otherwise its allocation
+                # may be reused while the transfer is still reading it.
+                synchronize_stream(staging_stream)
+            elif dest.device.is_cpu:
+                # A host scatter below reads the D2H staging buffer immediately.
+                synchronize_stream(stream)
             src = tmp
 
     if src.is_contiguous and dest.is_contiguous:
@@ -10433,6 +10462,11 @@ def copy(
         if not result:
             raise RuntimeError(f"Warp copy error: {runtime.get_error_string()}")
 
+        if temporary_source is not None and temporary_source.device.is_cpu:
+            # Keep an internally-created CPU staging source alive until the
+            # asynchronous H2D transfer has finished reading it.
+            synchronize_stream(stream)
+
     else:
         # handle non-contiguous arrays
 
@@ -10466,6 +10500,10 @@ def copy(
                 result = runtime.core.wp_array_copy_device(
                     dest.device.context, dst_ptr, src_ptr, dst_type, src_type, src_elem_size
                 )
+            elif hip_staging_fallback:
+                result = runtime.core.wp_array_copy_device(
+                    dest.device.context, dst_ptr, src_ptr, dst_type, src_type, src_elem_size
+                )
             else:
                 dest.device.stream.wait_stream(stream)
                 result = runtime.core.wp_array_copy_device(
@@ -10477,6 +10515,14 @@ def copy(
 
         if not result:
             raise RuntimeError(f"Warp copy error: {runtime.get_error_string()}")
+
+        if hip_staging_fallback:
+            # Complete the scatter before releasing its temporary input.
+            synchronize_stream(dest.device.stream)
+            # HIP may still reclaim these completed staging allocations too
+            # aggressively under multi-process contention.  Keep them alive
+            # with the destination until its next staged copy or destruction.
+            dest._copy_staging_refs = (temporary_source, src)
 
     # copy gradient, if needed
     if hasattr(src, "grad") and src.grad is not None and hasattr(dest, "grad") and dest.grad is not None:
