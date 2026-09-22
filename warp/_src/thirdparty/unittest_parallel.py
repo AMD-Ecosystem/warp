@@ -42,6 +42,21 @@ _SUITE_TIMEOUT = (
     3600  # Timeout in seconds: total wall-clock limit for parallel execution, per-suite limit during isolated fallback
 )
 
+# AMD Modification: Test classes that must run in their own isolated, single-worker
+# pool instead of being distributed across the shared parallel worker pool. These
+# classes perform contention-sensitive multi-GPU work (notably TestAsync's
+# device-to-device stream copies) that intermittently corrupts (~1/8 of elements
+# read back stale) when co-scheduled with other GPU suites across the pool,
+# producing flaky failures. Running them consolidated in a dedicated single-worker
+# pool, with no other suite executing concurrently, avoids the race. The set can be
+# overridden via the WARP_TEST_ISOLATED_CLASSES environment variable (a
+# comma-separated list of class names; set it empty to disable isolation).
+ISOLATED_TEST_CLASSES = frozenset(
+    name.strip()
+    for name in os.environ.get("WARP_TEST_ISOLATED_CLASSES", "TestAsync").split(",")
+    if name.strip()
+)
+
 
 def main(argv=None):
     """
@@ -225,6 +240,28 @@ def main(argv=None):
         else:  # args.level == 'module'
             test_suites = list(_iter_module_suites(discover_suite))
 
+        # AMD Modification: pull contention-sensitive classes (see
+        # ISOLATED_TEST_CLASSES) out of the shared parallel batch. Their test cases
+        # are consolidated into a single suite per class so the class always runs as
+        # one work item (never split across the pool), regardless of --level, and is
+        # executed afterwards in its own isolated single-worker pool. This is skipped
+        # for --serial-fallback, which already runs everything in one process.
+        isolated_suites = []
+        if not args.serial_fallback and ISOLATED_TEST_CLASSES:
+            parallel_suites = []
+            isolated_cases = {}
+            for suite in test_suites:
+                suite_name = _get_suite_name(suite)
+                if suite_name in ISOLATED_TEST_CLASSES:
+                    isolated_cases.setdefault(suite_name, []).extend(_iter_test_cases(suite))
+                else:
+                    parallel_suites.append(suite)
+            for suite_name in sorted(isolated_cases):
+                consolidated = unittest.TestSuite()
+                consolidated.addTests(isolated_cases[suite_name])
+                isolated_suites.append(consolidated)
+            test_suites = parallel_suites
+
         # Don't use more processes than test suites
         process_count = max(1, min(len(test_suites), process_count))
 
@@ -234,6 +271,14 @@ def main(argv=None):
                 f"Running {len(test_suites)} test suites ({discover_suite.countTestCases()} total tests) across {process_count} processes",
                 file=sys.stderr,
             )
+            if isolated_suites:  # AMD Modification
+                isolated_total = sum(suite.countTestCases() for suite in isolated_suites)
+                isolated_names = ", ".join(_get_suite_name(suite) for suite in isolated_suites)
+                print(
+                    f"Running {len(isolated_suites)} isolated suite(s) ({isolated_total} total tests) "
+                    f"sequentially in a dedicated single-worker pool: {isolated_names}",
+                    file=sys.stderr,
+                )
             if args.verbose > 1:
                 print(file=sys.stderr)
 
@@ -244,7 +289,12 @@ def main(argv=None):
             # Run the tests in parallel
             start_time = time.perf_counter()
 
-            if args.disable_concurrent_futures:
+            results = []
+            if not test_suites:
+                # AMD Modification: the shared parallel pool has no work because every
+                # selected suite is isolated; only the isolated suites below will run.
+                pass
+            elif args.disable_concurrent_futures:
                 multiprocessing_context = multiprocessing.get_context(method="spawn")
                 maxtasksperchild = 1 if args.disable_process_pooling else None
                 with multiprocessing_context.Pool(
@@ -361,6 +411,44 @@ def main(argv=None):
                             )
                             error_result = create_crash_result(suite)
                             results.append(error_result)
+
+            # AMD Modification: run the isolated classes (see ISOLATED_TEST_CLASSES)
+            # sequentially, each alone in its own single-worker pool, so no other
+            # suite runs concurrently on the GPUs. This removes the cross-suite GPU
+            # contention that intermittently corrupts TestAsync's device-to-device
+            # stream copies.
+            for i, suite in enumerate(isolated_suites):
+                suite_name = _get_suite_name(suite)
+                print(
+                    f"Running isolated suite {i + 1}/{len(isolated_suites)} "
+                    f"({suite_name}, {suite.countTestCases()} tests) in a single-worker pool",
+                    file=sys.stderr,
+                )
+                try:
+                    with concurrent.futures.ProcessPoolExecutor(
+                        max_workers=1,
+                        mp_context=multiprocessing.get_context(method="spawn"),
+                        initializer=initialize_test_process,
+                        initargs=(manager.Lock(), shared_index, args, temp_dir),
+                    ) as executor:
+                        test_manager = ParallelTestManager(manager, args, temp_dir)
+                        future = executor.submit(test_manager.run_tests, suite)
+                        try:
+                            results.append(future.result(timeout=_SUITE_TIMEOUT))
+                        except TimeoutError:
+                            print(
+                                f"Warning: Isolated suite {suite_name} timed out (timeout={_SUITE_TIMEOUT}s). Marking tests as crashed.",
+                                file=sys.stderr,
+                            )
+                            results.append(
+                                create_crash_result(suite, reason=f"Process timed out (timeout={_SUITE_TIMEOUT}s)")
+                            )
+                except Exception as e:
+                    print(
+                        f"Warning: Isolated suite {suite_name} failed to run: {e}. Marking tests as crashed.",
+                        file=sys.stderr,
+                    )
+                    results.append(create_crash_result(suite))
         else:
             # This entire path is an NVIDIA Modification
 
