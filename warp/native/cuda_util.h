@@ -414,6 +414,7 @@ struct CaptureInfo {
     CUstream stream = NULL;  // the main stream where capture begins and ends
     CUcontext context = NULL;  // context where capture was started
     uint64_t id = 0;  // unique capture id from CUDA
+    uint64_t begin_id = 0;  // id when the capture began; ROCm re-keys id on resume, this one stays
     bool external = false;  // whether this is an external capture
     cudaStreamCaptureMode mode = cudaStreamCaptureModeThreadLocal;  // mode used to open the capture (for pause/resume)
     std::vector<FreeInfo> tmp_allocs;  // temporary allocations owned by the graph (e.g., staged array fill values)

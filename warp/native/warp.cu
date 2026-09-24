@@ -3894,7 +3894,19 @@ int wp_cuda_thread_exchange_capture_mode(int mode)
     return int(capture_mode);
 }
 
-uint64_t wp_cuda_stream_get_capture_id(void* stream) { return get_capture_id(static_cast<CUstream>(stream)); }
+uint64_t wp_cuda_stream_get_capture_id(void* stream)
+{
+    uint64_t id = get_capture_id(static_cast<CUstream>(stream));
+#if defined(__HIP_PLATFORM_AMD__)
+    // ROCm gives a resumed capture a new id (see wp_cuda_graph_resume_capture), and stable
+    // capture allocations pause and resume the capture. Report the id the capture began
+    // with: Python keys its capture registry by it, and a miss there skips module retention.
+    auto capture_iter = g_captures.find(id);
+    if (capture_iter != g_captures.end())
+        return capture_iter->second->begin_id;
+#endif
+    return id;
+}
 
 int wp_cuda_stream_get_priority(void* stream)
 {
@@ -4051,6 +4063,7 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
     capture->stream = cuda_stream;
     capture->context = context ? static_cast<CUcontext>(context) : get_current_context();
     capture->id = capture_id;
+    capture->begin_id = capture_id;
     capture->external = bool(external);
     capture->mode = capture_mode;
 
