@@ -5750,17 +5750,21 @@ class Device:
             else:
                 self.mempool_allocator = None
 
+            # The allocator that "memory pool enabled" selects on this device.
+            # gfx1151/ROCm: the async pool aliases in-use memory for regular
+            # allocations (driver bug). Use plain alloc normally, pool only
+            # during graph capture. Opt out with WARP_HIP_USE_ASYNC_POOL=1.
+            # set_mempool_enabled() reinstalls this same allocator, so a
+            # disable/enable round trip (e.g. ScopedMempool) cannot leave the
+            # process on the raw pool.
+            if self.is_hip and self.is_mempool_supported and os.environ.get("WARP_HIP_USE_ASYNC_POOL") != "1":
+                self.mempool_enabled_allocator = CudaHipCaptureAwareAllocator(self)
+            else:
+                self.mempool_enabled_allocator = self.mempool_allocator
+
             # set current allocator
-            if self.is_mempool_enabled and self.is_hip:
-                # gfx1151/ROCm: the async pool aliases in-use memory for regular
-                # allocations (driver bug). Use plain alloc normally, pool only
-                # during graph capture. Opt out with WARP_HIP_USE_ASYNC_POOL=1.
-                if os.environ.get("WARP_HIP_USE_ASYNC_POOL") == "1":
-                    self.current_allocator = self.mempool_allocator
-                else:
-                    self.current_allocator = CudaHipCaptureAwareAllocator(self)
-            elif self.is_mempool_enabled:
-                self.current_allocator = self.mempool_allocator
+            if self.is_mempool_enabled:
+                self.current_allocator = self.mempool_enabled_allocator
             else:
                 self.current_allocator = self.default_allocator
 
@@ -5778,7 +5782,8 @@ class Device:
             # 2. Stability: interleaved managed allocations during Newton's URDF
             #    loading can surface stale HIP errors in wp_memset_device.
             if self.is_uma and os.environ.get("WARP_ENABLE_UMA_HYBRID") == "1":
-                self.current_allocator = CudaUmaHybridAllocator(self)
+                self.mempool_enabled_allocator = CudaUmaHybridAllocator(self)
+                self.current_allocator = self.mempool_enabled_allocator
 
             # check whether our NVRTC/HIPRTC can generate device code for this architecture
             if self.is_hip:
@@ -9208,7 +9213,8 @@ def set_mempool_enabled(device: DeviceLike, enable: bool) -> None:
         if enable:
             if not device.is_mempool_supported:
                 raise RuntimeError(f"Device {device} does not support memory pools")
-            device.current_allocator = device.mempool_allocator
+            # Not the raw pool on every device: see Device.mempool_enabled_allocator.
+            device.current_allocator = device.mempool_enabled_allocator
             device.is_mempool_enabled = True
         else:
             device.current_allocator = device.default_allocator
