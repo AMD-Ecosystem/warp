@@ -46,6 +46,28 @@ Validation at this base:
   deprecated and returns `hipErrorNotSupported` — so the smoke test skips
   that check.
 
+### Conditional graph nodes are emulated on HIP
+
+HIP has no conditional graph nodes. `wp.capture_while()` and `wp.capture_if()`
+inside a capture split it instead: the running capture ends as one graph, each
+body is captured as a graph of its own, and capture continues into the same
+`wp.Graph`. `wp.capture_launch()` replays the pieces and reads each condition
+back to the host, one small stream synchronization per loop iteration or
+branch. `wp.is_conditional_graph_supported()` returns `True` on HIP.
+
+Differences from CUDA:
+
+- Every stream forked from the capturing stream must be joined back into it
+  before a conditional is recorded; HIP cannot end a capture with unjoined
+  work. The call raises a `RuntimeError` saying so, and the streams are left
+  capturing, as any HIP capture ended with unjoined work is.
+- A graph saved with `wp.capture_save()` that contains conditionals cannot be
+  loaded and launched on HIP (the loaded graph is rebuilt with native
+  conditional nodes).
+- Launching a split graph blocks the host at each condition read until the
+  device has reached it. Condition reads from concurrent host threads are
+  serialized through one pinned buffer.
+
 ### ROCm external event semantics on replayed graphs
 
 An external event-record node in a replayed graph updates the event only when
