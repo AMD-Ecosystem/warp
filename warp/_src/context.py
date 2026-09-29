@@ -5161,6 +5161,9 @@ class CudaMempoolAllocator:
         self.device = device
 
     def allocate(self, size_in_bytes):
+        if runtime.is_hip and self.device.is_capturing and not getattr(self.device, "_hip_capture_alloc_exempt", 0):
+            # counted so an allocation inside an emulated conditional body is rejected as on CUDA
+            self.device._hip_capture_allocs = getattr(self.device, "_hip_capture_allocs", 0) + 1
         ptr = runtime.core.wp_alloc_device_async(self.device.context, size_in_bytes, WP_CURRENT_STREAM, None)
         if not ptr:
             raise RuntimeError(f"Failed to allocate {size_in_bytes} bytes on device '{self.device}'")
@@ -6243,6 +6246,12 @@ class Graph:
         self._deterministic_buffer_refs: list[Any] = []
         self.graph_exec: ctypes.c_void_p | None = None
         self.graph: ctypes.c_void_p | None = None
+
+        # HIP has no conditional graph nodes. A capture that reaches capture_while() or capture_if() on HIP is
+        # split into ordinary graphs, and the conditionals are evaluated on the host at replay: a list of
+        # ("graph", Graph), ("while", condition, body) and ("if", condition, on_true, on_false) items.
+        self._hip_items: list = []
+        self._capture_mode = CaptureMode.THREAD_LOCAL
 
         # APIC recording state
         self.apic: bool = False  # Whether APIC serialization is allowed
@@ -13091,6 +13100,8 @@ def capture_begin(
 
     capture_id = runtime.core.wp_cuda_stream_get_capture_id(stream.cuda_stream)
     graph = Graph(device, capture_id)
+    graph._capture_mode = CaptureMode(capture_mode)
+    graph._hip_alloc_mark = getattr(device, "_hip_capture_allocs", 0)
 
     # Attach APIC capture state if recording
     if apic_capture is not None:
@@ -13165,6 +13176,10 @@ def capture_end(device: DeviceLike = None, stream: Stream | None = None) -> Grap
     # set the graph executable
     graph.graph = g
     graph.graph_exec = None  # Lazy initialization
+    graph._hip_has_alloc = getattr(device, "_hip_capture_allocs", 0) != getattr(graph, "_hip_alloc_mark", 0)
+
+    if graph._hip_items:
+        _hip_take_segment(graph)
 
     return graph
 
@@ -13188,7 +13203,7 @@ def assert_conditional_graph_support():
     # HIP/ROCm does not support conditional graph nodes (no
     # hipGraphConditionalHandle API as of ROCm 7.2)
     if runtime.is_hip:
-        raise RuntimeError("Conditional graph nodes are not supported on HIP/ROCm")
+        return  # emulated: see _hip_capture_conditional()
 
     if runtime.toolkit_version is None or runtime.toolkit_version < (12, 4):
         raise RuntimeError("Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes")
@@ -13212,12 +13227,12 @@ def is_conditional_graph_supported() -> bool:
         init()
 
     # HIP/ROCm has no conditional graph node API (no hipGraphConditionalHandle
-    # as of ROCm 7.2). The version check below is meaningless on HIP: the ROCm
-    # version parses as e.g. (70253, 21) >= (12, 4), which made this return
-    # True and sent callers (e.g. Newton's implicit MPM solver) down the
-    # capture_while path, where assert_conditional_graph_support then raised.
+    # as of ROCm 7.14), so the ROCm version must not go through the CUDA version
+    # check below. Conditionals are emulated instead: a capture that reaches
+    # capture_while() or capture_if() is split into ordinary graphs and the
+    # conditions are evaluated on the host at replay (_hip_capture_conditional).
     if runtime.is_hip:
-        return False
+        return True
 
     return (
         runtime.toolkit_version is not None
@@ -13401,6 +13416,174 @@ def _apic_record_capture_while(condition, while_body, **kwargs):
     )
 
 
+def _hip_take_segment(graph: Graph):
+    """Move the native graph just captured into ``graph`` into a segment item of its own."""
+    seg = Graph(graph.device, graph.capture_id)
+    seg.graph, seg.graph_exec = graph.graph, None
+    seg.module_execs, graph.module_execs = graph.module_execs, set()
+    seg._deterministic_buffer_refs, graph._deterministic_buffer_refs = graph._deterministic_buffer_refs, []
+    graph.graph, graph.graph_exec = None, None
+    graph._hip_items.append(("graph", seg))
+
+
+def _hip_native_capture_begin(device: Device, stream: Stream, capture_mode, graph: Graph | None = None) -> Graph:
+    """Begin a native capture on ``stream`` recording into ``graph`` (or a new Graph). APIC recording, if any,
+    is left running: it is one op stream across the whole split capture."""
+    if not runtime.core.wp_cuda_graph_begin_capture(device.context, stream.cuda_stream, 0, int(CaptureMode(capture_mode))):
+        raise RuntimeError(runtime.get_error_string())
+    capture_id = runtime.core.wp_cuda_stream_get_capture_id(stream.cuda_stream)
+    if graph is None:
+        graph = Graph(device, capture_id)
+        graph._capture_mode = CaptureMode(capture_mode)
+        graph._hip_alloc_mark = getattr(device, "_hip_capture_allocs", 0)
+    graph.capture_id = capture_id
+    _register_capture(device, stream, graph, capture_id)
+    return graph
+
+
+def _hip_native_capture_end(device: Device, stream: Stream) -> Graph:
+    """End the native capture on ``stream``; the captured graph becomes a segment of its Graph when that Graph
+    is already split, and is left in ``graph.graph`` otherwise."""
+    graph = device.captures.get(stream)
+    _unregister_capture(device, stream, graph)
+    g = ctypes.c_void_p()
+    result = runtime.core.wp_cuda_graph_end_capture(device.context, stream.cuda_stream, ctypes.byref(g))
+    from warp._src import texture  # noqa: PLC0415 (circular import)
+
+    texture._flush_deferred_destroys()
+    if not result:
+        raise RuntimeError(f"CUDA graph capture failed. {runtime.get_error_string()}")
+    graph.graph, graph.graph_exec = g, None
+    graph._hip_has_alloc = getattr(device, "_hip_capture_allocs", 0) != getattr(graph, "_hip_alloc_mark", 0)
+    return graph
+
+
+def _hip_capture_body(device: Device, stream: Stream, body, capture_mode, apic_capture, **kwargs):
+    """Capture a conditional body into a Graph of its own (which may itself be split). Returns the Graph and,
+    under APIC recording, the recorded branch body."""
+    if body is None:
+        return None, ctypes.c_void_p()
+    if isinstance(body, Graph):
+        return body, ctypes.c_void_p()
+    if not callable(body):
+        raise TypeError("conditional body must be a Callable or a Graph")
+    branch_start = runtime.core.wp_apic_begin_branch(apic_capture.apic_state) if apic_capture else None
+    branch = ctypes.c_void_p()
+    _hip_native_capture_begin(device, stream, capture_mode)
+    try:
+        body(**kwargs)
+    except Exception:
+        try:
+            _hip_native_capture_end(device, stream)
+        except Exception:
+            pass
+        if apic_capture:
+            branch.value = runtime.core.wp_apic_end_branch(apic_capture.apic_state, branch_start)
+            if branch.value:
+                runtime.core.wp_apic_free_branch_body(branch)
+        raise
+    graph = _hip_native_capture_end(device, stream)
+    if graph._hip_items:
+        _hip_take_segment(graph)
+    if apic_capture:
+        branch.value = runtime.core.wp_apic_end_branch(apic_capture.apic_state, branch_start)
+    # CUDA conditional bodies cannot allocate; reject it here too so code that runs on HIP runs on CUDA
+    if graph._hip_has_alloc:
+        if branch.value:
+            runtime.core.wp_apic_free_branch_body(branch)
+        raise RuntimeError("Conditional body graph contains an unsupported operation (memory allocation)")
+    return graph, branch
+
+
+def _hip_capture_conditional(device: Device, stream: Stream, kind: str, condition, bodies, **kwargs):
+    """Record a conditional into a split HIP capture: end the running capture as a segment, capture each body as
+    its own graph, then continue capturing into the same Graph. The conditions are evaluated on the host when
+    the graph is launched (_hip_launch_items)."""
+    for b in bodies:
+        if isinstance(b, Graph) and getattr(b, "_hip_has_alloc", False):
+            raise RuntimeError("Child graph contains an unsupported operation (memory allocation)")
+    apic_capture = _get_apic_capture_for_device(device)
+    cond_region_id, cond_offset = -1, 0
+    if apic_capture is not None:
+        if any(b is not None and not callable(b) for b in bodies) or any(isinstance(b, Graph) for b in bodies):
+            raise NotImplementedError(f"APIC capture_{kind} with Graph bodies is not yet implemented; pass a Callable instead")
+        cond_region_id, cond_offset = apic_capture.track_array(condition)
+        if cond_region_id < 0:
+            raise RuntimeError(f"capture_{kind}(): condition array could not be tracked for APIC capture (null pointer?)")
+
+    try:
+        outer = _hip_native_capture_end(device, stream)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"capture_{kind}() on HIP could not split the capture: {e}. HIP has no conditional graph nodes, so "
+            "Warp ends the running capture at each conditional; every stream forked from the capturing stream "
+            "must be joined back into it before capture_while()/capture_if() is called"
+        ) from e
+    _hip_take_segment(outer)
+    graphs, branches = [], []
+    try:
+        for b in bodies:
+            g, br = _hip_capture_body(device, stream, b, outer._capture_mode, apic_capture, **kwargs)
+            graphs.append(g)
+            branches.append(br)
+    except Exception:
+        for br in branches:
+            if br.value:
+                runtime.core.wp_apic_free_branch_body(br)
+        raise
+    finally:
+        _hip_native_capture_begin(device, stream, outer._capture_mode, graph=outer)
+    outer._hip_items.append((kind, condition, *graphs))
+
+    if apic_capture is not None:
+        from warp._src.apic.types import APIC_OP_IF, APIC_OP_WHILE  # noqa: PLC0415
+
+        op = APIC_OP_WHILE if kind == "while" else APIC_OP_IF
+        second = branches[1] if len(branches) > 1 else None
+        runtime.core.wp_apic_record_conditional(apic_capture.apic_state, op, cond_region_id, cond_offset, branches[0], second)
+
+
+_hip_condition_lock = threading.Lock()
+_hip_condition_host = None  # pinned readback buffer for split graph replay, allocated by init() on HIP
+
+
+def _hip_read_condition(condition: warp.array, stream: Stream) -> bool:
+    """Read a conditional's value on the host through the shared pinned buffer.
+
+    The buffer is allocated once, when the runtime initializes, and never freed: allocating or freeing pinned
+    memory while any capture is active invalidates that capture, and split graphs are replayed and collected at
+    arbitrary points relative to other captures."""
+    # one buffer for all replaying threads, separate from the eager capture_while() readback buffer: copy, sync
+    # and read under a lock so concurrent replays cannot swap values
+    with _hip_condition_lock:
+        warp.copy(_hip_condition_host, condition, stream=stream)
+        warp.synchronize_stream(stream)
+        return bool(ctypes.cast(_hip_condition_host.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
+
+
+def _hip_launch_items(graph: Graph, stream: Stream):
+    """Replay a split HIP graph. Launched inside an active capture, its items are spliced into that capture,
+    which is split at this point in turn."""
+    if stream.is_capturing:
+        device = graph.device
+        outer = _hip_native_capture_end(device, stream)
+        _hip_take_segment(outer)
+        outer._hip_items.extend(graph._hip_items)
+        _hip_native_capture_begin(device, stream, outer._capture_mode, graph=outer)
+        return
+    for item in graph._hip_items:
+        kind = item[0]
+        if kind == "graph":
+            capture_launch(item[1], stream=stream)
+        elif kind == "while":
+            while _hip_read_condition(item[1], stream):
+                capture_launch(item[2], stream=stream)
+        else:
+            body = item[2] if _hip_read_condition(item[1], stream) else item[3]
+            if body is not None:
+                capture_launch(body, stream=stream)
+
+
 def capture_if(
     condition: warp.array[int],
     on_true: Callable | Graph | None = None,
@@ -13484,6 +13667,10 @@ def capture_if(
                 else:
                     raise TypeError("on_false must be a Callable or a Graph")
 
+        return
+
+    if runtime.is_hip:
+        _hip_capture_conditional(device, stream, "if", condition, (on_true, on_false), **kwargs)
         return
 
     # ensure conditional graph nodes are supported
@@ -13706,6 +13893,10 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
 
         return
 
+    if runtime.is_hip:
+        _hip_capture_conditional(device, stream, "while", condition, (while_body,), **kwargs)
+        return
+
     # ensure conditional graph nodes are supported
     assert_conditional_graph_support()
 
@@ -13863,6 +14054,11 @@ def capture_launch(graph: Graph, stream: Stream | None = None):
             graph.graph = ctypes.c_void_p(runtime.core.wp_apic_get_cuda_graph(graph._native_graph))
             graph.graph_exec = ctypes.c_void_p(runtime.core.wp_apic_get_cuda_graph_exec(graph._native_graph))
             if not graph.graph_exec:
+                if runtime.is_hip:
+                    raise RuntimeError(
+                        "Failed to build a graph from APIC on HIP: graphs saved with capture_while()/capture_if() "
+                        f"need native conditional graph nodes, which HIP does not have ({runtime.get_error_string()})"
+                    )
                 raise RuntimeError(f"Failed to build CUDA graph from APIC: {runtime.get_error_string()}")
 
         if not runtime.core.wp_cuda_graph_launch(graph.graph_exec, stream.cuda_stream):
@@ -13873,6 +14069,15 @@ def capture_launch(graph: Graph, stream: Stream | None = None):
     if graph.device.is_cpu and graph.apic_state is not None:
         if not runtime.core.wp_apic_cpu_replay_state(graph.apic_state):
             raise RuntimeError(f"CPU graph replay failed: {runtime.get_error_string() or 'no operations recorded'}")
+        return
+
+    # ---- split HIP graph (conditionals evaluated on the host) ----
+    if graph._hip_items:
+        if stream is None:
+            stream = graph.device.stream
+        elif stream.device != graph.device:
+            raise RuntimeError(f"Cannot launch graph from device {graph.device} on stream from device {stream.device}")
+        _hip_launch_items(graph, stream)
         return
 
     # ---- CUDA graph path ----
@@ -15822,6 +16027,11 @@ def init():
 
     if runtime is None:
         runtime = Runtime()
+        if runtime.is_hip:
+            # pinned readback buffer for emulated conditional graphs (_hip_read_condition); allocated here
+            # because allocating or freeing pinned memory while any capture is active invalidates it
+            global _hip_condition_host
+            _hip_condition_host = warp.empty(1, dtype=int, device="cpu", pinned=True)
         for module in list(user_modules.values()):
             # Module hashes/options may have been computed before Runtime existed,
             # when clang_sanitizer was unknown. Recompute them after init so
