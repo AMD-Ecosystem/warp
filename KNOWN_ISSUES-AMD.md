@@ -31,8 +31,8 @@ Validation at this base:
   - `test_optim` `example_fluid_checkpoint` — the platform firmware wedge
     (lost HSA completion signal; the process spins in system time).
   - `geometry/test_bvh` `test_bvh_aabb` — intermittent wrong query result (the
-    device AABB query misses an intersection the host finds), about 7 % of
-    single-process runs on 2026-09-07; the "Rare wrong BVH query result" open bug
+    device AABB query misses an intersection the host finds) in a minority of
+    single-process runs; the "Rare wrong BVH query result" open bug
     below, with the evidence. Open.
 - **CUDA reference at the same commit** (RTX A4000, CUDA 12.9): builds with
   the standard CUDA build; full suite **8590 ok / 62 skip / 0 fail**. No AMD

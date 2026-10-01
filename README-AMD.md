@@ -154,7 +154,7 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 | Kernel | 7.0.0-28-generic, in-tree `amdgpu` (6.17.0-1017-oem also validated; some other kernels are known bad — see [Troubleshooting](#troubleshooting)) |
 | GPU | AMD Radeon 8060S (gfx1151), 96 GiB unified memory |
 | ROCm | 7.14.0 (recommended; all current recorded numbers). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
-| Newton | 1.5.1 from PyPI (`newton[sim,importers,examples]`), with the `graph_conditional = False` wrapper — see [Newton integration](#newton-integration) |
+| Newton | 1.5.1 from PyPI (`newton[sim,importers,examples]`) |
 | MuJoCo | 3.11.0 |
 | MuJoCo-Warp | 3.11.0 |
 | usd-core | 26.3 (Newton 1.5.1 requires `>=25.5,<26.5`) |
@@ -390,46 +390,18 @@ it rather than fetching the stock wheel. Check that the port is the Warp that
 gets imported: `python -c "import warp; print(warp.__file__)"` must print a
 path inside this checkout.
 
-**Conditional graph nodes are not supported on HIP** (the API does not exist
-in ROCm's headers). Stock Newton 1.5.1's MuJoCo solver takes the
-conditional-graph path and raises at graph capture
-(`Conditional graph nodes are not supported on HIP/ROCm`). Until
-[newton-physics/newton PR #3994](https://github.com/newton-physics/newton/pull/3994)
-(derive graph-conditional usage from platform support) lands, run the MuJoCo
-examples through this wrapper, which turns the option off after the solver
-builds its model:
-
-```bash
-python -c "
-import newton.solvers
-_o = newton.solvers.SolverMuJoCo.__init__
-def _p(self, *a, **kw):
-    _o(self, *a, **kw)
-    if hasattr(self, 'mjw_model') and self.mjw_model is not None:
-        self.mjw_model.opt.graph_conditional = False
-newton.solvers.SolverMuJoCo.__init__ = _p
-
-import sys, runpy
-sys.argv = ['newton.examples', 'robot_anymal_c_walk', '--viewer', 'null', '--benchmark', '--num-frames', '1200']
-runpy.run_module('newton.examples', run_name='__main__')
-"
-```
-
-`graph_conditional = False` is also a performance win in eager (non-captured)
-stepping on this port: with the default `True`, mujoco-warp's solver does a
-device-to-host sync per solver iteration to check convergence; with `False` it
-launches a fixed iteration count with no intermediate syncs, which measures
-as a substantial per-step win on gfx1151.
+Conditional graph nodes are emulated on HIP (see `KNOWN_ISSUES-AMD.md`), so
+Newton's MuJoCo solver uses its default graph-conditional path. No wrapper or
+patch is needed.
 
 The `patches/newton/` directory targets Newton 1.0.0 and does not apply to
-1.5.1: the wrapper above (and PR #3994) replaces patch 04, and the code patch
-03 modified was refactored away upstream after 1.0.0.
+1.5.1.
 
 ### Verifying Newton works
 
 Five robot examples (`robot_anymal_c_walk`, `robot_cartpole`, `robot_h1`, `robot_g1`,
 `robot_allegro_hand`) run to completion on every validation pass of this port with stock
-Newton 1.5.1 and the wrapper above. Examples outside this set are covered by the platform
+Newton 1.5.1. Examples outside this set are covered by the platform
 classes in `KNOWN_ISSUES-AMD.md`.
 
 Newton's benchmark mode prints its own sustained rate. Run a long frame
@@ -449,8 +421,9 @@ python -m newton.examples cable_twist --viewer null --benchmark --num-frames 120
 
 ### `Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes`
 
-You ran a Newton MuJoCo example without the `graph_conditional = False`
-patch. Use the wrapper in [Newton integration](#newton-integration).
+The imported Warp predates conditional graph emulation on HIP. Build and
+install this branch; `python -c "import warp; print(warp.is_conditional_graph_supported())"`
+prints `True`.
 
 ### `hsa_queue_create` page fault / hang at first kernel launch
 
@@ -575,9 +548,6 @@ examples and breaks a larger number — see
 
 - `libmathdx` is unsupported on HIP builds.
 - Single-architecture compile time: about 1-2 minutes, plus a one-time LLVM/Clang toolchain download on the first build.
-- Newton MuJoCo examples need the `graph_conditional = False` wrapper with
-  stock Newton until newton-physics/newton PR #3994 lands — see
-  [Newton integration](#newton-integration).
 - Validated only on gfx1151. Other RDNA architectures are buildable but untested.
 
 ## License
