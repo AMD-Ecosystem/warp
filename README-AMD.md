@@ -30,7 +30,7 @@ pip install numpy setuptools packaging wheel
 #   pip install torch --index-url https://rocm.nightlies.amd.com/v2/gfx1151/
 
 # 3. Build Warp for HIP. The compile takes about 1-2 minutes at the default
-#    8 jobs (measured 72 s); the first-ever build additionally downloads the
+#    8 jobs; the first-ever build additionally downloads the
 #    LLVM/Clang toolchain dependency. Must run before step 4:
 #    `pip install -e .` expects warp/bin/warp.so to already exist.
 #    build_amd.sh auto-detects python/python3; override with
@@ -44,8 +44,7 @@ pip install -e .
 python tools/run_gfx1151_smoke.py
 ```
 
-Recommended ROCm version: **7.14.0** — the version all current recorded
-numbers were produced on. See [Choosing a ROCm version](#choosing-a-rocm-version),
+Recommended ROCm version: **7.14.0**. See [Choosing a ROCm version](#choosing-a-rocm-version),
 including a validated container route that needs no host ROCm upgrade.
 
 A passing smoke test means the build loads and runs kernels. It does **not**
@@ -65,7 +64,7 @@ This port is **validated only on `gfx1151`** (AMD Radeon 8060S / Strix Halo iGPU
 
 | Architecture | Status | Notes |
 |---|---|---|
-| `gfx1151` | Validated | Test matrix and per-example throughput in `KNOWN_ISSUES-AMD.md` |
+| `gfx1151` | Validated | Known issues in `KNOWN_ISSUES-AMD.md` |
 | `gfx1100`, `gfx1101`, `gfx1102` | Buildable | RDNA 3 dGPU; untested |
 | `gfx1030` | Buildable | RDNA 2; untested |
 
@@ -81,12 +80,8 @@ find /opt/rocm -name rocminfo -executable 2>/dev/null
 
 ## Choosing a ROCm version
 
-**Recommended: ROCm 7.14.0.** All current recorded numbers — the five-suite
-validation matrix (Warp, Newton, MuJoCo-Warp, benchmarks, CDNA build), the
-per-example Newton FPS figures, and the unit-test results — were produced on
-ROCm 7.14.0, run against an NVIDIA reference machine at the same commits.
-ROCm 7.2.x is also validated and remains necessary for one workload class
-below.
+**Recommended: ROCm 7.14.0.** ROCm 7.2.x is also validated and remains
+necessary for one workload class below.
 
 The two releases fail in opposite directions:
 
@@ -96,12 +91,12 @@ walking example loses most of its throughput within a few hundred frames and
 keeps degrading. On ROCm 7.14.0 the same example holds a steady rate.
 
 **ROCm 7.14.0 fails small device allocations under capture-heavy load.**
-`hipMalloc` returns NULL for 56-byte requests with 97 per cent of device memory
-free, which costs several Newton test modules outright.
+`hipMalloc` returns NULL for small requests while most device memory is free,
+which makes several Newton test modules fail.
 
 For sustained simulation and reinforcement-learning rollouts, use 7.14.0. For
-workloads that trip the allocation failure, 7.2.x remains necessary. Detail and
-evidence for both are in `KNOWN_ISSUES-AMD.md`.
+workloads that trip the allocation failure, 7.2.x remains necessary. Both are
+described in `KNOWN_ISSUES-AMD.md`.
 
 Two 7.14.0 specifics:
 
@@ -153,7 +148,7 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 | OS | Ubuntu 24.04.3 |
 | Kernel | 7.0.0-28-generic, in-tree `amdgpu` (6.17.0-1017-oem also validated; some other kernels are known bad — see [Troubleshooting](#troubleshooting)) |
 | GPU | AMD Radeon 8060S (gfx1151), 96 GiB unified memory |
-| ROCm | 7.14.0 (recommended; all current recorded numbers). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
+| ROCm | 7.14.0 (recommended). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
 | Newton | 1.5.1 from PyPI (`newton[sim,importers,examples]`) |
 | MuJoCo | 3.11.0 |
 | MuJoCo-Warp | 3.11.0 |
@@ -162,36 +157,6 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 | PyTorch | 2.12/2.13 nightlies from `https://rocm.nightlies.amd.com/v2/gfx1151/` on the ROCm 7.2.1 host. Not usable inside the 7.14.0 container: the wheel bundles a rocm-sdk whose `libamd_comgr` conflicts with the container's LLVM. |
 | Python | 3.12 (3.11 also tested) |
 | GCC | 13 (13.3.0 tested) |
-
-### Validated environment (full pinned baseline)
-
-Historical record of the original 1.12.0.dev0 port, retained for provenance.
-These pins were recorded in May 2026 against Newton 1.0.0 and do **not**
-describe the current tree, which is validated with stock Newton 1.5.1 (111
-examples).
-
-```
-warp-lang             1.12.0.dev0   # editable install of an AMD port branch
-mujoco                3.5.0
-mujoco-warp           3.5.0.2
-newton                1.0.0
-torch                 2.11.0+rocm7.2
-torchvision           0.26.0+rocm7.2
-```
-
-Two known-working warp ports exist for gfx1151. Either one can be the
-editable install behind `warp-lang 1.12.0.dev0` / `1.12.1`:
-
-| Tag / branch | warp version | Notes |
-|---|---|---|
-| `gfx1151-anymal-working` (branch `amd-integration`, commit `5e9aef4c`) | 1.12.0.dev0 | Original 10-patch port; confirmed working ANYmal baseline. |
-| `v1.12.1-amd-gfx1151-uma` (branch `amd-port-v1.12.1`, this repo) | 1.12.1 | UMA hybrid allocator + HIP `graphInstantiate` worker-thread fix + capture-aware allocator, tile-reduce, int64-atomic and pow fixes. |
-
-To check which build is active in a given conda env:
-
-```bash
-pip show warp-lang | grep -E '^(Version|Editable project location)'
-```
 
 ### Kernel selection
 
@@ -225,48 +190,10 @@ The meta-package (`linux-image-oem-24.04d` or whichever your system
 tracks) is the critical one — that is what `unattended-upgrade`
 follows. Confirm the holds with `apt-mark showhold | grep linux`.
 
-### Verifying the environment matches the baseline
-
-This subsection applies to the historical 1.12 baseline above, not to the
-current 1.17.0 stack: on the current configuration the script exits
-nonzero by design (it checks the 1.12-era kernel and package pins). Run it only to compare
-against that baseline:
-
-```bash
-bash tools/check_gfx1151_baseline.sh           # exit 0 = matches baseline
-bash tools/check_gfx1151_baseline.sh --strict  # also fail on missing kernel pin
-```
-
-It validates kernel + amdgpu srcversion, `rocminfo` reports gfx1151,
-mujoco/mujoco-warp/newton/torch pins, the editable warp install path
-and git state, and that the ROCm/kernel apt holds are in place.
-
-Manual equivalent if you want to spot-check individual pieces:
-
-```bash
-# Kernel + driver
-uname -r                            # expect: 6.17.0-1017-oem
-modinfo amdgpu | awk '/srcversion/' # expect: srcversion: FC7DA320ED9D733CA6A3F1E
-
-# Python stack (don't import warp/newton — it can hang on a broken kernel)
-pip list | grep -iE '^(warp|mujoco|newton|torch)'
-
-# Apt holds
-apt-mark showhold | grep -E 'linux-image-6\.17|linux-image-oem|amdgpu-dkms|hsa-'
-```
-
-If `mujoco` or `mujoco-warp` have drifted (commonly upgraded by a
-transitive dep), restore with:
-
-```bash
-pip install mujoco==3.5.0 mujoco-warp==3.5.0.2 --force-reinstall --no-deps
-```
-
 ## Prerequisites
 
-- ROCm at `/opt/rocm`. Recommended: 7.14.0 (the version all current recorded
-  numbers were produced on — natively or via
-  [the container](#rocm-714-in-a-container)); 7.2.1 and 7.2.4 also validated.
+- ROCm at `/opt/rocm`. Recommended: 7.14.0, natively or via
+  [the container](#rocm-714-in-a-container); 7.2.1 and 7.2.4 also validated.
   See [Choosing a ROCm version](#choosing-a-rocm-version).
   **On 7.14 the runtime libraries moved** to `/opt/rocm/core-<version>/lib`
   with no `ld.so.conf.d` entry installed, so `warp.so` will not load until that
@@ -304,7 +231,7 @@ conda activate warp-amd
 
 # PyTorch built for gfx1151, from AMD's gfx1151 index (the stock
 # download.pytorch.org ROCm wheels do not carry gfx1151). Rolling nightly
-# index: you get the current build; the validated baseline was 2.11.0+rocm7.2.
+# index: you get the current build.
 pip install torch --index-url https://rocm.nightlies.amd.com/v2/gfx1151/
 
 # Build dependencies
@@ -354,7 +281,7 @@ python build_lib.py --no-cuda --rocm-path=/opt/rocm --hip-arch=gfx1151 --quick
 
 Output: `warp/bin/warp.so` and `warp/bin/warp-clang.so` (the CPU kernel
 compiler). The compile takes about 1-2 minutes per architecture at the default
-8 jobs on a modern desktop CPU (measured 72 s for gfx1151); the first-ever
+8 jobs on a modern desktop CPU; the first-ever
 build additionally downloads the LLVM/Clang toolchain dependency.
 
 ## Install
@@ -539,9 +466,9 @@ works on them. It is **not** safe on managed memory Warp did not allocate that
 way, such as `CudaManagedAllocator` arrays: the hardware atomic silently discards
 updates to host-coherent memory.
 
-The other three change allocation or graph behaviour that the validated baseline
-does not use. `WARP_HIP_GRAPH_FREE_NODES=1` in particular fixes a small number of
-examples and breaks a larger number — see
+The other three change allocation or graph behaviour from the defaults.
+`WARP_HIP_GRAPH_FREE_NODES=1` in particular fixes some examples and breaks
+others — see
 [KNOWN_ISSUES-AMD.md](KNOWN_ISSUES-AMD.md).
 
 ## Limitations
