@@ -502,7 +502,7 @@ def test_renamed_warp_module(test, device):
 
 
 def test_cache_same_types_shapes(test, device):
-    """Same function with same types/shapes should reuse cache."""
+    """Verify that same function with same types/shapes should reuse cache."""
     map_cache.clear()
 
     a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=device)
@@ -518,7 +518,7 @@ def test_cache_same_types_shapes(test, device):
 
 
 def test_cache_different_shapes(test, device):
-    """Different shapes with same ndim/dtype should reuse cache."""
+    """Verify that different shapes with same ndim/dtype should reuse cache."""
     map_cache.clear()
 
     a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=device)
@@ -537,7 +537,7 @@ def test_cache_different_shapes(test, device):
 
 
 def test_cache_different_dtypes(test, device):
-    """Different dtypes should create new cache entries."""
+    """Verify that different dtypes should create new cache entries."""
     map_cache.clear()
 
     a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=device)
@@ -556,7 +556,7 @@ def test_cache_different_dtypes(test, device):
 
 
 def test_cache_warp_function(test, device):
-    """Warp functions should also be cached properly."""
+    """Verify that Warp functions should also be cached properly."""
     map_cache.clear()
 
     a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=device)
@@ -573,7 +573,7 @@ def test_cache_warp_function(test, device):
 
 
 def test_cache_explicit_output(test, device):
-    """Explicit output arrays should reuse cache if types match."""
+    """Verify that explicit output arrays should reuse cache if types match."""
     map_cache.clear()
 
     a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=device)
@@ -590,7 +590,7 @@ def test_cache_explicit_output(test, device):
 
 
 def test_cache_broadcasting(test, device):
-    """Broadcasting should create separate cache entries for different broadcast patterns."""
+    """Verify that broadcasting should create separate cache entries for different broadcast patterns."""
     map_cache.clear()
 
     a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=device)

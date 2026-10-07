@@ -58,7 +58,7 @@ class TestCaptureMode(unittest.TestCase):
 
 
 def test_relaxed_allows_capture_unsafe_runtime_call(test, device):
-    """``CaptureMode.RELAXED`` tolerates ``cudaFree(0)`` during capture."""
+    """Verify that ``CaptureMode.RELAXED`` tolerates ``cudaFree(0)`` during capture."""
     if CUDART is None:
         test.skipTest("libcudart not available")
 
@@ -76,7 +76,7 @@ def test_relaxed_allows_capture_unsafe_runtime_call(test, device):
 
 
 def test_relaxed_capture_allows_side_stream_fill(test, device):
-    """Built-in kernels on side streams remain valid during relaxed capture."""
+    """Verify that built-in kernels on side streams remain valid during relaxed capture."""
     if not device.supports_graph_capture:
         test.skipTest("Native graph capture is unsupported on this device (HIP/ROCm)")
     with wp.ScopedDevice(device):
@@ -119,7 +119,7 @@ def test_relaxed_capture_allows_side_stream_fill(test, device):
 
 
 def test_thread_local_rejects_capture_unsafe_runtime_call(test, device):
-    """``CaptureMode.THREAD_LOCAL`` rejects ``cudaFree(0)`` during capture.
+    """Verify that ``CaptureMode.THREAD_LOCAL`` rejects ``cudaFree(0)`` during capture.
 
     The rejection invalidates the capture, so ``wp.capture_end`` (called
     from ``ScopedCapture.__exit__``) raises a ``RuntimeError``. We catch it

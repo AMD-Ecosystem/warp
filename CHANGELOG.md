@@ -1,9 +1,14 @@
 # Changelog
 
-## [1.13.0+rocm.0] - unreleased
+## [1.18.0.dev2+rocm.0] - unreleased
 
 ### ROCm Fork
 
+- Upgrade `amd-integration` from upstream v1.13.0 to upstream `main` (1.18.0.dev2), and merge the HIP
+  fixes from `amd-integeration-dev` (sub-wavefront bitonic sort, single-item BVH root seeding, extended
+  `hip_util.h` mappings, HIP LDS / block-dim launch validation, IPC/cluster gating, HIP test tolerances).
+  Native hipGraph capture from `amd-integration` is kept; conditional graph nodes and APIC `.wrp`
+  save/load remain unsupported on HIP.
 - Merge upstream NVIDIA Warp v1.13.0 into `amd-integration`.
 - Preserve AMD-only changes: HIP initial port, BVH performance work, ROCm-specific docker / README,
   torch interop example.

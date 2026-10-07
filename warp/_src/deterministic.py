@@ -1770,9 +1770,9 @@ def run_sort_reduce(
         try:
             scalar_type_id = warp_scalar_type_to_id(target.scalar_dtype)
         except ValueError:
-            from warp._src import utils as warp_utils  # noqa: PLC0415
+            from warp._src.logger import log_warning  # noqa: PLC0415
 
-            warp_utils.warn(f"Unsupported value type '{target.value_ctype}' for deterministic sort-reduce.")
+            log_warning(f"Unsupported value type '{target.value_ctype}' for deterministic sort-reduce.")
             continue
 
         components = getattr(target.value_dtype, "_length_", 1)
@@ -2431,9 +2431,9 @@ def launch_deterministic(
     try:
         runtime.verify_cuda_device(device)
     except Exception:
-        from warp._src import utils as warp_utils  # noqa: PLC0415
+        from warp._src.logger import log_warning  # noqa: PLC0415
 
-        warp_utils.warn(f"Error in deterministic kernel launch: {kernel.key} on device {device}")
+        log_warning(f"Error in deterministic kernel launch: {kernel.key} on device {device}")
         raise
 
     if overflow_buf is not None and not stream_is_capturing and int(overflow_buf.numpy()[0]) != 0:
