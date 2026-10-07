@@ -24,8 +24,6 @@ from warp._src.fem.utils import type_zero_element
 
 from .field import SpaceField
 
-_wp_module_name_ = "warp.fem.field.virtual"
-
 
 class AdjointField(SpaceField):
     """Adjoint of a discrete field with respect to its degrees of freedom."""
@@ -969,7 +967,8 @@ def make_bilinear_dispatch_kernel(
 
         if trial_node >= element_trial_node_count:
             block_offset = test_node_offset * max_nodes_per_element + trial_node
-            triplet_rows[block_offset] = NULL_NODE_INDEX
+            if triplet_rows:
+                triplet_rows[block_offset] = NULL_NODE_INDEX
             triplet_cols[block_offset] = NULL_NODE_INDEX
             return
 
@@ -1111,7 +1110,8 @@ def make_bilinear_dispatch_kernel(
             else:
                 trial_node_index = NULL_NODE_INDEX  # will get ignored when converting to bsr
 
-            triplet_rows[block_offset] = test_node_index
+            if triplet_rows:
+                triplet_rows[block_offset] = test_node_index
             triplet_cols[block_offset] = trial_node_index
 
     return dispatch_bilinear_kernel_fn

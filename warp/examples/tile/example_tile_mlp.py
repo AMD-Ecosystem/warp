@@ -52,7 +52,7 @@ def create_array(dim_in, dim_hid, dtype=float):
 # number of frequencies for the positional encoding
 NUM_FREQ = wp.constant(8)
 
-DIM_IN = wp.constant(4 * NUM_FREQ)  # sin,cos for both x,y at each frequenecy
+DIM_IN = wp.constant(4 * NUM_FREQ)  # sin,cos for both x,y at each frequency
 DIM_HID = 32
 DIM_OUT = 3
 
@@ -194,6 +194,8 @@ class Example:
 
         loss = wp.zeros(1, dtype=float, requires_grad=True)
         output = create_array(IMG_WIDTH * IMG_HEIGHT, DIM_OUT)
+
+        wp.load_module(module=compute.module, device=wp.get_device(), block_dim=NUM_THREADS)
 
         # capture graph for whole epoch
         # Graph capture is disabled on HIP.

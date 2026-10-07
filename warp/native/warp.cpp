@@ -1,10 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// glibc/musl hide posix_memalign() (used in wp_alloc_host()) under strict -std=c++NN
+// unless _GNU_SOURCE is set before <stdlib.h>, pulled in early via "warp.h". Linux-only:
+// macOS/BSD declare it unconditionally and are sensitive to _POSIX_C_SOURCE.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "warp.h"
 
 #include "alloc_tracker.h"
 #include "apic.h"
+#include "apic_internal.h"
 #include "array.h"
 #include "error.h"
 #include "exports.h"
@@ -109,23 +117,17 @@ float wp_bfloat16_bits_to_float(uint16_t u) { return wp::wp_bfloat16_bits_to_flo
 
 int wp_init(const char* expected_version)
 {
-    // Check version mismatch (guard against NULL expected_version)
+    // A non-null expected_version opts in to a version check; a mismatch is a hard error.
+    // Passing NULL (e.g. a C++ embedder that does not opt in) skips the check.
     if (expected_version != NULL && strcmp(expected_version, WP_VERSION_STRING) != 0) {
-        fprintf(
-            stderr,
-            "Warp Warning: Version mismatch detected in Warp native library.\n"
+        wp::set_error_string(
+            "Version mismatch detected in Warp native library.\n"
             "  Expected Warp version: %s\n"
             "  Loaded native library version: %s\n"
-            "  This may occur due to environment variables or multiple Warp installations.\n",
+            "  This may occur due to environment variables or multiple Warp installations.",
             expected_version, WP_VERSION_STRING
         );
-    } else if (expected_version == NULL) {
-        fprintf(
-            stderr,
-            "Warp Warning: Version check skipped (NULL version provided).\n"
-            "  Loaded native library version: %s\n",
-            WP_VERSION_STRING
-        );
+        return 1;
     }
 
 #if WP_ENABLE_CUDA
@@ -200,16 +202,13 @@ void* wp_alloc_host(size_t s, const char* tag)
     size_t alignment = 64;
 
     void* ptr;
-// msvc does not provide the standard aligned_alloc()
 #if defined(_MSC_VER)
     ptr = _aligned_malloc(s, alignment);
 #else
-    // ensure that the size is a multiple of alignment
-    size_t alloc_size = s;
-    size_t remainder = alloc_size % alignment;
-    if (remainder != 0)
-        alloc_size += alignment - remainder;
-    ptr = aligned_alloc(alignment, alloc_size);
+    // posix_memalign() preserves the exact size (unlike aligned_alloc(), which
+    // requires a multiple of the alignment), so ASan red-zones the logical array bound.
+    if (posix_memalign(&ptr, alignment, s) != 0)
+        ptr = nullptr;
 #endif
 
     if (g_alloc_tracker.enabled && ptr)
@@ -242,7 +241,7 @@ void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj_args, 
 
     // Skip execution during capture (record only). Execute during replay
     // or when called outside capture (apic_info == NULL).
-    APICState recording_state = wp_apic_get_recording_state();
+    APICState* recording_state = wp_apic_get_recording_state();
     if (func && !recording_state) {
         if (adj_args)
             ((kernel_fn_backward)func)(bounds, args, adj_args);
@@ -256,28 +255,32 @@ void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj_args, 
         return;
     }
     if (recording_state && apic_info) {
-        // Extract shape/ndim/size from the launch_bounds_t struct (see builtin.h)
-        // for the byte stream record.
+        // Extract shape from launch_bounds_t<N>. kernel_dim gives the exact
+        // dimensionality expected by the generated kernel.
         int shape[APIC_LAUNCH_MAX_DIMS] = {};
-        int ndim = 0;
+        int ndim = apic_info->kernel_dim;
+        if (ndim < 1)
+            ndim = 1;
+        if (ndim > APIC_LAUNCH_MAX_DIMS)
+            ndim = APIC_LAUNCH_MAX_DIMS;
+
         uint64_t launch_size = 0;
-        if (bounds) {
-            const auto* lb = static_cast<const wp::launch_bounds_t*>(bounds);
-            ndim = lb->ndim;
-            if (ndim < 1)
-                ndim = 1;
-            if (ndim > APIC_LAUNCH_MAX_DIMS)
-                ndim = APIC_LAUNCH_MAX_DIMS;
+        if (bounds && ndim > 0) {
+            const int* bounds_shape = static_cast<const int*>(bounds);
             for (int d = 0; d < ndim; d++)
-                shape[d] = lb->shape[d];
-            launch_size = lb->size;
+                shape[d] = bounds_shape[d];
+
+            const size_t size_offset = apic_detail::launch_bounds_size_offset(ndim);
+            const uint8_t* bounds_bytes = static_cast<const uint8_t*>(bounds);
+            launch_size = *reinterpret_cast<const size_t*>(bounds_bytes + size_offset);
         }
 
         apic_record_kernel_launch(
             recording_state, apic_info->kernel_key, apic_info->module_hash, apic_info->is_forward, shape, ndim,
-            launch_size, 0, 0,
-            0,  // max_blocks, block_dim, smem_bytes (not applicable for CPU)
-            apic_info->params, apic_info->num_params
+            launch_size, 0, 0, 0, 1,
+            0,  // max_blocks, block_dim, grid_stride, cluster_dim, smem_bytes (not applicable for CPU)
+            apic_info->params, apic_info->num_params, apic_info->adj_params, apic_info->relocs, apic_info->num_relocs,
+            apic_info->value_data, apic_info->value_data_size
         );
     }
 }
@@ -285,19 +288,15 @@ void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj_args, 
 bool wp_memcpy_h2h(void* dest, void* src, size_t n)
 {
     // During capture, record only — don't execute (matches CUDA graph semantics)
-    APICState state = wp_apic_get_recording_state();
+    APICState* state = wp_apic_get_recording_state();
     if (state) {
-        int32_t dst_region, src_region;
-        uint64_t dst_offset, src_offset;
-        bool dst_ok = apic_resolve_ptr(state, (uint64_t)dest, &dst_region, &dst_offset);
-        bool src_ok = apic_resolve_ptr(state, (uint64_t)src, &src_region, &src_offset);
-        if (!dst_ok)
-            fprintf(stderr, "APIC: Error - memcpy dst pointer not in any registered region\n");
-        if (!src_ok)
-            fprintf(stderr, "APIC: Error - memcpy src pointer not in any registered region\n");
-        if (!dst_ok || !src_ok)
-            return false;
-        apic_record_memcpy_d2d(state, dst_region, dst_offset, src_region, src_offset, n);
+        // Zero-byte copy is a no-op; skip recording so we don't auto-register
+        // a stray region for a possibly-null pointer.
+        if (n == 0)
+            return true;
+        APICAddress dst_addr = apic_resolve_host_ptr(state, (uint64_t)dest, n);
+        APICAddress src_addr = apic_resolve_host_ptr(state, (uint64_t)src, n);
+        apic_record_memcpy_d2d(state, dst_addr.region_id, dst_addr.offset, src_addr.region_id, src_addr.offset, n);
         return true;
     }
 
@@ -308,15 +307,14 @@ bool wp_memcpy_h2h(void* dest, void* src, size_t n)
 bool wp_memset_host(void* dest, int value, size_t n)
 {
     // During capture, record only — don't execute (matches CUDA graph semantics)
-    APICState state = wp_apic_get_recording_state();
+    APICState* state = wp_apic_get_recording_state();
     if (state) {
-        int32_t region_id;
-        uint64_t offset;
-        if (!apic_resolve_ptr(state, (uint64_t)dest, &region_id, &offset)) {
-            fprintf(stderr, "APIC: Error - memset dst pointer not in any registered region\n");
-            return false;
-        }
-        apic_record_memset(state, region_id, offset, n, value);
+        // Zero-byte memset is a no-op; skip recording so we don't auto-register
+        // a stray region for a possibly-null pointer.
+        if (n == 0)
+            return true;
+        APICAddress addr = apic_resolve_host_ptr(state, (uint64_t)dest, n);
+        apic_record_memset(state, addr.region_id, addr.offset, n, value);
         return true;
     }
 
@@ -334,6 +332,22 @@ template <typename T> void memtile_value_host(T* dst, T value, size_t n)
 
 void wp_memtile_host(void* dst, const void* src, size_t srcsize, size_t n)
 {
+    // During capture, record only — don't execute (matches CUDA graph semantics)
+    APICState* state = wp_apic_get_recording_state();
+    if (state) {
+        // Zero-element / zero-size memtile is a no-op; skip recording so we
+        // don't auto-register a stray region for a possibly-null pointer.
+        if (n == 0 || srcsize == 0)
+            return;
+        // Guard the byte-span multiplication: an overflow would under-register
+        // the region and let replay write past the tracked bounds.
+        if (n > (~static_cast<size_t>(0)) / srcsize)
+            return;
+        APICAddress addr = apic_resolve_host_ptr(state, (uint64_t)dst, srcsize * n);
+        apic_record_memtile(state, addr.region_id, addr.offset, static_cast<uint32_t>(srcsize), src, n);
+        return;
+    }
+
     size_t dst_addr = reinterpret_cast<size_t>(dst);
     size_t src_addr = reinterpret_cast<size_t>(src);
 
@@ -355,14 +369,78 @@ void wp_memtile_host(void* dst, const void* src, size_t srcsize, size_t n)
     }
 }
 
-void wp_array_scan_int_host(uint64_t in, uint64_t out, int len, bool inclusive)
+static uint64_t apic_scan_access_bytes(int len, int stride, int type_len, uint64_t scalar_size)
 {
-    scan_host((const int*)in, (int*)out, len, inclusive);
+    if (len <= 0)
+        return 0;
+    if (stride < 0 || type_len <= 0 || scalar_size == 0)
+        return 0;
+    return static_cast<uint64_t>(len - 1) * static_cast<uint64_t>(stride)
+        + static_cast<uint64_t>(type_len) * scalar_size;
 }
 
-void wp_array_scan_float_host(uint64_t in, uint64_t out, int len, bool inclusive)
+// Record a host scan into the active APIC byte stream; returns true if the
+// scan was recorded (and therefore should NOT execute), false otherwise. On
+// recording failure (unresolved pointers etc.) we fall through to the live
+// execute so the user-visible behaviour at capture time stays correct.
+static bool apic_capture_array_scan(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, uint8_t dtype, bool inclusive
+)
 {
-    scan_host((const float*)in, (float*)out, len, inclusive);
+    APICState* state = wp_apic_get_recording_state();
+    if (!state)
+        return false;
+    // scan_host treats non-positive lengths as a no-op.
+    if (len <= 0)
+        return true;
+    uint64_t scalar_size = apic_type_size(dtype);
+    uint64_t src_bytes = apic_scan_access_bytes(len, in_stride, type_len, scalar_size);
+    uint64_t dst_bytes = apic_scan_access_bytes(len, out_stride, type_len, scalar_size);
+    if (src_bytes == 0 || dst_bytes == 0)
+        return false;
+    APICAddress dst_addr = apic_resolve_host_ptr(state, out, dst_bytes);
+    APICAddress src_addr = apic_resolve_host_ptr(state, in, src_bytes);
+    apic_record_scan(
+        state, dst_addr.region_id, dst_addr.offset, src_addr.region_id, src_addr.offset, static_cast<uint32_t>(len),
+        in_stride, out_stride, type_len, dtype, inclusive ? uint8_t(1) : uint8_t(0)
+    );
+    return true;
+}
+
+void wp_array_scan_int_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT32, inclusive))
+        return;
+    scan_host((const int*)in, (int*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+void wp_array_scan_int64_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT64, inclusive))
+        return;
+    scan_host((const int64_t*)in, (int64_t*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+void wp_array_scan_float_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT32, inclusive))
+        return;
+    scan_host((const float*)in, (float*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+void wp_array_scan_double_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT64, inclusive))
+        return;
+    scan_host((const double*)in, (double*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
 
@@ -945,12 +1023,6 @@ WP_API void wp_array_fill_host(void* arr_ptr, int arr_type, const void* value_pt
 }
 
 
-// impl. files
-// TODO: compile as separate translation units
-#include "bvh.cpp"
-#include "scan.cpp"
-
-
 // stubs for platforms where there is no CUDA
 #if !WP_ENABLE_CUDA
 
@@ -962,13 +1034,15 @@ void* wp_alloc_device(void* context, size_t s, const char* tag) { return NULL; }
 
 void* wp_alloc_device_default(void* context, size_t s, const char* tag) { return NULL; }
 
-void* wp_alloc_device_async(void* context, size_t s, const char* tag) { return NULL; }
+void* wp_alloc_device_async(void* context, size_t s, void* stream, const char* tag) { return NULL; }
+
+void* wp_alloc_device_managed(void* context, size_t s, const char* tag) { return NULL; }
 
 void wp_free_device(void* context, void* ptr) { }
 
 void wp_free_device_default(void* context, void* ptr) { }
 
-void wp_free_device_async(void* context, void* ptr) { }
+void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret) { }
 
 bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream) { return false; }
 
@@ -1013,12 +1087,20 @@ WP_API int wp_cuda_device_get_pci_domain_id(int ordinal) { return -1; }
 WP_API int wp_cuda_device_get_pci_bus_id(int ordinal) { return -1; }
 WP_API int wp_cuda_device_get_pci_device_id(int ordinal) { return -1; }
 WP_API int wp_cuda_device_is_uva(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_pageable_memory_access(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_direct_managed_mem_access_from_host(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_managed_memory_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_pointer_get_memory_kind(void* context, void* ptr) { return WP_MEMORY_KIND_UNKNOWN; }
 WP_API int wp_cuda_device_is_mempool_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_is_ipc_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold) { return 0; }
 WP_API uint64_t wp_cuda_device_get_mempool_release_threshold(int ordinal) { return 0; }
 WP_API uint64_t wp_cuda_device_get_mempool_used_mem_current(int ordinal) { return 0; }
 WP_API uint64_t wp_cuda_device_get_mempool_used_mem_high(int ordinal) { return 0; }
+WP_API uint64_t wp_cuda_device_get_graph_mem_current(int ordinal) { return 0; }
+WP_API void wp_cuda_device_graph_mem_trim(int ordinal) { }
 WP_API void wp_cuda_device_get_memory_info(int ordinal, size_t* free_mem, size_t* total_mem) { }
 
 WP_API void* wp_cuda_context_get_current() { return NULL; }
@@ -1028,6 +1110,8 @@ WP_API void wp_cuda_context_pop_current() { }
 WP_API void* wp_cuda_context_create(int device_ordinal) { return NULL; }
 WP_API void wp_cuda_context_destroy(void* context) { }
 WP_API void wp_cuda_context_synchronize(void* context) { }
+WP_API bool wp_cuda_profiler_start(void* context) { return true; }
+WP_API bool wp_cuda_profiler_stop(void* context) { return true; }
 WP_API uint64_t wp_cuda_context_check(void* context) { return 0; }
 WP_API int wp_cuda_context_get_device_ordinal(void* context) { return -1; }
 WP_API int wp_cuda_context_is_primary(void* context) { return 0; }
@@ -1056,6 +1140,8 @@ WP_API void wp_cuda_stream_synchronize(void* stream) { }
 WP_API void wp_cuda_stream_wait_event(void* stream, void* event, bool external) { }
 WP_API void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, bool external) { }
 WP_API int wp_cuda_stream_is_capturing(void* stream) { return 0; }
+WP_API int wp_cuda_stream_is_blocking(void* stream) { return 0; }
+WP_API int wp_cuda_thread_exchange_capture_mode(int mode) { return mode; }
 WP_API uint64_t wp_cuda_stream_get_capture_id(void* stream) { return 0; }
 WP_API int wp_cuda_stream_get_priority(void* stream) { return 0; }
 
@@ -1066,7 +1152,7 @@ WP_API void wp_cuda_event_record(void* event, void* stream, bool external) { }
 WP_API void wp_cuda_event_synchronize(void* event) { }
 WP_API float wp_cuda_event_elapsed_time(void* start_event, void* end_event) { return 0.0f; }
 
-WP_API bool wp_cuda_graph_begin_capture(void* context, void* stream, int external) { return false; }
+WP_API bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int mode) { return false; }
 WP_API bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret) { return false; }
 WP_API bool wp_cuda_graph_create_exec(void* context, void* stream, void* graph, void** graph_exec_ret) { return false; }
 WP_API bool wp_cuda_graph_launch(void* graph, void* stream) { return false; }
@@ -1117,6 +1203,12 @@ WP_API bool wp_cuda_graph_update_memcpy_batch(
     return false;
 }
 
+WP_API void* wp_cuda_graph_insert_alloc_node(void* context, size_t size) { return NULL; }
+WP_API void* wp_cuda_graph_insert_free_node(void* context, void* alloc_node) { return NULL; }
+WP_API void* wp_cuda_graph_insert_empty_node(void* context) { return NULL; }
+WP_API int wp_cuda_graph_node_depends_on(void* argument, void* referent) { return -1; }
+WP_API int wp_cuda_graph_alloc_query(void* alloc, void* arg) { return -1; }
+
 WP_API size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
@@ -1154,6 +1246,8 @@ WP_API size_t wp_cuda_launch_kernel(
     size_t dim,
     int max_blocks,
     int block_dim,
+    int grid_stride,
+    int cluster_dim,
     int shared_memory_bytes,
     void** args,
     void* stream,
@@ -1171,12 +1265,37 @@ WP_API bool wp_cuda_get_suggested_block_size(
 }
 WP_API int wp_cuda_get_max_shared_memory(void* context) { return 0; }
 WP_API bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size) { return false; }
+WP_API int wp_cuda_get_kernel_static_shared_memory(void* context, void* kernel) { return -1; }
+WP_API bool wp_cuda_get_kernel_properties(void* context, void* kernel, int* properties, int property_count)
+{
+    return false;
+}
+WP_API bool wp_cuda_set_kernel_cluster_attrs(void* kernel, int cx, int cy, int cz) { return false; }
+WP_API int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int dynamic_smem_bytes) { return 1; }
 
 WP_API void wp_cuda_set_context_restore_policy(bool always_restore) { }
 WP_API int wp_cuda_get_context_restore_policy() { return false; }
 
-WP_API void wp_array_scan_int_device(uint64_t in, uint64_t out, int len, bool inclusive) { }
-WP_API void wp_array_scan_float_device(uint64_t in, uint64_t out, int len, bool inclusive) { }
+WP_API void wp_array_scan_int_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+}
+WP_API void wp_array_scan_int64_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+}
+WP_API void wp_array_scan_float_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+}
+WP_API void wp_array_scan_double_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+}
 
 WP_API bool wp_cuda_graphics_map(void* context, void* resource) { return false; }
 WP_API void wp_cuda_graphics_unmap(void* context, void* resource) { }

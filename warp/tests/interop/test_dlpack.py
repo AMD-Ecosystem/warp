@@ -1,31 +1,70 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: PLC0415
-
 import ctypes
 import os
+import subprocess
+import sys
 import unittest
+from functools import cache
 
 import numpy as np
 
 import warp as wp
 from warp.tests.unittest_utils import *
 
+# Configure JAX memory behavior before any module-level JAX version checks.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
+os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+
 N = 1024 * 1024
 
 
 def _jax_version():
     try:
-        import jax
+        jax = _import_jax()
+    except Exception:
+        return (0, 0, 0)
 
+    try:
         return jax.__version_info__
-    except (ImportError, AttributeError):
+    except AttributeError:
         return (0, 0, 0)
 
 
+def _import_torch_with_dlpack():
+    import torch.utils.dlpack  # noqa: PLC0415
+
+    return torch
+
+
+def _import_paddle_with_dlpack():
+    import paddle.utils.dlpack  # noqa: PLC0415
+
+    return paddle
+
+
+def _import_jax():
+    import jax  # noqa: PLC0415
+
+    return jax
+
+
+def _import_jax_with_dlpack():
+    import jax.dlpack  # noqa: PLC0415
+
+    return jax
+
+
+def _import_jax_numpy():
+    import jax.numpy as jnp  # noqa: PLC0415
+
+    return jnp
+
+
 @wp.kernel
-def inc(a: wp.array(dtype=float)):
+def inc(a: wp.array[float]):
     tid = wp.tid()
     a[tid] = a[tid] + 1.0
 
@@ -46,6 +85,62 @@ def test_dlpack_warp_to_warp(test, device):
     wp.launch(inc, dim=a2.size, inputs=[a2], device=device)
 
     assert_np_equal(a1.numpy(), a2.numpy())
+
+
+def test_dlpack_bool_round_trip(test, device):
+    values = np.array([True, False, True, True, False], dtype=np.bool_)
+    source = wp.array(values, dtype=wp.bool, device=device)
+
+    for explicit_dtype in (False, True):
+        with test.subTest(explicit_dtype=explicit_dtype):
+            capsule = wp.to_dlpack(source)
+            if explicit_dtype:
+                result = wp.from_dlpack(capsule, dtype=wp.bool)
+            else:
+                result = wp.from_dlpack(capsule)
+
+            test.assertEqual(result.ptr, source.ptr)
+            test.assertEqual(result.device, source.device)
+            test.assertEqual(result.dtype, wp.bool)
+            test.assertEqual(result.shape, source.shape)
+            test.assertEqual(result.strides, source.strides)
+            np.testing.assert_array_equal(result.numpy(), values)
+
+
+def test_dlpack_bool_aliases(test, device):
+    values = np.array([True, False, True, True, False], dtype=np.bool_)
+    source = wp.array(values, dtype=wp.bool, device=device)
+
+    for target_dtype in (wp.int8, wp.uint8):
+        with test.subTest(target_dtype=target_dtype):
+            result = wp.from_dlpack(wp.to_dlpack(source), dtype=target_dtype)
+
+            test.assertEqual(result.ptr, source.ptr)
+            test.assertEqual(result.device, source.device)
+            test.assertEqual(result.dtype, target_dtype)
+            test.assertEqual(result.shape, source.shape)
+            test.assertEqual(result.strides, source.strides)
+            np.testing.assert_array_equal(result.numpy(), values.astype(wp.dtype_to_numpy(target_dtype)))
+
+
+def test_dlpack_incompatible_dtype_error(test, device):
+    source = wp.zeros(1, dtype=wp.bool, device=device)
+
+    expected_error = r"Incompatible data types: DLPack bool8 and Warp float32"
+    with test.assertRaisesRegex(RuntimeError, expected_error):
+        wp.from_dlpack(wp.to_dlpack(source), dtype=wp.float32)
+
+
+def test_dlpack_unsupported_source_device_error(test, _device):
+    class UnsupportedDLPackSource:
+        def __dlpack_device__(self):
+            return (123, 7)
+
+        def __dlpack__(self, stream=None):
+            raise AssertionError("__dlpack__ should not be called for unsupported devices")
+
+    with test.assertRaisesRegex(TypeError, "Unsupported source device for DLPack: device_type=123, device_id=7"):
+        wp.from_dlpack(UnsupportedDLPackSource())
 
 
 def test_dlpack_dtypes_and_shapes(test, device):
@@ -238,7 +333,7 @@ def test_dlpack_stream_arg(test, device):
 
 
 def test_dlpack_warp_to_torch(test, device):
-    import torch.utils.dlpack
+    torch = _import_torch_with_dlpack()
 
     a = wp.array(data=np.arange(N, dtype=np.float32), device=device)
 
@@ -265,7 +360,7 @@ def test_dlpack_warp_to_torch(test, device):
 
 def test_dlpack_warp_to_torch_v2(test, device):
     # same as original test, but uses newer __dlpack__() method
-    import torch.utils.dlpack
+    torch = _import_torch_with_dlpack()
 
     a = wp.array(data=np.arange(N, dtype=np.float32), device=device)
 
@@ -292,8 +387,7 @@ def test_dlpack_warp_to_torch_v2(test, device):
 
 
 def test_dlpack_torch_to_warp(test, device):
-    import torch
-    import torch.utils.dlpack
+    torch = _import_torch_with_dlpack()
 
     t = torch.arange(N, dtype=torch.float32, device=wp.device_to_torch(device))
 
@@ -320,7 +414,7 @@ def test_dlpack_torch_to_warp(test, device):
 
 def test_dlpack_torch_to_warp_v2(test, device):
     # same as original test, but uses newer __dlpack__() method
-    import torch
+    torch = _import_torch_with_dlpack()
 
     torch_device = torch.device(wp.device_to_torch(device))
     t = torch.arange(N, dtype=torch.float32, device=torch_device)
@@ -352,8 +446,7 @@ def test_dlpack_torch_to_warp_v2(test, device):
 
 
 def test_dlpack_paddle_to_warp(test, device):
-    import paddle
-    import paddle.utils.dlpack
+    paddle = _import_paddle_with_dlpack()
 
     t = paddle.arange(N, dtype=paddle.float32).to(device=wp.device_to_paddle(device))
 
@@ -380,9 +473,8 @@ def test_dlpack_paddle_to_warp(test, device):
 
 
 def test_dlpack_warp_to_jax(test, device):
-    import jax
-    import jax.dlpack
-    import jax.numpy as jnp
+    jax = _import_jax_with_dlpack()
+    jnp = _import_jax_numpy()
 
     cpu_device = jax.devices("cpu")[0]
 
@@ -428,9 +520,8 @@ def test_dlpack_warp_to_jax(test, device):
 @unittest.skipUnless(_jax_version() >= (0, 4, 15), "Jax version too old")
 def test_dlpack_warp_to_jax_v2(test, device):
     # same as original test, but uses newer __dlpack__() method
-    import jax
-    import jax.dlpack
-    import jax.numpy as jnp
+    jax = _import_jax_with_dlpack()
+    jnp = _import_jax_numpy()
 
     cpu_device = jax.devices("cpu")[0]
 
@@ -474,7 +565,7 @@ def test_dlpack_warp_to_jax_v2(test, device):
 
 
 def test_dlpack_warp_to_paddle(test, device):
-    import paddle.utils.dlpack
+    paddle = _import_paddle_with_dlpack()
 
     a = wp.array(data=np.arange(N, dtype=np.float32), device=device)
 
@@ -502,7 +593,7 @@ def test_dlpack_warp_to_paddle(test, device):
 def test_dlpack_warp_to_paddle_v2(test, device):
     # same as original test, but uses newer __dlpack__() method
 
-    import paddle.utils.dlpack
+    paddle = _import_paddle_with_dlpack()
 
     a = wp.array(data=np.arange(N, dtype=np.float32), device=device)
 
@@ -529,7 +620,7 @@ def test_dlpack_warp_to_paddle_v2(test, device):
 
 
 def test_dlpack_jax_to_warp(test, device):
-    import jax
+    jax = _import_jax()
 
     with jax.default_device(wp.device_to_jax(device)):
         j = jax.numpy.arange(N, dtype=jax.numpy.float32)
@@ -565,7 +656,7 @@ def test_dlpack_jax_to_warp(test, device):
 def test_dlpack_jax_to_warp_v2(test, device):
     # same as original test, but uses newer __dlpack__() method
 
-    import jax
+    jax = _import_jax()
 
     with jax.default_device(wp.device_to_jax(device)):
         j = jax.numpy.arange(N, dtype=jax.numpy.float32)
@@ -704,6 +795,14 @@ class TestDLPack(unittest.TestCase):
 devices = get_test_devices()
 
 add_function_test(TestDLPack, "test_dlpack_warp_to_warp", test_dlpack_warp_to_warp, devices=devices)
+add_function_test(TestDLPack, "test_dlpack_bool_round_trip", test_dlpack_bool_round_trip, devices=devices)
+add_function_test(TestDLPack, "test_dlpack_bool_aliases", test_dlpack_bool_aliases, devices=devices)
+add_function_test(
+    TestDLPack, "test_dlpack_incompatible_dtype_error", test_dlpack_incompatible_dtype_error, devices=devices
+)
+add_function_test(
+    TestDLPack, "test_dlpack_unsupported_source_device_error", test_dlpack_unsupported_source_device_error, devices=None
+)
 add_function_test(TestDLPack, "test_dlpack_dtypes_and_shapes", test_dlpack_dtypes_and_shapes, devices=devices)
 add_function_test(TestDLPack, "test_dlpack_stream_arg", test_dlpack_stream_arg, devices=devices)
 
@@ -716,110 +815,171 @@ if bf16_devices:
 try:
     import torch
     import torch.utils.dlpack
+except Exception as error:
+    print(f"Skipping Torch DLPack tests due to exception: {error}")
+else:
+    torch_candidate_devices = get_test_devices()
 
-    # check which Warp devices work with Torch
-    # CUDA devices may fail if Torch was not compiled with CUDA support
-    test_devices = get_test_devices()
-    torch_compatible_devices = []
-    for d in test_devices:
+    @cache
+    def _torch_device_error(device_alias):
+        device = wp.get_device(device_alias)
         try:
-            t = torch.arange(10, device=wp.device_to_torch(d))
-            t += 1
-            torch_compatible_devices.append(d)
-        except Exception as e:
-            print(f"Skipping Torch DLPack tests on device '{d}' due to exception: {e}")
+            tensor = torch.arange(10, device=wp.device_to_torch(device))
+            tensor += 1
+        except Exception as error:
+            return f"{type(error).__name__}: {error}"
+        return None
 
-    if torch_compatible_devices:
-        add_function_test(
-            TestDLPack, "test_dlpack_warp_to_torch", test_dlpack_warp_to_torch, devices=torch_compatible_devices
-        )
-        add_function_test(
-            TestDLPack, "test_dlpack_warp_to_torch_v2", test_dlpack_warp_to_torch_v2, devices=torch_compatible_devices
-        )
-        add_function_test(
-            TestDLPack, "test_dlpack_torch_to_warp", test_dlpack_torch_to_warp, devices=torch_compatible_devices
-        )
-        add_function_test(
-            TestDLPack, "test_dlpack_torch_to_warp_v2", test_dlpack_torch_to_warp_v2, devices=torch_compatible_devices
-        )
+    def _check_torch_device(test, device):
+        device = wp.get_device(device)
+        error = _torch_device_error(device.alias)
+        if error is not None:
+            test.skipTest(f"Torch is unavailable on Warp device '{device}': {error}")
 
-except Exception as e:
-    print(f"Skipping Torch DLPack tests due to exception: {e}")
+    if torch_candidate_devices:
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_warp_to_torch",
+            test_dlpack_warp_to_torch,
+            devices=torch_candidate_devices,
+            device_check=_check_torch_device,
+        )
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_warp_to_torch_v2",
+            test_dlpack_warp_to_torch_v2,
+            devices=torch_candidate_devices,
+            device_check=_check_torch_device,
+        )
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_torch_to_warp",
+            test_dlpack_torch_to_warp,
+            devices=torch_candidate_devices,
+            device_check=_check_torch_device,
+        )
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_torch_to_warp_v2",
+            test_dlpack_torch_to_warp_v2,
+            devices=torch_candidate_devices,
+            device_check=_check_torch_device,
+        )
 
 # jax interop via dlpack
 try:
-    # prevent Jax from gobbling up GPU memory
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+    _import_jax_with_dlpack()
+except Exception as error:
+    print(f"Skipping JAX DLPack tests due to exception: {error}")
+else:
+    jax_candidate_devices = get_test_devices()
 
-    import jax
-    import jax.dlpack
-
-    # check which Warp devices work with Jax
-    # CUDA devices may fail if Jax cannot find a CUDA Toolkit
-    test_devices = get_test_devices()
-    jax_compatible_devices = []
-    for d in test_devices:
+    @cache
+    def _jax_device_error(device_alias):
         try:
-            with jax.default_device(wp.device_to_jax(d)):
-                j = jax.numpy.arange(10, dtype=jax.numpy.float32)
-                j += 1
-            jax_compatible_devices.append(d)
-        except Exception as e:
-            print(f"Skipping Jax DLPack tests on device '{d}' due to exception: {e}")
+            result = subprocess.run(
+                [sys.executable, os.path.join(os.path.dirname(__file__), "aux_test_jax_device.py"), device_alias],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return "JAX device probe timed out"
 
-    if jax_compatible_devices:
-        add_function_test(
-            TestDLPack, "test_dlpack_warp_to_jax", test_dlpack_warp_to_jax, devices=jax_compatible_devices
-        )
-        add_function_test(
-            TestDLPack, "test_dlpack_warp_to_jax_v2", test_dlpack_warp_to_jax_v2, devices=jax_compatible_devices
-        )
-        add_function_test(
-            TestDLPack, "test_dlpack_jax_to_warp", test_dlpack_jax_to_warp, devices=jax_compatible_devices
-        )
-        add_function_test(
-            TestDLPack, "test_dlpack_jax_to_warp_v2", test_dlpack_jax_to_warp_v2, devices=jax_compatible_devices
-        )
+        if result.returncode == 0:
+            return None
 
-except Exception as e:
-    print(f"Skipping Jax DLPack tests due to exception: {e}")
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        message = f"JAX device probe exited with code {result.returncode}"
+        if output:
+            message = f"{message}:\n{output}"
 
+        return message
+
+    def _check_jax_device(test, device):
+        device = wp.get_device(device)
+        error = _jax_device_error(device.alias)
+        if error is not None:
+            test.skipTest(f"JAX is unavailable on Warp device '{device}': {error}")
+
+    if jax_candidate_devices:
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_warp_to_jax",
+            test_dlpack_warp_to_jax,
+            devices=jax_candidate_devices,
+            device_check=_check_jax_device,
+        )
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_warp_to_jax_v2",
+            test_dlpack_warp_to_jax_v2,
+            devices=jax_candidate_devices,
+            device_check=_check_jax_device,
+        )
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_jax_to_warp",
+            test_dlpack_jax_to_warp,
+            devices=jax_candidate_devices,
+            device_check=_check_jax_device,
+        )
+        add_function_test(
+            TestDLPack,
+            "test_dlpack_jax_to_warp_v2",
+            test_dlpack_jax_to_warp_v2,
+            devices=jax_candidate_devices,
+            device_check=_check_jax_device,
+        )
 
 # paddle interop via dlpack
 try:
     import paddle
     import paddle.utils.dlpack
+except Exception as error:
+    print(f"Skipping Paddle DLPack tests due to exception: {error}")
+else:
+    paddle_candidate_devices = get_test_devices()
 
-    # check which Warp devices work with paddle
-    # CUDA devices may fail if paddle was not compiled with CUDA support
-    test_devices = get_test_devices()
-    paddle_compatible_devices = []
-    for d in test_devices:
+    @cache
+    def _paddle_device_error(device_alias):
+        device = wp.get_device(device_alias)
         try:
-            t = paddle.arange(10).to(device=wp.device_to_paddle(d))
-            paddle.assign(t + 1, t)
-            paddle_compatible_devices.append(d)
-        except Exception as e:
-            print(f"Skipping paddle DLPack tests on device '{d}' due to exception: {e}")
+            tensor = paddle.arange(10).to(device=wp.device_to_paddle(device))
+            paddle.assign(tensor + 1, tensor)
+        except Exception as error:
+            return f"{type(error).__name__}: {error}"
+        return None
 
-    if paddle_compatible_devices:
+    def _check_paddle_device(test, device):
+        device = wp.get_device(device)
+        error = _paddle_device_error(device.alias)
+        if error is not None:
+            test.skipTest(f"Paddle is unavailable on Warp device '{device}': {error}")
+
+    if paddle_candidate_devices:
         add_function_test(
-            TestDLPack, "test_dlpack_warp_to_paddle", test_dlpack_warp_to_paddle, devices=paddle_compatible_devices
+            TestDLPack,
+            "test_dlpack_warp_to_paddle",
+            test_dlpack_warp_to_paddle,
+            devices=paddle_candidate_devices,
+            device_check=_check_paddle_device,
         )
         add_function_test(
             TestDLPack,
             "test_dlpack_warp_to_paddle_v2",
             test_dlpack_warp_to_paddle_v2,
-            devices=paddle_compatible_devices,
+            devices=paddle_candidate_devices,
+            device_check=_check_paddle_device,
         )
         add_function_test(
-            TestDLPack, "test_dlpack_paddle_to_warp", test_dlpack_paddle_to_warp, devices=paddle_compatible_devices
+            TestDLPack,
+            "test_dlpack_paddle_to_warp",
+            test_dlpack_paddle_to_warp,
+            devices=paddle_candidate_devices,
+            device_check=_check_paddle_device,
         )
-
-except Exception as e:
-    print(f"Skipping Paddle DLPack tests due to exception: {e}")
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

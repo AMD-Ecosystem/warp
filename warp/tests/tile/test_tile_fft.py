@@ -17,66 +17,104 @@ FFT_SIZE_FP32 = 64
 FFT_SIZE_FP64 = 64
 FFT_3D_DIM0 = 2
 FFT_3D_DIM1 = 4
+# Non-power-of-two size exercises the CPU direct DFT fallback.
+FFT_SIZE_NPO2 = 48
 
 
-@wp.kernel()
-def tile_fft_kernel_vec2f(gx: wp.array2d(dtype=wp.vec2f), gy: wp.array2d(dtype=wp.vec2f)):
+@wp.kernel
+def tile_fft_kernel_vec2f(gx: wp.array2d[wp.vec2f], gy: wp.array2d[wp.vec2f]):
     xy = wp.tile_load(gx, shape=(FFT_SIZE_FP32, FFT_SIZE_FP32))
     wp.tile_fft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_fft_kernel_vec2d(gx: wp.array2d(dtype=wp.vec2d), gy: wp.array2d(dtype=wp.vec2d)):
+@wp.kernel
+def tile_fft_kernel_vec2d(gx: wp.array2d[wp.vec2d], gy: wp.array2d[wp.vec2d]):
     xy = wp.tile_load(gx, shape=(FFT_SIZE_FP64, FFT_SIZE_FP64))
     wp.tile_fft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_ifft_kernel_vec2f(gx: wp.array2d(dtype=wp.vec2f), gy: wp.array2d(dtype=wp.vec2f)):
+@wp.kernel
+def tile_ifft_kernel_vec2f(gx: wp.array2d[wp.vec2f], gy: wp.array2d[wp.vec2f]):
     xy = wp.tile_load(gx, shape=(FFT_SIZE_FP32, FFT_SIZE_FP32))
     wp.tile_ifft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_ifft_kernel_vec2d(gx: wp.array2d(dtype=wp.vec2d), gy: wp.array2d(dtype=wp.vec2d)):
+@wp.kernel
+def tile_ifft_kernel_vec2d(gx: wp.array2d[wp.vec2d], gy: wp.array2d[wp.vec2d]):
     xy = wp.tile_load(gx, shape=(FFT_SIZE_FP64, FFT_SIZE_FP64))
     wp.tile_ifft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_fft_3d_kernel_vec2f(gx: wp.array3d(dtype=wp.vec2f), gy: wp.array3d(dtype=wp.vec2f)):
+@wp.kernel
+def tile_fft_3d_kernel_vec2f(gx: wp.array3d[wp.vec2f], gy: wp.array3d[wp.vec2f]):
     xy = wp.tile_load(gx, shape=(FFT_3D_DIM0, FFT_3D_DIM1, FFT_SIZE_FP32))
     wp.tile_fft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_fft_3d_kernel_vec2d(gx: wp.array3d(dtype=wp.vec2d), gy: wp.array3d(dtype=wp.vec2d)):
+@wp.kernel
+def tile_fft_3d_kernel_vec2d(gx: wp.array3d[wp.vec2d], gy: wp.array3d[wp.vec2d]):
     xy = wp.tile_load(gx, shape=(FFT_3D_DIM0, FFT_3D_DIM1, FFT_SIZE_FP64))
     wp.tile_fft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_ifft_3d_kernel_vec2f(gx: wp.array3d(dtype=wp.vec2f), gy: wp.array3d(dtype=wp.vec2f)):
+@wp.kernel
+def tile_ifft_3d_kernel_vec2f(gx: wp.array3d[wp.vec2f], gy: wp.array3d[wp.vec2f]):
     xy = wp.tile_load(gx, shape=(FFT_3D_DIM0, FFT_3D_DIM1, FFT_SIZE_FP32))
     wp.tile_ifft(xy)
     wp.tile_store(gy, xy)
 
 
-@wp.kernel()
-def tile_ifft_3d_kernel_vec2d(gx: wp.array3d(dtype=wp.vec2d), gy: wp.array3d(dtype=wp.vec2d)):
+@wp.kernel
+def tile_ifft_3d_kernel_vec2d(gx: wp.array3d[wp.vec2d], gy: wp.array3d[wp.vec2d]):
     xy = wp.tile_load(gx, shape=(FFT_3D_DIM0, FFT_3D_DIM1, FFT_SIZE_FP64))
     wp.tile_ifft(xy)
     wp.tile_store(gy, xy)
 
 
-@unittest.skipUnless(wp._src.context.runtime.core.wp_is_mathdx_enabled(), "Warp was not built with MathDx support")
+# Non-power-of-two CPU FFT kernels. These exercise the direct-DFT fallback and
+# are CPU-only — a non-power-of-two fft_size violates the GPU codegen
+# constraints. ``module="test_fft_npo2"`` places them in a shared Warp module
+# separate from the surrounding test module, so the module is only compiled
+# when launched on CPU.
+@wp.kernel(module="test_fft_npo2")
+def tile_fft_kernel_vec2f_npo2(gx: wp.array2d[wp.vec2f], gy: wp.array2d[wp.vec2f]):
+    xy = wp.tile_load(gx, shape=(FFT_SIZE_NPO2, FFT_SIZE_NPO2))
+    wp.tile_fft(xy)
+    wp.tile_store(gy, xy)
+
+
+@wp.kernel(module="test_fft_npo2")
+def tile_fft_kernel_vec2d_npo2(gx: wp.array2d[wp.vec2d], gy: wp.array2d[wp.vec2d]):
+    xy = wp.tile_load(gx, shape=(FFT_SIZE_NPO2, FFT_SIZE_NPO2))
+    wp.tile_fft(xy)
+    wp.tile_store(gy, xy)
+
+
+@wp.kernel(module="test_fft_npo2")
+def tile_ifft_kernel_vec2f_npo2(gx: wp.array2d[wp.vec2f], gy: wp.array2d[wp.vec2f]):
+    xy = wp.tile_load(gx, shape=(FFT_SIZE_NPO2, FFT_SIZE_NPO2))
+    wp.tile_ifft(xy)
+    wp.tile_store(gy, xy)
+
+
+@wp.kernel(module="test_fft_npo2")
+def tile_ifft_kernel_vec2d_npo2(gx: wp.array2d[wp.vec2d], gy: wp.array2d[wp.vec2d]):
+    xy = wp.tile_load(gx, shape=(FFT_SIZE_NPO2, FFT_SIZE_NPO2))
+    wp.tile_ifft(xy)
+    wp.tile_store(gy, xy)
+
+
 def test_tile_fft(test, device, wp_dtype, kernel, data_shape):
+    # CUDA path requires MathDx for cuFFTDx; CPU path has a built-in implementation.
+    wp_device = wp.get_device(device)
+    if wp_device.is_cuda and not wp._src.context.runtime.core.wp_is_mathdx_enabled():
+        test.skipTest("Warp was not built with MathDx support")
     np_real_dtype = {wp.vec2f: np.float32, wp.vec2d: np.float64}[wp_dtype]
     np_cplx_dtype = {wp.vec2f: np.complex64, wp.vec2d: np.complex128}[wp_dtype]
     fft_size = data_shape[-1] // 2
@@ -114,8 +152,11 @@ def test_tile_fft(test, device, wp_dtype, kernel, data_shape):
     assert_np_equal(actual_grad_c, expected_grad_c, tol=1.0e-4)
 
 
-@unittest.skipUnless(wp._src.context.runtime.core.wp_is_mathdx_enabled(), "Warp was not built with MathDx support")
 def test_tile_ifft(test, device, wp_dtype, kernel, data_shape):
+    # CUDA path requires MathDx for cuFFTDx; CPU path has a built-in implementation.
+    wp_device = wp.get_device(device)
+    if wp_device.is_cuda and not wp._src.context.runtime.core.wp_is_mathdx_enabled():
+        test.skipTest("Warp was not built with MathDx support")
     np_real_dtype = {wp.vec2f: np.float32, wp.vec2d: np.float64}[wp_dtype]
     np_cplx_dtype = {wp.vec2f: np.complex64, wp.vec2d: np.complex128}[wp_dtype]
     fft_size = data_shape[-1] // 2
@@ -154,7 +195,7 @@ def test_tile_ifft(test, device, wp_dtype, kernel, data_shape):
     assert_np_equal(actual_grad_c, expected_grad_c, tol=1.0e-4)
 
 
-cuda_devices = get_cuda_test_devices()
+test_devices = get_test_devices()
 
 
 class TestTileFFT(unittest.TestCase):
@@ -171,7 +212,7 @@ add_function_test(
         kernel=tile_fft_kernel_vec2f,
         data_shape=(FFT_SIZE_FP32, 2 * FFT_SIZE_FP32),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -183,7 +224,7 @@ add_function_test(
         kernel=tile_fft_kernel_vec2d,
         data_shape=(FFT_SIZE_FP64, 2 * FFT_SIZE_FP64),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -195,7 +236,7 @@ add_function_test(
         kernel=tile_ifft_kernel_vec2f,
         data_shape=(FFT_SIZE_FP32, 2 * FFT_SIZE_FP32),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -207,7 +248,7 @@ add_function_test(
         kernel=tile_ifft_kernel_vec2d,
         data_shape=(FFT_SIZE_FP64, 2 * FFT_SIZE_FP64),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -219,7 +260,7 @@ add_function_test(
         kernel=tile_fft_3d_kernel_vec2f,
         data_shape=(FFT_3D_DIM0, FFT_3D_DIM1, 2 * FFT_SIZE_FP32),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -231,7 +272,7 @@ add_function_test(
         kernel=tile_fft_3d_kernel_vec2d,
         data_shape=(FFT_3D_DIM0, FFT_3D_DIM1, 2 * FFT_SIZE_FP64),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -243,7 +284,7 @@ add_function_test(
         kernel=tile_ifft_3d_kernel_vec2f,
         data_shape=(FFT_3D_DIM0, FFT_3D_DIM1, 2 * FFT_SIZE_FP32),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
     check_output=False,
 )
 add_function_test(
@@ -255,7 +296,55 @@ add_function_test(
         kernel=tile_ifft_3d_kernel_vec2d,
         data_shape=(FFT_3D_DIM0, FFT_3D_DIM1, 2 * FFT_SIZE_FP64),
     ),
-    devices=cuda_devices,
+    devices=test_devices,
+    check_output=False,
+)
+add_function_test(
+    TestTileFFT,
+    "test_tile_fft_cpu_npo2_vec2f",
+    functools.partial(
+        test_tile_fft,
+        wp_dtype=wp.vec2f,
+        kernel=tile_fft_kernel_vec2f_npo2,
+        data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
+    ),
+    devices=["cpu"],
+    check_output=False,
+)
+add_function_test(
+    TestTileFFT,
+    "test_tile_fft_cpu_npo2_vec2d",
+    functools.partial(
+        test_tile_fft,
+        wp_dtype=wp.vec2d,
+        kernel=tile_fft_kernel_vec2d_npo2,
+        data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
+    ),
+    devices=["cpu"],
+    check_output=False,
+)
+add_function_test(
+    TestTileFFT,
+    "test_tile_ifft_cpu_npo2_vec2f",
+    functools.partial(
+        test_tile_ifft,
+        wp_dtype=wp.vec2f,
+        kernel=tile_ifft_kernel_vec2f_npo2,
+        data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
+    ),
+    devices=["cpu"],
+    check_output=False,
+)
+add_function_test(
+    TestTileFFT,
+    "test_tile_ifft_cpu_npo2_vec2d",
+    functools.partial(
+        test_tile_ifft,
+        wp_dtype=wp.vec2d,
+        kernel=tile_ifft_kernel_vec2d_npo2,
+        data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
+    ),
+    devices=["cpu"],
     check_output=False,
 )
 

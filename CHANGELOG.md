@@ -15,6 +15,691 @@
 - `warp/tests/test_fem.py` was removed upstream; AMD's HIP-skip filter for `test_capturability` and
   `test_integrate_high_order` is ported to `warp/tests/fem/test_fem_integrate.py`.
 
+<!-- towncrier release notes start -->
+
+## [1.17.0] - 2026-08-31
+
+### Added
+
+- Add `wp.bvh_query_sphere()` and `wp.bvh_query_capsule()` for Minkowski-offset broad-phase queries over BVH bounds.
+  Sphere queries use exact sphere-AABB overlap tests, while capsule queries are conservative and may return extra
+  candidates near bounding-box corners. Add `wp.mesh_query_sphere()` for finding mesh triangles that intersect a sphere
+  and `wp.mesh_get_bvh()` for querying a mesh's BVH directly
+  ([GH-1741](https://github.com/NVIDIA/warp/issues/1741)).
+- **Experimental**: Add APIs for compiling Warp modules for external C++ and CUDA consumers: `wp.ModuleBuildOptions`,
+  the `extra_build_options` module option, `wp.build_experimental.add_builtin()`,
+  `wp.build_experimental.add_native_type()`, external kernel entry-point ABIs, and AOT artifact paths. These APIs may
+  change without deprecation in a future release ([GH-1575](https://github.com/NVIDIA/warp/issues/1575)).
+- Add the `cuda_max_registers` and `enable_cuda_smem_spilling` parameters to `@wp.kernel` to control CUDA register
+  allocation and shared-memory spilling. `cuda_max_registers` takes effect in builds using CUDA Toolkit 12.4 or later.
+  `enable_cuda_smem_spilling` takes effect in builds using CUDA Toolkit 13.0 or later. LLVM CUDA compilation ignores
+  both parameters ([GH-1671](https://github.com/NVIDIA/warp/issues/1671)).
+- Support chained row indexing on matrix-dtype tiles, such as `tile[i, j, k][r]`, including reads, writes,
+  negative row indices, and adjoints ([GH-1028](https://github.com/NVIDIA/warp/issues/1028)).
+- Add `@wp.kernel(name=...)` to assign a custom name that Warp uses for kernel registration and as the base of generated
+  native entry-point names ([GH-1561](https://github.com/NVIDIA/warp/issues/1561)).
+- Add `wp.get_cuda_kernel_properties()` to inspect a CUDA kernel variant's per-thread register count
+  and local-memory use. Warp compiles the requested variant if necessary but does not launch it, and returns the
+  properties as a dictionary ([GH-1805](https://github.com/NVIDIA/warp/issues/1805)).
+- Add the optional `restart` parameter to `warp.optim.linear.cg()` and `warp.optim.linear.cr()` to periodically
+  recompute the true residual and reset the search direction, limiting drift
+  from finite-precision arithmetic ([GH-1708](https://github.com/NVIDIA/warp/issues/1708)).
+- Add native Windows ARM64 support for building Warp from source and running CPU kernels. CUDA is not yet supported on
+  Windows ARM64 ([GH-1755](https://github.com/NVIDIA/warp/issues/1755)).
+
+### Removed
+
+- Remove the previously deprecated implicit conversion of Python and Warp numeric scalars to vector, matrix, quaternion,
+  and transform kernel parameters and struct fields. Construct the expected composite value explicitly instead,
+  e.g. `wp.mat22(123)` ([GH-1721](https://github.com/NVIDIA/warp/issues/1721)).
+- Remove the deprecated `wp.Texture.copy_from_array()` and `wp.Texture.copy_to_array()` aliases; use
+  `wp.Texture.copy_from()` and `wp.Texture.copy_to()` instead ([GH-1722](https://github.com/NVIDIA/warp/issues/1722)).
+- Remove `wp.spatial_jacobian()` and `wp.spatial_mass()`. Although they were listed as built-ins, they were never
+  callable from kernels or Python ([GH-1768](https://github.com/NVIDIA/warp/issues/1768)).
+
+### Deprecated
+
+- Deprecate implicitly converting either NumPy numeric scalars or Boolean values from Python, NumPy, and Warp to vector,
+  matrix, quaternion, and transform kernel parameters and struct fields. Construct the expected composite value
+  explicitly instead, e.g. `wp.mat22(np.float32(123))` ([GH-1721](https://github.com/NVIDIA/warp/issues/1721)).
+
+### Changed
+
+- Upgrade Warp's embedded Clang/LLVM libraries to version 22.1.8 on all platforms.
+- Add `wp.MeshQuery` as the common base type for AABB and sphere mesh queries while keeping `wp.MeshQueryAABB` as the
+  concrete AABB query type. Allow kernels to select query kinds at runtime, pass the resulting `wp.BvhQuery` or
+  `wp.MeshQuery` values through functions, and iterate them. Make `wp.mesh_query_next()` the canonical iterator for AABB
+  and sphere mesh queries; `wp.mesh_query_aabb_next()` remains as an alias
+  ([GH-1741](https://github.com/NVIDIA/warp/issues/1741)).
+- Speed up constructing transforms in Python, especially `wp.transform()` with no arguments and copies of
+  an existing transform of the same type ([GH-1742](https://github.com/NVIDIA/warp/issues/1742)).
+- Switch downloads of Warp's prebuilt Clang/LLVM SDK for source builds from an NVIDIA package server to GitHub
+  Releases, and verify each archive against a pinned checksum.
+- Include the file and line number of the `wp.copy()` or `wp.array.assign()` call in array-overwrite warnings
+  when `wp.config.verify_autograd_array_access` is enabled ([GH-1727](https://github.com/NVIDIA/warp/issues/1727)).
+
+### Fixed
+
+- Fix silently incorrect gradients when the source of a tape-recorded `wp.copy()`, `wp.clone()`, or
+  `wp.array.assign()` is read again later in the forward pass. For non-overlapping same-device arrays and contiguous
+  CPU-CUDA copies with matching numeric dtypes, gradients now accumulate into the source without propagating to
+  overwritten destination values. Unsupported copy patterns now emit a warning
+  ([GH-1728](https://github.com/NVIDIA/warp/issues/1728)).
+- Fix false-positive array-overwrite warnings from `wp.config.verify_autograd_array_access` when reusing arrays
+  after `wp.Tape.backward()` or `wp.Tape.reset()` ([GH-1727](https://github.com/NVIDIA/warp/issues/1727)).
+- Fix several CUDA graph-capture issues in `wp.utils.radix_sort_pairs()` and `wp.utils.segmented_sort_pairs()`:
+  scratch-buffer growth during capture could corrupt the CUDA context or prevent graph instantiation; growth after
+  capture could invalidate previously captured graphs; concurrently launched graphs could race over shared scratch
+  storage; and sorts in conditional body graphs or on devices without memory pool support could fail or invalidate
+  capture ([GH-1373](https://github.com/NVIDIA/warp/issues/1373)).
+- Reduce CPU memory use in multithreaded applications, especially on Windows, by allocating radix-sort scratch space
+  only on threads that use CPU sorting ([GH-1820](https://github.com/NVIDIA/warp/issues/1820)).
+- Fix storage underallocation in `wp.empty()` and `wp.zeros()` for custom-strided layouts with gaps. Newly allocated
+  arrays now reject negative strides and stride counts that do not
+  match the number of dimensions ([GH-1703](https://github.com/NVIDIA/warp/issues/1703)).
+- Reject zero-step slicing of Warp arrays at Python scope, during kernel code generation, and at kernel runtime.
+  Previously, a zero step could raise an internal `AssertionError`
+  or produce incorrect results ([GH-1684](https://github.com/NVIDIA/warp/issues/1684)).
+- Fix incorrect gradients from ternary expressions whose branches read array elements, such as
+  `arr[i] / term[i] if flag else arr[i]` ([GH-1736](https://github.com/NVIDIA/warp/issues/1736)).
+- Fix incorrect gradient propagation to values overwritten by scalar assignments to matrix-dtype tiles.
+- Fix incorrect `wp.Texture2D` and `wp.Texture3D` sampling from optimized CUDA 12 CUBIN modules when texture handles
+  vary across lanes on Hopper and newer GPUs ([GH-1811](https://github.com/NVIDIA/warp/issues/1811)).
+- Prevent `wp.jax_kernel()` and `wp.jax_callable()` from reusing cached JAX FFI wrappers when calls use different
+  `in_out_argnames` values or, for `wp.jax_callable()`, different `stage_in_argnames` or `stage_out_argnames` values
+  ([GH-1215](https://github.com/NVIDIA/warp/issues/1215)).
+- Fix `wp.transform(...)` at Python scope silently returning an all-zero transform for unsupported arguments. Scalar
+  inputs now fill all seven components, invalid inputs raise `TypeError`, and keyword arguments passed alongside all
+  seven positional components are no longer ignored ([GH-1742](https://github.com/NVIDIA/warp/issues/1742)).
+- Fix scalar construction with `wp.transform(value)` inside kernels. It now fills all seven components with `value`
+  instead of failing during compilation ([GH-1814](https://github.com/NVIDIA/warp/issues/1814)).
+- Fix same-dtype transform copy construction inside kernels, such as `wp.transform(other)`. Cross-dtype copies remain
+  unsupported and now report a clear error ([GH-1814](https://github.com/NVIDIA/warp/issues/1814)).
+- Improve dot-product accuracy in CUDA batched iterative solvers by using segmented tree reductions to limit
+  floating-point accumulation error as subproblem size grows. This improvement applies automatically. Add the optional
+  `max_batch_length` argument to `warp.optim.linear.LinearOperator` and `warp.optim.linear.aslinearoperator()` to skip
+  redundant reduction levels when the maximum number of scalar degrees of freedom in any subproblem is known
+  ([GH-1700](https://github.com/NVIDIA/warp/issues/1700)).
+- Fix the device-side iteration-count array returned by `warp.optim.linear.gmres()` and restart-enabled
+  `warp.optim.linear.cg()` and `warp.optim.linear.cr()` when `check_every=0` and a CUDA graph-captured cycle performs
+  multiple iterations. The array now reports the actual number of
+  completed solver iterations ([GH-1707](https://github.com/NVIDIA/warp/issues/1707)).
+- Prevent reusable solver states from allocating device memory on every solve. States returned by
+  `warp.optim.linear.cg()`, `warp.optim.linear.cr()`, `warp.optim.linear.bicgstab()`, and
+  `warp.optim.linear.gmres()` with `run=False` now allocate the required memory once when created, allowing repeated
+  solves during CUDA graph capture.
+- Fix `warp.sparse.bsr_compress(..., topology="compact")` on CUDA treating unused trailing storage as active blocks,
+  which could incorrectly append those blocks
+  to the matrix's last row ([GH-1769](https://github.com/NVIDIA/warp/issues/1769)).
+- Fix intermittent missing-kernel failures and cold-start hangs on the CPU after several modules are loaded
+  concurrently using the `max_workers` option of `wp.force_load()`
+  or `wp.load_module()` ([GH-1705](https://github.com/NVIDIA/warp/issues/1705)).
+- Propagate module compilation and loading failures from parallel `wp.force_load()` and `wp.load_module()` calls
+  instead of returning successfully ([GH-1749](https://github.com/NVIDIA/warp/issues/1749)).
+- Prevent Warp builds that share a kernel cache from reusing CPU kernels
+  compiled with a different LLVM version ([GH-1759](https://github.com/NVIDIA/warp/issues/1759)).
+- Limit the symbols exported by macOS `libwarp-clang.dylib` to Warp's native API
+  and required JIT-debugger symbols ([GH-1758](https://github.com/NVIDIA/warp/issues/1758)).
+- Fix `wp.load_aot_module()` failing to find ahead-of-time binaries when the module already had `strip_hash=True`
+  and the load call omitted `strip_hash`. Omitting the argument now preserves the existing module setting
+  instead of resetting it to `False` ([GH-1730](https://github.com/NVIDIA/warp/issues/1730)).
+- Fix kernels using lambdas or other Python callables with `wp.map()` or `wp.utils.create_warp_function()` being
+  recompiled in every new process. Generated callable identities are now stable across processes, allowing persistent
+  kernel cache reuse and preventing redundant cache entries ([GH-1696](https://github.com/NVIDIA/warp/issues/1696)).
+- Improve persistent CUDA compilation-cache reuse across processes when kernels are
+  discovered in different orders ([GH-1738](https://github.com/NVIDIA/warp/issues/1738)).
+- Fix kernel build failures being reported only once; later launches
+  now report the same error ([GH-1713](https://github.com/NVIDIA/warp/issues/1713)).
+- Fix `wp.Tape.backward()` failing with CUDA error 719 for tile kernels in debug mode when the same module also
+  contained `wp.float16` or `wp.bfloat16` vector or matrix code, even if that code
+  was never launched ([GH-1809](https://github.com/NVIDIA/warp/issues/1809)).
+- Fix `wp.autograd.gradcheck()` and `wp.autograd.jacobian_fd()` producing incorrect results for Python functions
+  that mutate array inputs, and prevent `wp.autograd.jacobian()` from leaving those inputs modified. All three
+  functions now accept `restore_inputs`, which defaults to `True` and restores top-level Warp array inputs before each
+  evaluation and before returning ([GH-1726](https://github.com/NVIDIA/warp/issues/1726)).
+- Fix autograd utilities mishandling `enable_backward=False`: `warp.autograd.jacobian()` now rejects kernels disabled
+  at either module or kernel scope, `warp.autograd.gradcheck_tape()` skips them, and `warp.autograd.jacobian_fd()`
+  works with backward-disabled kernels because it uses only
+  forward launches ([GH-1718](https://github.com/NVIDIA/warp/issues/1718)).
+- Fix kernel compilation failures in `wp.autograd.gradcheck()`, `wp.autograd.jacobian_fd()`, and
+  `wp.autograd.gradcheck_tape()` when input and output arrays use different floating-point precisions, such as
+  `wp.float32` inputs with a `wp.float64` output ([GH-1726](https://github.com/NVIDIA/warp/issues/1726)).
+- Allow `wp.fabricarray` and `wp.indexedfabricarray` values
+  to be used as fields in `@wp.struct` types ([GH-1818](https://github.com/NVIDIA/warp/issues/1818)).
+- Raise a `TypeError` when a Warp array assigned to an `@wp.struct` field does not match the dimensionality
+  declared by the field's annotation. This applies to regular, indexed, Fabric, and indexed Fabric arrays.
+- Reject one-dimensional launch extents greater than `2**31` when a kernel uses scalar `wp.tid()`,
+  preventing the signed 32-bit thread index from wrapping. The validation applies to `wp.launch()`,
+  `wp.Launch.set_dim()`, recorded launches, and JAX integration ([GH-1799](https://github.com/NVIDIA/warp/issues/1799)).
+- Improve CUDA shared-memory overflow errors for tile kernels launched with `wp.launch_tiled()`. Errors now report the
+  kernel's usable dynamic shared-memory budget and the relevant `block_dim`, and appear on every failed launch instead
+  of degrading to a generic CUDA error after the first attempt ([GH-1701](https://github.com/NVIDIA/warp/issues/1701)).
+- Fix `wp.capture_begin(..., apic=False)` causing some host applications to retain caller frames
+  and large caller-owned objects after the first CUDA graph capture. Warp now loads its API Capture (APIC)
+  implementation for CUDA captures only when `apic=True` ([GH-1829](https://github.com/NVIDIA/warp/issues/1829)).
+
+### Documentation
+
+- Add a guide to reducing compilation and startup time, covering measurement, cache reuse, module organization,
+  parallel and ahead-of-time compilation, and development-time tradeoffs
+  ([GH-1499](https://github.com/NVIDIA/warp/issues/1499)).
+- Document safe `wp.Tape` integration in custom `torch.autograd.Function` implementations,
+  including zero-copy tensor aliasing, external gradient-buffer ownership, repeated backward calls, `gradcheck`,
+  and CUDA stream handling ([GH-1737](https://github.com/NVIDIA/warp/issues/1737)).
+- Correct the differentiability guide's workaround for dynamic loops in `@wp.func`. Return loop accumulators
+  to the calling kernel, and perform operations whose derivatives depend on their final values there,
+  to avoid incorrect gradients ([GH-1754](https://github.com/NVIDIA/warp/issues/1754)).
+- Document how `wp.config.launch_array_access_mode` controls cross-device Warp array validation for kernel launches.
+  Explain why the default `RELAXED` mode can allow inaccessible arrays to crash a kernel, what `CHECKED` can verify, and
+  which valid cross-device accesses `STRICT` rejects ([GH-1693](https://github.com/NVIDIA/warp/issues/1693)).
+- Document how Warp calculates the shared-memory requirement of tile kernels and how to restructure a kernel that
+  exceeds the device limit. Cover owning versus non-owning tiles, loop unrolling, backward generation, static per-block
+  reservations, and `block_dim`, and correct the
+  documented overflow error ([GH-1699](https://github.com/NVIDIA/warp/issues/1699)).
+- Add `warp/examples/core/example_fdtd_3d.py`, a 3-D finite-difference time-domain (FDTD) simulation of a Luneburg lens
+  that collimates waves from a point source ([GH-1772](https://github.com/NVIDIA/warp/issues/1772)).
+- Correct the API Capture (APIC) documentation: `wp.capture_if()` and `wp.capture_while()` require
+  Python callback bodies for CPU capture and CUDA capture with `apic=True`; `wp.Graph.get_param_ptr()` returns
+  a host address for CPU graphs; and `.wrp` files store an APIC operation stream rather than
+  a prebuilt CUDA graph ([GH-1639](https://github.com/NVIDIA/warp/issues/1639)).
+- Restore missing `Python` badges to built-in overloads that can be called from Python scope while leaving
+  kernel-only overloads unmarked ([GH-1825](https://github.com/NVIDIA/warp/issues/1825)).
+
+## [1.16.0] - 2026-08-03
+
+### Added
+
+- Add rebuildable NanoVDB volumes through `wp.Volume.allocate_by_tiles(..., rebuildable=True)`,
+  `wp.Volume.allocate_by_voxels(..., rebuildable=True)`, and `wp.Volume.rebuild()`. Support fixed capacities, optional
+  point masks, CPU execution, CUDA graph-capturable allocation and rebuilding, and in-place refreshes of rebuildable
+  `warp.fem.Nanogrid` topologies. See `warp/examples/fem/example_apic_fluid.py` for a captured grid-rebuild workflow
+  ([GH-1606](https://github.com/NVIDIA/warp/issues/1606)).
+- Add grouped construction and queries to `wp.HashGrid` for multi-environment workloads via the optional `groups`
+  argument to `wp.HashGrid.build()` and an optional trailing `group` argument to `wp.hash_grid_query()` that restricts
+  traversal to points sharing the requested group ID. Use `wp.HashGrid.reserve(num_points, with_groups=True)` to record
+  grouped rebuilds inside a CUDA graph without a warm-up build ([GH-1579](https://github.com/NVIDIA/warp/issues/1579)).
+- Add NumPy-style slicing for tiles, including strided and reversed slices (`t[2:6, :]`, `t[:, ::2]`, `t[::-1, :]`),
+  dimension-collapsing integer indices with negative-index support (`t[5, :]`, `t[-1, :]`), and slice assignment
+  (`t[0:4, :] = src`). Also add `wp.tile_slice_indexed()`, which gathers elements along a single axis
+  using a 1D integer index tile (`t[indices, :]`) ([GH-1176](https://github.com/NVIDIA/warp/issues/1176)).
+- Add CPU support for `wp.jax_kernel()` and `wp.jax_callable()` FFI calls, with automatic dispatch between CPU and CUDA
+  based on the device selected by JAX ([GH-1661](https://github.com/NVIDIA/warp/issues/1661)).
+- Add an optional `block_dim` argument to `wp.jax_kernel()` for selecting the CUDA thread-block size, including for
+  tile kernels and their generated adjoint launches ([GH-1436](https://github.com/NVIDIA/warp/issues/1436)).
+- **Experimental:** Add APIC support for capturing and replaying `wp.utils.array_sum()` and `wp.utils.array_inner()`
+  on CPU and CUDA ([GH-1663](https://github.com/NVIDIA/warp/issues/1663)).
+- **Experimental:** Add live CPU graph capture and replay for `wp.HashGrid.build()`, `wp.Bvh.refit()`, and
+  `wp.Bvh.rebuild()`. These captures are replay-only and cannot be saved with `wp.capture_save()`
+  ([GH-1664](https://github.com/NVIDIA/warp/issues/1664), [GH-1665](https://github.com/NVIDIA/warp/issues/1665)).
+- Add `wp.quat_twist_angle_signed()` to recover the signed rotational coordinate represented by a quaternion
+  ([GH-1631](https://github.com/NVIDIA/warp/issues/1631)).
+- Add `wp.cuda_profiler_start()`, `wp.cuda_profiler_stop()`, and the `wp.ScopedCudaProfiler` context manager to
+  control CUDA profiler data collection from Python (equivalent to `cuProfilerStart`/`cuProfilerStop`) for an
+  external profiler's capture range. They accept an optional `device` argument and act on that device's current CUDA
+  context ([GH-1596](https://github.com/NVIDIA/warp/issues/1596)).
+- Add gradient support for the out-of-place `wp.tile_lower_solve()` with vector and matrix right-hand sides,
+  enabling it in backward passes ([GH-1378](https://github.com/NVIDIA/warp/issues/1378)).
+- Add `wp.Stream.is_blocking` to report whether a CUDA stream is blocking
+  ([GH-1618](https://github.com/NVIDIA/warp/issues/1618)).
+
+### Deprecated
+
+- Defer removal of the deprecated `warp.jax_experimental` namespace, its legacy custom-call `jax_kernel()`,
+  and its graph-cache getter and setter APIs from Warp 1.16 to Warp 1.18, allowing more time to migrate.
+- Deprecate the per-environment sequence form of `warp.fem.Nanogrid.from_environment_voxels()` and
+  `warp.fem.AdaptiveNanogrid.from_environment_voxels()`; pass flat `points`, `cell_levels` where applicable,
+  `point_envs`, and `env_count` instead ([GH-1606](https://github.com/NVIDIA/warp/issues/1606)).
+- Deprecate `warp.sparse.BsrMatrix.copy_nnz_async()`; use `warp.sparse.BsrMatrix.notify_nnz_changed()` instead
+  ([GH-987](https://github.com/NVIDIA/warp/issues/987)).
+
+### Changed
+
+- Speed up repeated `@wp.kernel(module="unique")` declarations from factory functions by roughly 2× in microbenchmarks,
+  whether the resulting kernels are identical or specialized with different captured values
+  ([GH-1486](https://github.com/NVIDIA/warp/issues/1486)).
+- Render `repr()` of array type annotations in their subscript form (such as `wp.array4d[wp.uint32]`) so that it matches
+  the written annotation and can be evaluated back to the same annotation, instead of the previous
+  `wp.array(dtype=..., ndim=...)` form. Warp array return types now read more naturally in Sphinx-generated API
+  documentation ([GH-1628](https://github.com/NVIDIA/warp/issues/1628)).
+- Improve diagnostics for array copy, texture copy, array reshape/view, and unsupported DLPack source-device errors by
+  reporting the relevant shapes, data types, channels, or device identifiers
+  ([GH-1644](https://github.com/NVIDIA/warp/issues/1644)).
+
+### Fixed
+
+- Fix unbounded memory growth when repeatedly launching identical kernels created by a factory or closure
+  ([GH-1589](https://github.com/NVIDIA/warp/issues/1589)).
+- Fix an illegal memory access on CUDA when a variable is reassigned inside nested `if`/`else` branches
+  ([GH-1574](https://github.com/NVIDIA/warp/issues/1574)).
+- Fix kernel launches using stale deterministic launch metadata after switching a module's `deterministic` mode,
+  which could execute consumed-return counter atomics twice or crash the process
+  ([GH-1637](https://github.com/NVIDIA/warp/issues/1637)).
+- Fix incorrect code generation when an index from an unrolled `range()` loop is reused by a later `while` or dynamic
+  `for` loop. Assignments to the reused index now carry across iterations, including when it is first re-declared
+  (e.g., `i = int(0)`), instead of being silently discarded ([GH-1534](https://github.com/NVIDIA/warp/issues/1534)).
+- Fix Python-scope calls to user-defined `@wp.func` functions when passing a Warp function to a `wp.Function` parameter
+  ([GH-1648](https://github.com/NVIDIA/warp/issues/1648)).
+- Fix tuple-unpacking assignments to `wp.ref[T]` parameters (e.g., `x, y = a, b`) so they update the caller's storage
+  instead of raising a type error ([GH-1581](https://github.com/NVIDIA/warp/issues/1581)).
+- Fix `warp.optim.Adam.set_params()` and `warp.optim.SGD.set_params()` to preserve compatible optimizer state.
+  This covers repeated calls with `wp.float16` Adam parameters and parameters moved between devices
+  ([GH-1593](https://github.com/NVIDIA/warp/issues/1593), [GH-1615](https://github.com/NVIDIA/warp/issues/1615)).
+- Fix gradients being silently zeroed when the same `@wp.func` helper is used by both backward-enabled and
+  backward-disabled kernels in a module.
+- Fix potential illegal GPU memory accesses when a `@wp.func_grad` or `@wp.func_replay` function needs more shared
+  memory than the corresponding forward function ([GH-1646](https://github.com/NVIDIA/warp/issues/1646)).
+- Fix batched iterative linear solvers to ignore inactive trailing degrees of freedom beyond the final batch offset
+  ([GH-1608](https://github.com/NVIDIA/warp/issues/1608)).
+- Fix Jacobian and gradient-check plotting for Python functions and Warp kernels in `wp.autograd.jacobian()`,
+  `wp.autograd.jacobian_fd()`, and `wp.autograd.gradcheck()` ([GH-1672](https://github.com/NVIDIA/warp/issues/1672)).
+- Fix `wp.tile_matmul()` returning incorrect results on the MathDx path when an operand is a strided tile, such as a
+  `wp.tile_view()` into a wider tile ([GH-1667](https://github.com/NVIDIA/warp/issues/1667)).
+- Fix `wp.tile_load_indexed()` reading out of bounds for negative gather indices. Negative indices now yield zero,
+  matching indices past the end of the axis and allowing `-1` to serve as a padding sentinel
+  ([GH-1653](https://github.com/NVIDIA/warp/issues/1653)).
+- Fix `wp.func_grad()` raising `KeyError: 'output_arch'` when defining a custom gradient for a function that uses
+  `wp.tile_matmul()` or other MathDx tile built-ins ([GH-1668](https://github.com/NVIDIA/warp/issues/1668)).
+- Fix heap corruption during APIC graph capture of `wp.sparse.bsr_set_transpose()` with `topology="padded"` when the
+  destination has insufficient row capacity ([GH-1630](https://github.com/NVIDIA/warp/issues/1630)).
+- Fix CUDA graph capture of `warp.fem.make_space_partition()` for multi-environment spaces with
+  `environment_first=True` and `max_node_count` set ([GH-1607](https://github.com/NVIDIA/warp/issues/1607)).
+- Fix premature deallocation of arrays from a parent CUDA graph when their final reference is dropped while recording
+  a `wp.capture_if()` or `wp.capture_while()` body graph ([GH-1641](https://github.com/NVIDIA/warp/issues/1641)).
+- Fix APIC graph loading to reject malformed `.wrp` files containing duplicate memory records or truncated initial data,
+  preventing out-of-bounds memory access.
+- Fix `wp.bvh_get_group_root()` and `wp.mesh_get_group_root()` returning roots that let queries traverse later groups
+  when group IDs are sparse ([GH-1612](https://github.com/NVIDIA/warp/issues/1612)).
+- Fix compilation failures in `warp.fem.lookup()` with `wp.float64` geometries
+  ([GH-1660](https://github.com/NVIDIA/warp/issues/1660)).
+- Fix `make_node_coords_in_element()` returning `None` in Warp FEM kernels for `SquareNedelecFirstKindShapeFunctions`
+  and `SquareRaviartThomasShapeFunctions` ([GH-1685](https://github.com/NVIDIA/warp/issues/1685)).
+- Fix `wp.from_dlpack()` rejecting standards-conformant 8-bit Boolean tensors
+  ([GH-1619](https://github.com/NVIDIA/warp/issues/1619)).
+- Fix `wp.quat_twist_angle()` losing precision for small `wp.float32` rotations
+  ([GH-1631](https://github.com/NVIDIA/warp/issues/1631)).
+- Fix CPU kernel compilation failures for exponentiation with power-of-two bases on some Windows on Arm systems
+  ([GH-1562](https://github.com/NVIDIA/warp/issues/1562)).
+- Fix kernel compilation failures on Windows systems without long-path support when using a custom cache location set
+  through `wp.config.kernel_cache_dir` or `WARP_CACHE_PATH`.
+- Fix CPU precompiled-header handling for LLVM 22 and modules with different `cpu_compiler_flags`.
+  Compatible headers are reused, while differing flags receive separate headers,
+  avoiding repeated full compilation and Clang target-feature errors
+  ([GH-1658](https://github.com/NVIDIA/warp/issues/1658), [GH-1649](https://github.com/NVIDIA/warp/issues/1649)).
+
+### Documentation
+
+- Reorganize the documentation around the Programming Model and Execution and Performance guides, place the Language
+  Reference and API Reference alongside the User Guide, and consolidate memory-management guidance.
+- Document how to use non-blocking CUDA streams, including those borrowed from PyTorch
+  ([GH-1618](https://github.com/NVIDIA/warp/issues/1618)).
+- Add distributed Jacobi solver examples using NCCL (`nccl4py`) and NVSHMEM (`nvshmem4py`)
+  for nearest-neighbor halo exchange
+  ([GH-1576](https://github.com/NVIDIA/warp/issues/1576), [GH-1582](https://github.com/NVIDIA/warp/issues/1582)).
+- Clarify that `wp.tile_matmul()` supports only real floating-point tiles: remove the unsupported `vec2h`, `vec2f`, and
+  `vec2d` complex types from its documentation, and report a targeted error when complex tiles are passed
+  ([GH-1682](https://github.com/NVIDIA/warp/issues/1682)).
+
+## [1.15.0] - 2026-07-07
+
+### Added
+
+- Add a deterministic execution mode for supported atomic operations, removing the run-to-run variation that
+  floating-point atomics normally introduce. Enable it process-wide with `wp.config.deterministic` or per module
+  via the `"deterministic"` module option, using `wp.DeterministicMode.RUN_TO_RUN` for bit-exact repeatable
+  results on the same GPU, or `wp.DeterministicMode.GPU_TO_GPU` to also target consistency across GPU
+  architectures. It covers the two common atomic patterns: accumulating values into array elements, and using
+  an atomic counter to hand out unique slot indices. It extends to the reductions Warp generates for backward
+  passes and custom adjoints. Counters used for slot allocation cannot be replayed automatically during a
+  backward pass, so Warp raises an error rather than risk misplaced gradients; supply a custom replay function
+  to differentiate through them. Raise `wp.config.deterministic_max_records` if a kernel needs a larger
+  per-thread record limit ([GH-1443](https://github.com/NVIDIA/warp/issues/1443)).
+- Add `wp.ref[T]` parameter annotation for `@wp.func` and `@wp.func_native`, enabling explicit pass-by-reference
+  semantics for scalar, vector, matrix, quaternion, and struct types. Mutations to a `wp.ref[T]` parameter are visible
+  in the caller's storage without a return value. Add `wp.address_of(expr) -> wp.uint64` for obtaining a raw pointer
+  to an addressable expression for use with native snippets, and allow `@wp.func_native` ref-parameter functions to
+  provide manual adjoints with `adj_snippet` ([GH-1277](https://github.com/NVIDIA/warp/issues/1277)).
+- Add support for `wp.Function`-typed parameters in user-defined `@wp.func` functions, allowing user-defined Warp
+  functions and simple built-in Warp functions such as `wp.sin()` and `wp.min()` to be used as function targets from
+  kernels or other functions, including through defaults ([GH-1424](https://github.com/NVIDIA/warp/issues/1424)).
+- **Experimental:** Add mipmap (texture level-of-detail) support to `wp.Texture1D`, `wp.Texture2D`, and `wp.Texture3D`
+  via the new `num_mip_levels` and `mip_filter_mode` constructor parameters, and allow `wp.texture_sample()` to accept
+  an optional trailing `lod` argument for controlling sampled detail level
+  ([GH-1409](https://github.com/NVIDIA/warp/issues/1409)).
+- Add `wp.CudaManagedAllocator()` for explicit CUDA managed-memory arrays. CPU kernels can use managed arrays as an
+  opt-in path to read and write CUDA managed-memory allocations through Unified Memory on systems where CUDA reports
+  compatible managed-memory access, while Warp CUDA arrays backed by non-managed memory still need explicit CPU
+  copies. Use `wp.array.memory_kind` to inspect whether an array is backed by host, pinned host, CUDA device, CUDA
+  mempool, or CUDA managed memory. Preallocated managed arrays work in CUDA graph captures, but capture-time
+  allocations remain unsupported ([GH-1523](https://github.com/NVIDIA/warp/issues/1523)).
+- **Experimental:** Extend APIC capture and replay on CPU and CUDA so saved graphs replay contiguous array fills,
+  scanning, sorting, run-length encoding, supported sparse BSR operations, and reusable launches created with
+  `wp.launch(..., record_cmd=True)` from current inputs. Also replay CUDA conditional graph nodes created with
+  `wp.capture_if()` and `wp.capture_while()`, as well as adjoint launches
+  ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- Add `@wp.kernel(grid_stride=False)` (and the `"default_grid_stride"` module option / `wp.config.default_grid_stride`
+  for a whole module or process) to compile a kernel without the grid-stride loop. Removing the loop lowers per-thread
+  overhead and register pressure, which can speed up launch-bound kernels; it still handles launches of any size, but
+  the block count can no longer be capped, so launching such a kernel with `max_blocks > 0` raises an error pointing
+  back at the grid-stride default. The default launch is unchanged
+  ([GH-1270](https://github.com/NVIDIA/warp/issues/1270)).
+- Expand Warp struct support across tile operations: allow `wp.tile_map()` to process struct elements and broadcast
+  non-tile struct arguments; support field-wise addition, subtraction, reductions, atomic addition, and gradients
+  through compatible data-movement and additive operations; and allow `wp.tile_sort()` to reorder structs as value
+  payloads in the forward pass ([GH-573](https://github.com/NVIDIA/warp/issues/573)).
+- **Experimental:** Add `constructor="cubql"` support to `wp.Bvh` and allow `wp.Mesh(..., bvh_constructor="cubql")` to
+  use AABB, point, furthest-point, and ray queries when Warp is built with cuBQL. Grouped BVHs/meshes and mesh
+  winding-number queries remain unsupported ([GH-1467](https://github.com/NVIDIA/warp/issues/1467)).
+- Add row-capacity support to `warp.sparse.BsrMatrix`, including padded topology policies for topology-changing
+  operations, `warp.sparse.bsr_zeros(row_capacity=...)` for reserving capacity, `warp.sparse.bsr_compress()` for
+  in-place compaction, and `warp.sparse.BSR_STATUS_SUCCESS` and `warp.sparse.BSR_STATUS_ROW_CAPACITY_EXCEEDED`
+  for status checks ([GH-1537](https://github.com/NVIDIA/warp/issues/1537)).
+- Allow `warp.fem.integrate()` and `warp.fem.interpolate()` to assemble matrices in place via
+  `warp.sparse.bsr_compress()` by passing `bsr_options={"construction": "row_compress"}`, reducing peak
+  memory usage ([GH-1537](https://github.com/NVIDIA/warp/issues/1537)).
+- Extend `wp.utils.array_scan()` to 64-bit scalar and vector types, and extend `wp.utils.radix_sort_pairs()` to 32- and
+  64-bit signed, unsigned, and floating-point keys with 4- or 8-byte values
+  ([GH-1538](https://github.com/NVIDIA/warp/issues/1538)).
+- Add a `cluster_dim` option to `@wp.kernel` and a `wp.get_cuda_max_cluster_dim()` query helper for using CUDA Thread
+  Block Clusters from `@wp.func_native` code ([GH-1401](https://github.com/NVIDIA/warp/issues/1401)).
+- Add optional CMake source builds for `warp` and `warp-clang` with Packman-managed dependencies and support for
+  parallel and incremental developer builds ([GH-1495](https://github.com/NVIDIA/warp/issues/1495)).
+- Add optional AddressSanitizer support for JIT-compiled CPU kernels when Warp is built from source with
+  `build_lib.py --sanitize=address`. These builds report out-of-bounds `wp.array` accesses as `heap-buffer-overflow`.
+  Standard `pip` installations are unaffected ([GH-1387](https://github.com/NVIDIA/warp/issues/1387)).
+
+### Removed
+
+- Remove deprecated arguments from `warp.fem` APIs: `quadrature` and `domain` from `warp.fem.interpolate()`, and
+  `space` from `warp.fem.make_space_partition()` and `warp.fem.make_space_restriction()`. Pass a
+  `warp.fem.Quadrature` or `warp.fem.GeometryDomain` to `at` when interpolating. Use `space_topology` for partitions
+  and either `space_topology` or `space_partition` for restrictions.
+- Remove the deprecated, non-functional `warp.render.UsdRenderer.update_body_transforms()` method. Use supported
+  `warp.render.UsdRenderer` shape-rendering methods to author time-varying USD transforms instead.
+
+### Deprecated
+
+- Deprecate the unused `max_verts`, `max_tris`, and `device` arguments to `wp.MarchingCubes`, the `max_verts` and
+  `max_tris` arguments to `wp.MarchingCubes.resize()`, and the corresponding compatibility attributes, `id`, and
+  `runtime`. They are scheduled for removal in Warp 1.19. Output arrays are dynamically sized, and extraction uses the
+  input field's device. `id` and `runtime` have no replacement ([GH-1594](https://github.com/NVIDIA/warp/issues/1594)).
+- Deprecate `masked=True` arguments in `warp.sparse` topology-changing operations; use `topology="masked"` instead
+  ([GH-1537](https://github.com/NVIDIA/warp/issues/1537)).
+
+### Changed
+
+- **Breaking:** Validate the `src_offset`, `dest_offset`, and `count` arguments to `wp.copy()`, raising a clear error
+  for non-integer values, negative offsets, and a negative `count` (previously a negative `count` silently copied the
+  entire array). Also reject copies between contiguous arrays whose element sizes differ, matching the existing
+  behavior for non-contiguous arrays ([GH-1584](https://github.com/NVIDIA/warp/issues/1584)).
+- **Breaking:** Raise an error during `wp.init()` when the Warp Python package version does not match the loaded native
+  libraries (`warp.dll`, `warp-clang.dll`, and platform equivalents), instead of warning and continuing. Treat missing
+  or unreadable native version symbols the same way ([GH-1508](https://github.com/NVIDIA/warp/issues/1508)).
+- Restore support for building Warp from source without `Python.h` and compatibility with free-threaded Python by
+  reverting the `wp.float16` fast-call optimization added in Warp 1.14. Python-scope `wp.float16` conversions again use
+  the `ctypes` path, with higher per-call overhead ([GH-1339](https://github.com/NVIDIA/warp/issues/1339)).
+- Speed up Python-side kernel declaration, especially for `@wp.kernel(module="unique")` kernels created by factory
+  functions, by avoiding repeated source inspection and redundant scans of each kernel's Python code. This reduces
+  import time without changing native compilation or execution ([GH-1486](https://github.com/NVIDIA/warp/issues/1486)).
+- Improve `wp.mesh_query_ray()` and `wp.mesh_query_ray_anyhit()` BVH traversal performance by visiting the nearer child
+  first at each inner node, enabling earlier tightening of the closest-hit bound and more aggressive subtree pruning;
+  reusing loaded node payloads across traversal stack operations; and using a faster AABB intersection path for
+  non-parallel rays. These traversal changes use additional per-thread temporary storage
+  ([GH-1529](https://github.com/NVIDIA/warp/issues/1529)).
+- Improve debug-mode diagnostics for out-of-bounds shared and register tile indexing with coordinate-specific messages
+  and CUDA device-side assertions ([GH-1483](https://github.com/NVIDIA/warp/issues/1483)).
+
+### Fixed
+
+- Fix `wp.init()` segfault while loading `warp-clang.so` on some Linux systems caused by aggressive symbol stripping
+  ([GH-1554](https://github.com/NVIDIA/warp/issues/1554)).
+- Fix CUDA kernel launch failures to raise a Python `RuntimeError` instead of only logging native CUDA stderr and
+  continuing with stale outputs or gradients ([GH-1535](https://github.com/NVIDIA/warp/issues/1535)).
+- Fix unary minus being silently dropped from referenced 64-bit scalar constants, such as values declared with
+  `wp.constant(wp.float64(...))`, when the constant is the leading operand of a multiplication or division expression
+  ([GH-1540](https://github.com/NVIDIA/warp/issues/1540)).
+- Fix the gradient of `wp.copy()` when `src_offset` and `dest_offset` differ
+  ([GH-1533](https://github.com/NVIDIA/warp/issues/1533)).
+- Fix `wp.copy()` to honor `src_offset`, `dest_offset`, and `count` for one-dimensional non-contiguous arrays such as
+  strided slices ([GH-1533](https://github.com/NVIDIA/warp/issues/1533)).
+- Fix replacing a `@wp.struct` plain-array field with `None` or a non-gradient array to release stale gradient
+  references ([GH-1520](https://github.com/NVIDIA/warp/issues/1520)).
+- Fix `wp.mesh_query_ray()` and related functions silently missing intersections for axis-aligned rays whose origin lies
+  on a BVH node's AABB slab boundary. Handle parallel slabs explicitly instead of relying on fixed epsilon inflation
+  that can round away at larger `wp.float32` coordinate scales ([GH-1530](https://github.com/NVIDIA/warp/issues/1530)).
+- Fix CUDA BVH refit out-of-bounds access for single-node and packed-root trees
+  ([GH-860](https://github.com/NVIDIA/warp/issues/860), [GH-1506](https://github.com/NVIDIA/warp/issues/1506)).
+- Fix intermittent failures when loading modules in parallel with `wp.force_load(max_workers > 1)` that could cause
+  modules sharing a `@wp.func` to fail to compile or raise a `KeyError` during module loading
+  ([GH-1474](https://github.com/NVIDIA/warp/issues/1474), [GH-1532](https://github.com/NVIDIA/warp/issues/1532)).
+- Fix colliding LTO cache entries and stale FFT metadata by using longer cache keys and rebuilding invalid metadata
+  ([GH-1511](https://github.com/NVIDIA/warp/issues/1511)).
+- Fix CPU APIC capture and replay for `module="unique"` kernels, capture-time allocations, untracked host buffers,
+  coexisting CPU and CUDA captures, and `warp.fem` partition node counts. Report capture state correctly and reject
+  operations that cannot replay safely
+  ([GH-1431](https://github.com/NVIDIA/warp/issues/1431),
+  [GH-1559](https://github.com/NVIDIA/warp/issues/1559), [GH-1407](https://github.com/NVIDIA/warp/issues/1407)).
+- Fix `wp.load_module()` and `wp.ScopedCapture(force_module_load=True)` after CPU launches so CUDA graph capture
+  precompiles the correct CUDA kernel variant. On CUDA drivers older than 12.3 this previously raised
+  `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`; on newer drivers it silently recompiled inside the capture window
+  ([GH-564](https://github.com/NVIDIA/warp/issues/564)).
+- Fix CUDA graph capture for contiguous `wp.array.fill_()` calls on `wp.bool`, `wp.int8`, and `wp.uint8` arrays
+  ([GH-1525](https://github.com/NVIDIA/warp/issues/1525)).
+- Fix binding a Warp function to a kernel-local variable, so patterns like `f = my_func`, `f = module.my_func`,
+  assigning a `wp.static(...)` function result to `f`, and `wp.grad(f)` where `f` is such a local now compile and call
+  correctly instead of failing during code generation. Rebinding a function-valued local to a different function or
+  to a non-function value raises a clear error ([GH-1423](https://github.com/NVIDIA/warp/issues/1423)).
+- Fix `wp.tile_dot()` compilation failure for scalar `wp.float64` and `wp.float16` tiles, which previously narrowed
+  the result to `float` and mismatched the inferred result type ([GH-1563](https://github.com/NVIDIA/warp/issues/1563)).
+- Fix parameterized `@wp.func(...)` decorators, such as `@wp.func(module="unique")`, in directly executed scripts to
+  register successfully instead of raising `AttributeError` during decoration
+  ([GH-1544](https://github.com/NVIDIA/warp/issues/1544)).
+- Fix CUDA graph capture on CUDA contexts not previously seen by Warp by initializing memory-pool state before capture
+  begins ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- Fix `@wp.overload` kernel stubs defined in nested scopes to register correctly instead of raising
+  `IndentationError` ([GH-1557](https://github.com/NVIDIA/warp/issues/1557)).
+- Fix `wp.array[...]`-style subscript annotations to allow for PEP 604 unions (for example, `wp.array[float] | float`)
+  on Python methods ([GH-1548](https://github.com/NVIDIA/warp/issues/1548)).
+- Fix Clang CUDA compilation failures so they report immediately instead of surfacing later as downstream CUDA module
+  load errors ([GH-1325](https://github.com/NVIDIA/warp/issues/1325)).
+- Fix `wp.Tape.record_scope_end()` to raise a clear error for unmatched scope ends and preserve nested non-empty tape
+  visualization scopes ([GH-1515](https://github.com/NVIDIA/warp/issues/1515)).
+- Fix kernels with non-`None` return annotations to raise a clear error instead of silently ignoring the annotation.
+  Write results to output arguments and omit the return annotation or use `-> None`
+  ([GH-1471](https://github.com/NVIDIA/warp/issues/1471)).
+- Fix rebinding a kernel-local variable that holds `wp.grad()` to a non-gradient value to raise a clear code-generation
+  error instead of an internal `AttributeError` ([GH-1487](https://github.com/NVIDIA/warp/issues/1487)).
+
+### Documentation
+
+- Document the tiled kernel patterns that diverge between CPU and CUDA under the forced CPU `block_dim=1`, along with
+  portable workarounds ([GH-1580](https://github.com/NVIDIA/warp/issues/1580)).
+
+## [1.14.0] - 2026-06-01
+
+### Added
+
+- Extend APIC graph capture on CPU to replay backward (adjoint) kernel launches, tile-using kernels, kernels with
+  parameters of any size, and `@wp.struct` / `wp.indexedarray` launch arguments that reference Warp array data,
+  gradient buffers, or `wp.indexedarray` indices
+  ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- Add multi-environment support to `warp.fem`: colocated `Grid2D`/`Grid3D` and packed `Nanogrid`/`AdaptiveNanogrid`
+  geometries with environment-aware lookup and `PicQuadrature` environment indices, per-cell environment metadata for
+  unstructured FEM meshes with grouped-BVH lookup and nonconforming field evaluation, and environment-first space
+  partitions for batched solves plus a multi-environment APIC fluid example
+  ([GH-1407](https://github.com/NVIDIA/warp/issues/1407)).
+- Add pluggable logging infrastructure: pass a custom logger object with `debug()`, `info()`, `warning()`, and
+  `error()` methods to `wp.set_logger()`, or scope it temporarily with `wp.ScopedLogger`. `wp.Logger` documents
+  this interface. `wp.config.log_level` controls the global verbosity threshold and can be scoped temporarily with
+  `wp.ScopedLogLevel`. All Python-side diagnostic output emitted by Warp now routes through the configured logger
+  ([GH-1315](https://github.com/NVIDIA/warp/issues/1315), [GH-1434](https://github.com/NVIDIA/warp/issues/1434)).
+- Add reusable solver functors for `warp.optim.linear.cg()`, `warp.optim.linear.cr()`,
+  `warp.optim.linear.bicgstab()`, and `warp.optim.linear.gmres()`. Passing `run=False` returns a state object
+  that preallocates solver temporary buffers and can be reused for repeated solves with matching shape, dtype, and
+  device, plus the same batch layout for batched operators. This avoids per-call allocation overhead and enables use
+  in CUDA subgraphs ([GH-1391](https://github.com/NVIDIA/warp/issues/1391)).
+- Add batched-input support to `warp.optim.linear` solvers: a `warp.optim.linear.LinearOperator` built with
+  `batch_offsets` partitions the DOF vector into independent subproblems that are all solved in a single launch
+  sequence, with per-batch convergence checks ([GH-1391](https://github.com/NVIDIA/warp/issues/1391)).
+- Add `wp.tile_fft()` and `wp.tile_ifft()` (and their adjoints) on CPU and on GPU builds without libmathdx.
+  CPU supports any power-of-two FFT length and non-power-of-two FFT lengths up to 4096 elements. The GPU fallback
+  used without libmathdx, or selected with `wp.config.enable_mathdx_fft=False` or module option
+  `"enable_mathdx_fft": False`, requires a power-of-two FFT length divisible by `block_dim`, trading runtime
+  performance for faster kernel compile times ([GH-1396](https://github.com/NVIDIA/warp/issues/1396)).
+- Add cooperative GPU scalar fallbacks for `wp.tile_cholesky()`, `wp.tile_cholesky_solve()`,
+  `wp.tile_lower_solve()`, and `wp.tile_upper_solve()` (and their in-place variants) and for the
+  `wp.tile_cholesky()` adjoint on GPU builds without libmathdx. The fallback can also be selected on GPU builds
+  with libmathdx through `wp.config.enable_mathdx_solver=False` or module option `"enable_mathdx_solver": False`
+  ([GH-1402](https://github.com/NVIDIA/warp/issues/1402)).
+- Add the `wp.copysign()` built-in function to copy one floating-point value's sign onto another value's magnitude,
+  matching C `copysign()` ([GH-1444](https://github.com/NVIDIA/warp/issues/1444)).
+- Add `wp.tile_empty()` to allocate an uninitialized register or shared-memory tile when every element will be
+  overwritten before it is read, avoiding the initialization cost of `wp.tile_zeros()`. Use `wp.tile_zeros()` for
+  accumulators or partial writes ([GH-1312](https://github.com/NVIDIA/warp/issues/1312)).
+- Add adjoints for `wp.curlnoise()` in 2D, 3D, and 4D, so gradients now propagate through curl-noise force fields.
+  Previously, differentiating through `wp.curlnoise()` produced zero gradients
+  ([GH-1012](https://github.com/NVIDIA/warp/issues/1012)).
+- Expose CUDA graph capture modes via `wp.CaptureMode`, `wp.ScopedCapture`, and `wp.capture_begin()`. Users can
+  select `wp.CaptureMode.GLOBAL`, `wp.CaptureMode.THREAD_LOCAL` (the default), or `wp.CaptureMode.RELAXED` to
+  control how CUDA handles capture-unsafe runtime calls during graph capture
+  ([GH-1410](https://github.com/NVIDIA/warp/issues/1410)).
+- Add `build_lib.py --use-dynamic-cuda` for source builds that should link Warp's native library against shared
+  CUDA libraries instead of embedding them statically. The corresponding shared libraries must be present at runtime
+  ([GH-1334](https://github.com/NVIDIA/warp/issues/1334)).
+- Add `build_lib.py --sanitize=<name>` for source builds of Warp's native libraries, enabling AddressSanitizer
+  instrumentation for `warp.dll` and `warp-clang.dll`
+  ([GH-1387](https://github.com/NVIDIA/warp/issues/1387)).
+
+### Deprecated
+
+- Deprecate `warp.jax_experimental` in favor of top-level `warp` JAX APIs. Migrate
+  `warp.jax_experimental.jax_kernel()` to `warp.jax_kernel()`, `warp.jax_experimental.jax_callable()` to
+  `warp.jax_callable()`, and `warp.jax_experimental.GraphMode` to `warp.JaxCallableGraphMode`.
+  `warp.jax_experimental.ModulePreloadMode` is also available as `warp.JaxModulePreloadMode`. The
+  `get_jax_callable_default_graph_cache_max()` and `set_jax_callable_default_graph_cache_max()` helpers are also
+  deprecated. Pass `graph_cache_max` to `warp.jax_callable()` or update the returned callable's `graph_cache_max`
+  attribute instead. `warp.jax_callable()` defaults to `graph_cache_max=32`. Pass `graph_cache_max=None` for an
+  unlimited graph cache. `warp.jax_experimental` will be removed in Warp 1.16
+  ([GH-1370](https://github.com/NVIDIA/warp/issues/1370)).
+- Deprecate `warp.config.verbose` and `warp.config.quiet` in favor of `warp.config.log_level`. Reading or setting
+  either flag continues to work during the deprecation window and now emits a one-time `DeprecationWarning`.
+  `warp.config.verbose_warnings` is unaffected and continues to control whether warning output includes the source
+  location ([GH-1315](https://github.com/NVIDIA/warp/issues/1315)).
+- Deprecate `wp.HashGridQueryH` and `wp.HashGridQueryD`. Use `wp.HashGridQuery` instead. The legacy runtime aliases
+  remain available during the deprecation period for compatibility, but public stubs now expose only
+  `wp.HashGridQuery`, so type annotations should migrate ([GH-1452](https://github.com/NVIDIA/warp/issues/1452)).
+- Defer until Warp 1.15 the scheduled removal of the deprecated `quadrature` and `domain` arguments of
+  `warp.fem.interpolate()`, and the `space` argument of `warp.fem.make_space_restriction()` and
+  `warp.fem.make_space_partition()`.
+
+### Changed
+
+- **Breaking:** Update APIC graph serialization to support `wp.indexedarray` launch parameters and `@wp.struct`
+  arguments containing arrays in `.wrp` files. Files saved by Warp 1.13 use the old `.wrp` format and must be
+  recaptured. Native APIC C/C++ API users must update code that includes `apic.h` to declare APIC handles as
+  explicit C/C++ pointers, such as `APICState*` and `APICGraph*`, instead of the old pointer-typedef style
+  ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- **Breaking:** Change `warp.fem.PicQuadrature()` and `warp.fem.make_space_partition()` positional signatures for
+  multi-environment FEM support. `PicQuadrature()` now accepts `env_indices` before `requires_grad`, while
+  `make_space_partition()` accepts `environment_first` before the now-keyword-only `device` and `temporary_store`.
+  Pass existing `requires_grad`, `device`, and `temporary_store` arguments by keyword to preserve behavior
+  ([GH-1407](https://github.com/NVIDIA/warp/issues/1407)).
+- Allow GPU kernels to receive CPU arrays on systems where the GPU reports direct pageable CPU memory access, enabling
+  zero-copy launches on systems with Heterogeneous Memory Management (HMM) or Address Translation Services (ATS). Add
+  `wp.can_access()` and `wp.config.LaunchArrayAccessMode`. Use `wp.config.launch_array_access_mode` to select relaxed,
+  strict, or checked pre-launch diagnostics on mixed-device array launches
+  ([GH-1461](https://github.com/NVIDIA/warp/issues/1461)).
+- Reduce `wp.tid()` overhead in generated kernels by specializing launch-bounds handling for the number of indices a
+  kernel reads. Existing behavior is preserved when a kernel unpacks fewer `wp.tid()` indices than the launch provides:
+  extra trailing launch dimensions still run additional threads that reuse the same returned leading indices
+  ([GH-1270](https://github.com/NVIDIA/warp/issues/1270)).
+- **Breaking for type checkers:** Consolidate the documented `wp.HashGrid` query API around `wp.HashGridQuery`.
+  Query objects returned by `wp.hash_grid_query()` now appear as `wp.HashGridQuery` in generated docs and stubs
+  regardless of the grid coordinate precision. Public stubs no longer expose `wp.HashGridQueryH` or
+  `wp.HashGridQueryD`, though the runtime aliases remain available during the deprecation period
+  ([GH-1452](https://github.com/NVIDIA/warp/issues/1452)).
+- Allow `launch_dims` to be specified when `enable_backward=True` in `warp.jax_kernel()` and
+  `warp.jax_experimental.jax_kernel()` ([GH-1380](https://github.com/NVIDIA/warp/issues/1380)).
+- Improve the non-libmathdx GPU fallback for differentiated `wp.tile_cholesky()` by replacing the previous thread-0
+  scalar adjoint with a cooperative shared-memory implementation that mirrors the libmathdx adjoint and distributes work
+  across the CUDA block. This keeps the fallback usable when libmathdx is unavailable or `enable_mathdx_solver=False`.
+  The tradeoff is two per-block scratch tiles (`__shared__ T[n*n]`, 16 KiB at `n=32` and 64 KiB at `n=64` for
+  `float64`), so large differentiated Cholesky tiles can exceed shared-memory limits that previously allowed them
+  ([GH-1402](https://github.com/NVIDIA/warp/issues/1402)).
+- Reduce Python-scope overhead for converting `wp.float16` values to and from Python `float` by using a native
+  Python C API fast-call path. This optimization is why Linux source builds now require `Python.h`
+  ([GH-1339](https://github.com/NVIDIA/warp/issues/1339)).
+- Clean up autodiff handling for built-ins that intentionally do not support gradients: remove native no-op placeholder
+  adjoints and prevent `wp.map()` / `wp.tile_map()` from attempting backward passes for non-differentiable mapped
+  callables such as integer bitwise operations ([GH-988](https://github.com/NVIDIA/warp/issues/988)).
+- **Breaking:** Require Python development headers (`Python.h`) when building from source on Linux. Warp now compiles
+  a native fast-call extension that uses the Python C API for `wp.float16` conversions, bypassing the previous
+  `ctypes` path to lower per-conversion overhead. On Linux, install the distribution package that provides
+  `Python.h` (for example, `python3-dev` / `libpython3-dev` on Debian or Ubuntu) if the build reports missing
+  headers ([GH-1339](https://github.com/NVIDIA/warp/issues/1339)).
+- Change Linux/macOS debug builds from source to use `-Og -g` for the native library instead of
+  `-O0 -g -fkeep-inline-functions`. This enables debug-friendly optimizations, restores `-Wuninitialized` dataflow
+  analysis, and avoids leaking unused inline function bodies from `<Python.h>`
+  ([GH-1414](https://github.com/NVIDIA/warp/issues/1414)).
+
+### Fixed
+
+- Fix `wp.min()`, `wp.max()`, `wp.clamp()`, `wp.atomic_min()`, and `wp.atomic_max()` on float arguments to use
+  NaN-as-missing semantics matching C `fmin()` / `fmax()`: the operation returns the non-NaN operand when exactly one
+  is NaN, and NaN only when both are NaN. Vector reductions and `wp.argmin()` / `wp.argmax()` skip NaN slots. Adjoint
+  and atomic variants are updated consistently to route gradients to whichever operand the forward picked. Integer
+  overloads are unchanged ([GH-1376](https://github.com/NVIDIA/warp/issues/1376)).
+- Fix APIC backward replay for loaded `.wrp` graphs so output gradients and retained gradients are preserved and used
+  the same way as in a normal `wp.Tape().backward()` call. Older `.wrp` format versions now fail fast instead of
+  being misparsed ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- Fix assorted APIC capture issues involving zero-length arrays, `wp_apic_end_recording(NULL)`, asynchronous parameter
+  updates, and vector and small scalar parameters. `wp.utils.array_scan()` during CPU APIC capture now raises
+  `NotImplementedError` instead of producing stale replay output
+  ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- Fix Warp warning emission overriding user warning filters, making deprecation warnings unsuppressible via
+  `warnings.filterwarnings()` ([GH-1315](https://github.com/NVIDIA/warp/issues/1315)).
+- Fix adjoint computation for in-place composite-component writes on arrays. Writes of the form `arr[i].y = rhs`,
+  `arr[i].field = rhs` (scalar struct field), `m[i][r, c] = rhs`, `t[i].p = v`, `t[i].q = q`, and
+  `state[i].position = rhs` (composite-valued struct field) now correctly propagate gradients instead of silently
+  dropping them ([GH-583](https://github.com/NVIDIA/warp/issues/583),
+  [GH-248](https://github.com/NVIDIA/warp/issues/248), [GH-1174](https://github.com/NVIDIA/warp/issues/1174)).
+- Fix autodiff metadata so unsupported gradients no longer appear to be implemented for APIs such as vector
+  `wp.sign()`, `wp.volume_sample_i()`, and the 4-D `wp.atomic_exch()` overload
+  ([GH-1466](https://github.com/NVIDIA/warp/issues/1466)).
+- Stabilize `wp.closest_point_edge_edge()` at near-parallel configurations. Forward output is unchanged for
+  well-conditioned inputs and is now well-defined (and gradient-stable) for near-parallel edges, where it could
+  previously return geometrically valid but unstable barycentric weights
+  ([GH-1437](https://github.com/NVIDIA/warp/issues/1437)).
+- Fix tile byte-offset overflow in `wp.tile_load()`, `wp.tile_store()`, and indexed tile operations for arrays larger
+  than 2 GiB. The fix uses 64-bit address arithmetic for tile global-memory accesses, which may slightly increase
+  address-calculation overhead in tile-heavy kernels ([GH-1422](https://github.com/NVIDIA/warp/issues/1422)).
+- Fix assigning tile variables between register and shared storage in both directions, including pipelined
+  `wp.tile_matmul()` kernels, and correct the corresponding adjoints
+  ([GH-1439](https://github.com/NVIDIA/warp/issues/1439), [GH-1440](https://github.com/NVIDIA/warp/issues/1440)).
+- Fix cuBQL mesh BVH construction and refit on CUDA devices without memory pool support
+  ([GH-1430](https://github.com/NVIDIA/warp/issues/1430)).
+- Fix `wp.map()` and `wp.utils.create_warp_function()` failing with `IndentationError` for lambda expressions split
+  across multiple parenthesized lines, such as formatter-wrapped expressions
+  ([GH-1351](https://github.com/NVIDIA/warp/issues/1351)).
+- Reject `wp.bfloat16` `out` tiles in `wp.tile_matmul()`. The underlying libmathdx GEMM backend requires `out` to be
+  `wp.float16`, `wp.float32`, or `wp.float64`. When the backward pass is enabled, `wp.bfloat16` `a` and `b` tiles are
+  also rejected because the backward pass uses them as accumulators for `adjA` and `adjB`. Set `enable_backward=False`
+  on the kernel's module if gradients are not needed ([GH-1427](https://github.com/NVIDIA/warp/issues/1427)).
+- Fix `wp.array.fill_()` performing temporary device allocations for common fill values, which broke CUDA graph
+  composability. Oversized fill values still fall back to the previous staging path
+  ([GH-1412](https://github.com/NVIDIA/warp/issues/1412)).
+- Fix a memory leak with retained graph allocations ([GH-1429](https://github.com/NVIDIA/warp/issues/1429)).
+- Fix a data race in `wp.ScopedMemoryTracker.report()` that could corrupt the report when called concurrently from
+  multiple threads ([GH-1415](https://github.com/NVIDIA/warp/issues/1415)).
+- Fix Python-side memory growth when repeatedly declaring equivalent `module="unique"` kernels that depend on other
+  Warp functions ([GH-1462](https://github.com/NVIDIA/warp/issues/1462)).
+- Suppress the `+avx10.1-256` "invalid feature combination" warning emitted on every CPU kernel compile on Intel
+  Granite Rapids hosts ([GH-1426](https://github.com/NVIDIA/warp/issues/1426)).
+
+### Documentation
+
+- Remove stale tutorial notebooks from the repository. The maintained tutorials remain linked from the documentation,
+  and concise examples now cover the useful notebook snippets in the Sphinx docs.
+
 ## [1.13.0] - 2026-05-04
 
 ### Added
@@ -126,7 +811,7 @@
   `tape.backward()` multiple times, pass fresh upstream gradients via the `grads=`
   argument. Backward passes of kernels with many per-element array writes (e.g. matrix
   component assignments) may be slower due to the additional zeroing. See the
-  [differentiability guide](https://nvidia.github.io/warp/user_guide/differentiability.html)
+  [differentiability guide](https://nvidia.github.io/warp/stable/user_guide/differentiability.html)
   for details ([GH-1062](https://github.com/NVIDIA/warp/issues/1062)).
 - Support short-circuit evaluation for chained `and`/`or` operators in kernels, matching
   Python semantics. Previously all operands were eagerly evaluated, so guards like
@@ -484,7 +1169,7 @@
   thread block occupancy. Can be an integer for `maxThreadsPerBlock` or a tuple of 1-2 integers for
   `(maxThreadsPerBlock, minBlocksPerMultiprocessor)` ([GH-1049](https://github.com/NVIDIA/warp/issues/1049)).
 - Add type introspection functions to query Warp types (e.g., `wp.types.is_vector()`, `wp.types.type_is_tile()`).
-  See the [warp.types](https://nvidia.github.io/warp/api_reference/warp_types.html) documentation for the complete list.
+  See the [warp.types](https://nvidia.github.io/warp/stable/api_reference/warp_types.html) documentation for the complete list.
 - Add support for the unpack operator (`*`) in kernels to expand vectors, matrices, quaternions,
   and 1D array slices into individual arguments, enabling syntax like `wp.vec4(*v3, 1.0)`, `wp.max(*v)`,
   or `wp.vec3i(*arr[:3])` ([GH-1083](https://github.com/NVIDIA/warp/issues/1083)).
@@ -745,7 +1430,7 @@
 - Add `wp.MarchingCubes.extract_surface_marching_cubes()` to extract a triangular mesh from a 3D scalar field
   ([GH-788](https://github.com/NVIDIA/warp/issues/788)).
 - Add `wp.compile_aot_module()` and `wp.load_aot_module()` to support basic ahead-of-time compilation workflows
-  ([docs](https://nvidia.github.io/warp/deep_dive/codegen.html#ahead-of-time-compilation-workflows),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/programming_model/code_generation.html#ahead-of-time-compilation-workflows),
   [GH-766](https://github.com/NVIDIA/warp/issues/766)).
 - Add support for negative indexing and improve slicing for the `wp.matrix()`/`wp.vector()`/`wp.quaternion()` types
   ([GH-899](https://github.com/NVIDIA/warp/issues/899)).
@@ -888,10 +1573,10 @@
 ### Added
 
 - Add `wp.map()` to map a function over arrays and add math operators for Warp arrays
-  ([docs](https://nvidia.github.io/warp/user_guide/runtime.html#mapping-functions),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/runtime.html#mapping-functions),
   [GH-694](https://github.com/NVIDIA/warp/issues/694)).
 - Add support for dynamic control flow in CUDA graphs, see `wp.capture_if()` and `wp.capture_while()`
-  ([docs](https://nvidia.github.io/warp/user_guide/runtime.html#conditional-execution),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/runtime.html#conditional-execution),
   [GH-597](https://github.com/NVIDIA/warp/issues/597)).
 - Add `wp.capture_debug_dot_print()` to write a DOT file describing the structure of a captured CUDA graph
   ([GH-746](https://github.com/NVIDIA/warp/issues/746)).
@@ -904,7 +1589,7 @@
 - Add support for profiling GPU runtime module compilation using the global `wp.config.compile_time_trace`
   setting or the module-level `"compile_time_trace"` option. When used, JSON files in the Trace Event
   format will be written in the kernel cache, which can be opened in a viewer like `chrome://tracing/`
-  ([docs](https://nvidia.github.io/warp/deep_dive/profiling.html#profiling-module-compilation),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/execution_and_performance/profiling.html#profiling-module-compilation),
   [GH-609](https://github.com/NVIDIA/warp/issues/609)).
 - Add support for returning multiple values from native functions like `wp.svd3()` and `wp.quat_to_axis_angle()`
   ([GH-503](https://github.com/NVIDIA/warp/issues/503)).
@@ -972,7 +1657,7 @@
   averaging the shape's and the cloth's coefficients.
 - Limit usage of the `wp.assign_copy()` hidden built-in to the kernel scope.
 - Describe the distinction between `inputs` and `outputs` arguments in the
-  [Kernel documentation](https://nvidia.github.io/warp/user_guide/runtime.html#kernels).
+  [Kernel documentation](https://nvidia.github.io/warp/stable/user_guide/runtime.html#kernels).
 - Reduce the overhead of `wp.launch()` by avoiding costly native API calls
   ([GH-774](https://github.com/NVIDIA/warp/pull/774)).
 - Improve error reporting when calling `@wp.func`-decorated functions from the Python scope
@@ -1094,11 +1779,11 @@
 ### Added
 
 - Support JAX foreign function interface (FFI)
-  ([docs](https://nvidia.github.io/warp/user_guide/interoperability.html#generic-jax-ffi-callbacks),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/interoperability/jax.html#generic-ffi-callbacks),
   [GH-511](https://github.com/NVIDIA/warp/issues/511)).
 - Support Python/SASS correlation in Nsight Compute reports by emitting `#line` directives in CUDA-C code.
   This setting is controlled by `wp.config.line_directives` and is `True` by default.
-  ([docs](https://nvidia.github.io/warp/deep_dive/profiling.html#nsight-compute-profiling),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/execution_and_performance/profiling.html#nsight-compute-profiling),
    [GH-437](https://github.com/NVIDIA/warp/issues/437))
 - Support `vec4f` grid construction in `wp.Volume.allocate_by_tiles()`.
 - Add 2D SVD `wp.svd2()` ([GH-436](https://github.com/NVIDIA/warp/issues/436)).
@@ -1169,10 +1854,10 @@
 
 ### Added
 
-- Document `wp.Launch` objects ([docs](https://nvidia.github.io/warp/user_guide/runtime.html#launch-objects),
+- Document `wp.Launch` objects ([docs](https://nvidia.github.io/warp/stable/user_guide/runtime.html#launch-objects),
   [GH-428](https://github.com/NVIDIA/warp/issues/428)).
 - Document how overwriting previously computed results can lead to incorrect gradients
-  ([docs](https://nvidia.github.io/warp/user_guide/differentiability.html#array-overwrites),
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/differentiability.html#array-overwrites),
   [GH-525](https://github.com/NVIDIA/warp/issues/525)).
 
 ### Fixed
@@ -1213,11 +1898,11 @@
   for vector types to a new `wp.math` module.
 - `wp.sim.SemiImplicitIntegrator` and `wp.sim.FeatherstoneIntegrator` now have an optional `friction_smoothing`
   constructor argument (defaults to 1.0) that controls softness of the friction norm computation.
-- Support `assert` statements in kernels ([docs](https://nvidia.github.io/warp/user_guide/debugging.html#assertions)).
+- Support `assert` statements in kernels ([docs](https://nvidia.github.io/warp/stable/user_guide/debugging.html#assertions)).
   Assertions can only be triggered in `"debug"` mode ([GH-366](https://github.com/NVIDIA/warp/issues/336)).
 - Support CUDA IPC on Linux. Call the `ipc_handle()` method to get an IPC handle for a `wp.Event` or a `wp.array`,
   and call `wp.from_ipc_handle()` or `wp.event_from_ipc_handle()` in another process to open the handle
-  ([docs](https://nvidia.github.io/warp/user_guide/runtime.html#interprocess-communication-ipc)).
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/runtime.html#interprocess-communication-ipc)).
 - Add per-module option to disable fused floating point operations, use `wp.set_module_options({"fuse_fp": False})`
   ([GH-379](https://github.com/NVIDIA/warp/issues/379)).
 - Add per-module option to add CUDA-C line information for profiling, use `wp.set_module_options({"lineinfo": True})`.
@@ -1241,7 +1926,7 @@
 - Add an implicit tile synchronization whenever a shared memory tile's data is reinitialized (e.g. in dynamic loops).
   This could result in lower performance.
 - `wp.Bvh` constructor now supports various construction algorithms via the `constructor` argument, including
-  `"sah"` (Surface Area Heuristics), `"median"`, and `"lbvh"` ([docs](https://nvidia.github.io/warp/api_reference/_generated/warp.Bvh.html#warp.Bvh.__init__))
+  `"sah"` (Surface Area Heuristics), `"median"`, and `"lbvh"` ([docs](https://nvidia.github.io/warp/stable/api_reference/_generated/warp.Bvh.html#warp.Bvh.__init__))
 - Improve the query efficiency of `wp.Bvh` and `wp.Mesh`.
 - Improve memory consumption, compilation and runtime performance when using in-place vector/matrix assignments in
   kernels that have `enable_backward` set to `False` ([GH-332](https://github.com/NVIDIA/warp/issues/332)).
@@ -1295,7 +1980,7 @@
 
 - Add PyTorch basics and custom operators notebooks to the `notebooks` directory.
 - Update PyTorch interop docs to include section on custom operators
-  ([docs](https://nvidia.github.io/warp/user_guide/interoperability.html#pytorch-custom-ops-example)).
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/interoperability/pytorch.html#using-pytorch-custom-operators-pytorch-2-4-0)).
 
 ### Fixed
 
@@ -1317,7 +2002,7 @@
 ### Added
 
 - Support for cooperative tile-based primitives using cuBLASDx and cuFFTDx, please see the tile
-  [documentation](https://nvidia.github.io/warp/user_guide/tiles.html) for details.
+  [documentation](https://nvidia.github.io/warp/stable/user_guide/programming_model/tiles.html) for details.
 - Expose a `reversed()` built-in for iterators ([GH-311](https://github.com/NVIDIA/warp/issues/311)).
 - Support for saving Volumes into `.nvdb` files with the `save_to_nvdb` method.
 - warp.fem: Add `wp.fem.Trimesh3D` and `wp.fem.Quadmesh3D` geometry types for 3D surfaces with new `example_distortion_energy` example.
@@ -1397,16 +2082,16 @@
 ### Added
 
 - Support for a new `wp.static(expr)` function that allows arbitrary Python expressions to be evaluated at the time of
-  function/kernel definition ([docs](https://nvidia.github.io/warp/deep_dive/codegen.html#static-expressions)).
+  function/kernel definition ([docs](https://nvidia.github.io/warp/stable/user_guide/programming_model/code_generation.html#static-expressions)).
 - Support for stream priorities to hint to the device that it should process pending work
   in high-priority streams over pending work in low-priority streams when possible
-  ([docs](https://nvidia.github.io/warp/deep_dive/concurrency.html#stream-priorities)).
-- Adaptive sparse grid geometry to `warp.fem` ([docs](https://nvidia.github.io/warp/domain_modules/fem.html#adaptivity)).
+  ([docs](https://nvidia.github.io/warp/stable/user_guide/execution_and_performance/concurrency.html#stream-priorities)).
+- Adaptive sparse grid geometry to `warp.fem` ([docs](https://nvidia.github.io/warp/stable/domain_modules/fem.html#adaptivity)).
 - Support for defining `wp.kernel` and `wp.func` objects from within closures.
 - Support for defining multiple versions of kernels, functions, and structs without manually assigning unique keys.
 - Support for default argument values for user functions decorated with `wp.func`.
 - Allow passing custom launch dimensions to `jax_kernel()` ([GH-310](https://github.com/NVIDIA/warp/pull/310)).
-- JAX interoperability examples for sharding and matrix multiplication ([docs](https://nvidia.github.io/warp/user_guide/interoperability.html#distributed-computation)).
+- JAX interoperability examples for sharding and matrix multiplication ([docs](https://nvidia.github.io/warp/stable/user_guide/interoperability/jax.html#distributed-computation-with-shard-map)).
 - Interoperability support for the PaddlePaddle ML framework ([GH-318](https://github.com/NVIDIA/warp/pull/318)).
 - Support `wp.mod()` for vector types ([GH-282](https://github.com/NVIDIA/warp/issues/282)).
 - Expose the modulo operator `%` to Python's runtime scalar and vector types.
@@ -1416,8 +2101,8 @@
 - Support for redefining function overloads.
 - Add an ocean sample to the `omni.warp` extension.
 - `warp.sim.VBDIntegrator` now supports body-particle collision.
-- Add a [contributing guide](https://nvidia.github.io/warp/user_guide/contribution_guide.html) to the Sphinx docs .
-- Add documentation for dynamic code generation ([docs](https://nvidia.github.io/warp/deep_dive/codegen.html#dynamic-kernel-creation)).
+- Add a [contributing guide](https://nvidia.github.io/warp/stable/project/contribution_guide.html) to the Sphinx docs .
+- Add documentation for dynamic code generation ([docs](https://nvidia.github.io/warp/stable/user_guide/programming_model/code_generation.html#dynamic-kernel-creation)).
 
 ### Changed
 
@@ -1523,8 +2208,8 @@
   - Add `wp.array(ptr=...)` to allow initializing arrays from pointer addresses inside of kernels ([GH-206](https://github.com/NVIDIA/warp/issues/206))
 
 - `warp.autograd` improvements:
-  - New `warp.autograd` module with utility functions `gradcheck()`, `jacobian()`, and `jacobian_fd()` for debugging kernel Jacobians ([docs](https://nvidia.github.io/warp/user_guide/differentiability.html#debugging-gradients))
-  - Add array overwrite detection, if `wp.config.verify_autograd_array_access` is true in-place operations on arrays on the Tape that could break gradient computation will be detected ([docs](https://nvidia.github.io/warp/user_guide/differentiability.html#array-overwrite-tracking))
+  - New `warp.autograd` module with utility functions `gradcheck()`, `jacobian()`, and `jacobian_fd()` for debugging kernel Jacobians ([docs](https://nvidia.github.io/warp/stable/user_guide/differentiability.html#debugging-gradients))
+  - Add array overwrite detection, if `wp.config.verify_autograd_array_access` is true in-place operations on arrays on the Tape that could break gradient computation will be detected ([docs](https://nvidia.github.io/warp/stable/user_guide/differentiability.html#array-overwrite-tracking))
   - Fix bug where modification of `@wp.func_replay` functions and native snippets would not trigger module recompilation
   - Add documentation for dynamic loop autograd limitations
 
@@ -1902,7 +2587,7 @@
 - Add support for `wp.volume_sample_grad_f()` which returns the value + gradient efficiently from an NVDB volume
 - Add support for LLVM fp16 intrinsics for half-precision arithmetic
 - Add implementation of stochastic gradient descent, see `wp.optim.SGD`
-- Add `wp.fem` framework for solving weak-form PDE problems (see <https://nvidia.github.io/warp/domain_modules/fem.html>)
+- Add `wp.fem` framework for solving weak-form PDE problems (see <https://nvidia.github.io/warp/stable/domain_modules/fem.html>)
 - Optimizations for `omni.warp` extension load time (2.2s to 625ms cold start)
 - Make all `omni.ui` dependencies optional so that Warp unit tests can run headless
 - Deprecation of `wp.tid()` outside of kernel functions, users should pass `tid()` values to `wp.func` functions explicitly
@@ -2529,6 +3214,11 @@
 
 - Initial publish for alpha testing
 
+[Unreleased]: https://github.com/NVIDIA/warp/compare/v1.17.0...HEAD
+[1.17.0]: https://github.com/NVIDIA/warp/releases/tag/v1.17.0
+[1.16.0]: https://github.com/NVIDIA/warp/releases/tag/v1.16.0
+[1.15.0]: https://github.com/NVIDIA/warp/releases/tag/v1.15.0
+[1.14.0]: https://github.com/NVIDIA/warp/releases/tag/v1.14.0
 [1.13.0]: https://github.com/NVIDIA/warp/releases/tag/v1.13.0
 [1.12.1]: https://github.com/NVIDIA/warp/releases/tag/v1.12.1
 [1.12.0]: https://github.com/NVIDIA/warp/releases/tag/v1.12.0

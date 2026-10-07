@@ -1,41 +1,84 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
-"""Experimental JAX integration for calling Warp kernels from JAX.
+"""Deprecated compatibility namespace for JAX integration.
 
-This module enables using Warp kernels as JAX primitives, allowing them to be
-called inside jitted JAX functions. The
-:func:`jax_kernel <warp.jax_experimental.ffi.jax_kernel>` function wraps
-individual Warp kernels, while
-:func:`jax_callable <warp.jax_experimental.ffi.jax_callable>` wraps Python
-functions that launch multiple kernels. Both support automatic differentiation,
-custom launch dimensions, and CUDA graph capture.
-
-.. caution::
-    This module is experimental and less stable than the core Warp API. The interface
-    may change as new functionality is added and to accommodate changes in upcoming
-    JAX library versions.
-
-Usage:
-    This module must be explicitly imported::
-
-        import warp.jax_experimental
-
-See Also:
-    :ref:`jax-ffi` in the user guide for detailed examples and usage patterns.
+.. deprecated:: 1.14.0
+    Use top-level :mod:`warp` JAX APIs instead. This namespace will be removed in Warp 1.18.
 """
 
 # isort: skip_file
 
-from warp._src.jax_experimental.ffi import GraphMode as GraphMode
-from warp._src.jax_experimental.ffi import jax_callable as jax_callable
-from warp._src.jax_experimental.ffi import jax_kernel as jax_kernel
-from warp._src.jax_experimental.ffi import register_ffi_callback as register_ffi_callback
+from ._deprecation import (
+    warn_deprecated_jax_experimental_graph_cache_getter as _warn_deprecated_jax_experimental_graph_cache_getter,
+)
+from ._deprecation import (
+    warn_deprecated_jax_experimental_graph_cache_setter as _warn_deprecated_jax_experimental_graph_cache_setter,
+)
+from ._deprecation import (
+    warn_deprecated_jax_experimental_namespace as _warn_deprecated_jax_experimental_namespace,
+)
 
-from warp._src.jax_experimental.ffi import clear_jax_callable_graph_cache as clear_jax_callable_graph_cache
-from warp._src.jax_experimental.ffi import (
-    get_jax_callable_default_graph_cache_max as get_jax_callable_default_graph_cache_max,
-)
-from warp._src.jax_experimental.ffi import (
-    set_jax_callable_default_graph_cache_max as set_jax_callable_default_graph_cache_max,
-)
+_warn_deprecated_jax_experimental_namespace("warp.jax_experimental", "top-level `warp` JAX APIs")
+
+from warp._src.jax import device_from_jax as device_from_jax
+from warp._src.jax import device_to_jax as device_to_jax
+from warp._src.jax import dtype_from_jax as dtype_from_jax
+from warp._src.jax import dtype_to_jax as dtype_to_jax
+from warp._src.jax import from_jax as from_jax
+from warp._src.jax import to_jax as to_jax
+from warp._src.jax import ffi as _ffi
+from warp._src.jax.ffi import GraphMode as GraphMode
+from warp._src.jax.ffi import JaxCallableGraphMode as JaxCallableGraphMode
+from warp._src.jax.ffi import JaxModulePreloadMode as JaxModulePreloadMode
+from warp._src.jax.ffi import ModulePreloadMode as ModulePreloadMode
+from warp._src.jax.ffi import clear_jax_callable_graph_cache as clear_jax_callable_graph_cache
+from warp._src.jax.ffi import jax_callable as _jax_callable
+from warp._src.jax.ffi import jax_kernel as jax_kernel
+from warp._src.jax.ffi import register_ffi_callback as register_ffi_callback
+
+
+def jax_callable(
+    func,
+    num_outputs: int = 1,
+    graph_mode: JaxCallableGraphMode = JaxCallableGraphMode.JAX,
+    vmap_method: str | None = "broadcast_all",
+    output_dims=None,
+    in_out_argnames=None,
+    stage_in_argnames=None,
+    stage_out_argnames=None,
+    graph_cache_max: int | None = None,
+    module_preload_mode: JaxModulePreloadMode = JaxModulePreloadMode.CURRENT_DEVICE,
+    has_side_effect: bool = False,
+):
+    if graph_cache_max is None:
+        graph_cache_max = _ffi.get_jax_callable_default_graph_cache_max()
+
+    return _jax_callable(
+        func,
+        num_outputs=num_outputs,
+        graph_mode=graph_mode,
+        vmap_method=vmap_method,
+        output_dims=output_dims,
+        in_out_argnames=in_out_argnames,
+        stage_in_argnames=stage_in_argnames,
+        stage_out_argnames=stage_out_argnames,
+        graph_cache_max=graph_cache_max,
+        module_preload_mode=module_preload_mode,
+        has_side_effect=has_side_effect,
+    )
+
+
+def get_jax_callable_default_graph_cache_max():
+    _warn_deprecated_jax_experimental_graph_cache_getter(
+        "warp.jax_experimental.get_jax_callable_default_graph_cache_max"
+    )
+    return _ffi.get_jax_callable_default_graph_cache_max()
+
+
+def set_jax_callable_default_graph_cache_max(cache_max: int | None):
+    _warn_deprecated_jax_experimental_graph_cache_setter(
+        "warp.jax_experimental.set_jax_callable_default_graph_cache_max"
+    )
+    _ffi.set_jax_callable_default_graph_cache_max(cache_max)

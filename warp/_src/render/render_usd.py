@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import warp as wp
-from warp._src.utils import warn
+from warp._src.logger import log_error, log_info
 
 if TYPE_CHECKING:
     from pxr import Usd
 
-_wp_module_name_ = "warp.render.render_usd"
 
 UP_AXIS_TOKEN = ("X", "Y", "Z")
 UP_AXIS_VEC = (
@@ -112,7 +111,7 @@ class UsdRenderer:
         elif isinstance(stage, Usd.Stage):
             self.stage = stage
         else:
-            print("Failed to create stage in renderer. Please construct with stage path or stage object.")
+            log_error("Failed to create stage in renderer. Please construct with stage path or stage object.")
         self.up_axis = up_axis.upper()
         self.fps = float(fps)
         self.time = 0.0
@@ -1024,35 +1023,6 @@ class UsdRenderer:
         instancer.GetVisibilityAttr().Set("inherited" if visible else "invisible", self.time)
         return instancer.GetPath()
 
-    def update_body_transforms(self, body_q):
-        """Update body transforms (deprecated).
-
-        .. deprecated:: 1.11
-            This method references non-existent attributes (`self.model` and `self.body_names`)
-            and will be removed in a future release.
-        """
-        warn(
-            "UsdRenderer.update_body_transforms() is deprecated and non-functional. "
-            "It references attributes that do not exist (self.model, self.body_names) "
-            "and will be removed in a future release.",
-            category=DeprecationWarning,
-        )
-        # Original broken code preserved for now
-        from pxr import Sdf, UsdGeom  # noqa: PLC0415
-
-        if isinstance(body_q, wp.array):
-            body_q = body_q.numpy()
-
-        with Sdf.ChangeBlock():
-            for b in range(self.model.body_count):
-                node_name = self.body_names[b]
-                node = UsdGeom.Xform(self.stage.GetPrimAtPath(self.root.GetPath().AppendChild(node_name)))
-
-                # unpack rigid transform
-                X_sb = wp.transform_expand(body_q[b])
-
-                _usd_set_xform(node, X_sb.p, X_sb.q, (1.0, 1.0, 1.0), self.time)
-
     def save(self):
         """Save the USD stage to disk.
 
@@ -1062,9 +1032,9 @@ class UsdRenderer:
         try:
             self.stage.Save()
         except Exception as e:
-            print("Failed to save USD stage:", e)
+            log_error(f"Failed to save USD stage: {e}")
             return False
 
         file_path = self.stage.GetRootLayer().realPath
-        print(f"Saved the USD stage file at `{file_path}`")
+        log_info(f"Saved the USD stage file at '{file_path}'")
         return True

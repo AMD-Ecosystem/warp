@@ -4,8 +4,7 @@
 from __future__ import annotations
 
 import warp as wp
-
-_wp_module_name_ = "warp.render.imgui_manager"
+from warp._src.logger import log_warning
 
 
 class ImGuiManager:
@@ -20,7 +19,7 @@ class ImGuiManager:
             self.is_available = True
         except ImportError:
             self.is_available = False
-            print('Warning: imgui not found. To use the UI, please install it with: pip install "imgui[pyglet]"')
+            log_warning('ImGui not found. To use the UI, please install it with: pip install "imgui[pyglet]"')
             return
 
         self.imgui.create_context()
@@ -60,13 +59,13 @@ class ImGuiManager:
             import tkinter as tk  # noqa: PLC0415
             from tkinter import filedialog  # noqa: PLC0415
         except ImportError:
-            print("Warning: tkinter not found. To use the file dialog, please install it.")
+            log_warning("tkinter not found. To use the file dialog, please install it.")
             return None
 
         try:
             root = tk.Tk()
         except tk.TclError:
-            print("Warning: no display found - cannot open file dialog.")
+            log_warning("No display found - cannot open file dialog.")
             return None
 
         root.withdraw()  # Hide the main window
@@ -86,13 +85,13 @@ class ImGuiManager:
             import tkinter as tk  # noqa: PLC0415
             from tkinter import filedialog  # noqa: PLC0415
         except ImportError:
-            print("Warning: tkinter not found. To use the file dialog, please install it.")
+            log_warning("tkinter not found. To use the file dialog, please install it.")
             return None
 
         try:
             root = tk.Tk()
         except tk.TclError:
-            print("Warning: no display found - cannot open file dialog.")
+            log_warning("No display found - cannot open file dialog.")
             return None
 
         root.withdraw()  # Hide the main window

@@ -44,6 +44,8 @@ stages:
 
 windows-x86_64 build:
   stage: build
+  variables:
+    IPP_RUNNER_EXECUTION_DURATION: "3600"
   extends:
     - .save_warp_bin_artifact
     - .runner-build-windows-x86_64
@@ -89,6 +91,8 @@ linux-x86_64 test:
   needs:
     - pipeline: $PARENT_PIPELINE_ID
       job: linux-x86_64 debug build
+  variables:
+    IPP_RUNNER_EXECUTION_DURATION: "3600"
   extends:
     - .ipp_lnx_x86_64_gpu
     - .save_test_report_artifact
@@ -96,12 +100,13 @@ linux-x86_64 test:
     - df -h
     - !reference [.snippets, move-linux-x86_64-binaries]
   script:
-    - uv run --extra dev -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
+    - uv run --extra dev --with rmm-cu12 -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
 
 windows-x86_64 test:
   stage: test
   needs: [windows-x86_64 build]
-  timeout: 75m
+  variables:
+    IPP_RUNNER_EXECUTION_DURATION: "4500"
   extends:
     - .runner-test-windows-x86_64-gpu
     - .save_test_report_artifact
@@ -112,10 +117,9 @@ windows-x86_64 test:
     - powershell -ExecutionPolicy ByPass -c {$env:UV_UNMANAGED_INSTALL = "$env:CI_PROJECT_DIR\_uv";irm https://astral.sh/uv/install.ps1 | iex}
     - Write-Output "$([char]27)[0Ksection_end:$(GetTime):install_dependencies$([char]13)$([char]27)[0K"
   script:
-    # Locking usd-core to 25.5.1 to work around a frequent loading crash
     - |
       $env:PATH = "$env:CI_PROJECT_DIR\_uv;$env:PATH"
-      uv run --extra dev --extra torch-cu12 --with usd-core==25.5.1 -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml -s autodetect --failfast
+      uv run --extra dev --extra torch-cu12 -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml -s autodetect --failfast
 
 # ==============================================================================
 # Packaging Jobs
@@ -132,6 +136,8 @@ create pypi wheels:
     - pipeline: $PARENT_PIPELINE_ID
       job: linux-x86_64 debug build
     - windows-x86_64 build
+  variables:
+    IPP_RUNNER_EXECUTION_DURATION: "3600"
   extends:
     - .ipp_lnx_x86_64_cpu_micro
   before_script:

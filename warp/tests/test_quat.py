@@ -12,6 +12,12 @@ np_float_types = [np.float32, np.float64, np.float16]
 
 kernel_cache = {}
 
+# Compilation hygiene
+#
+# This file's shared module is large, so compile only entry points exercised by the tests. Backward code accounts for
+# roughly two thirds of the generated module, so kernels that are never replayed through a tape disable it. Keep
+# kernels declared inside tests in unique modules so they cannot invalidate the shared module after it loads.
+
 
 @wp.func
 def quat_from_euler(e: wp.vec3, i: int, j: int, k: int) -> wp.quat:
@@ -50,18 +56,40 @@ def quat_from_euler(e: wp.vec3, i: int, j: int, k: int) -> wp.quat:
     )
 
 
-def getkernel(func, suffix=""):
+def getkernel(func, suffix="", enable_backward=None):
+    """Get or create a cached kernel.
+
+    Args:
+        func: Kernel function to wrap.
+        suffix: Optional suffix for the kernel key.
+        enable_backward: Whether to generate a backward kernel. Uses the
+            module default when not specified.
+
+    Returns:
+        Cached or newly created wp.Kernel.
+    """
     key = func.__name__ + "_" + suffix
     if key not in kernel_cache:
-        kernel_cache[key] = wp.Kernel(func=func, key=key)
+        options = {} if enable_backward is None else {"enable_backward": enable_backward}
+        kernel_cache[key] = wp.Kernel(func=func, key=key, options=options)
+    elif enable_backward is not None:
+        cached_kernel = kernel_cache[key]
+        cached_enable_backward = cached_kernel.options.get(
+            "enable_backward", cached_kernel.module.options["enable_backward"]
+        )
+        if cached_enable_backward != enable_backward:
+            raise ValueError(
+                f"Kernel {key!r} is already cached with enable_backward={cached_enable_backward!r}, "
+                f"but enable_backward={enable_backward!r} was requested."
+            )
     return kernel_cache[key]
 
 
 def get_select_kernel(dtype):
     def output_select_kernel_fn(
-        input: wp.array(dtype=dtype),
+        input: wp.array[dtype],
         index: int,
-        out: wp.array(dtype=dtype),
+        out: wp.array[dtype],
     ):
         out[0] = input[index]
 
@@ -72,8 +100,6 @@ def get_select_kernel(dtype):
 
 
 def test_constructors(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -84,7 +110,7 @@ def test_constructors(test, device, dtype, register_kernels=False):
     vec3 = wp.types.vector(length=3, dtype=wptype)
     quat_type = wp.types.quaternion(dtype=wptype)
 
-    def check_component_constructor(input: wp.array(dtype=wptype), q: wp.array(dtype=wptype)):
+    def check_component_constructor(input: wp.array[wptype], q: wp.array[wptype]):
         qresult = quat_type(input[0], input[1], input[2], input[3])
 
         # multiply the output by 2 so we've got something to backpropagate:
@@ -94,8 +120,8 @@ def test_constructors(test, device, dtype, register_kernels=False):
         q[3] = wptype(2) * qresult[3]
 
     def check_vector_constructor(
-        input: wp.array(dtype=wptype),
-        q: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        q: wp.array[wptype],
     ):
         qresult = quat_type(vec3(input[0], input[1], input[2]), input[3])
 
@@ -111,6 +137,8 @@ def test_constructors(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     quat_components = wp.array(rng.standard_normal(size=4).astype(dtype), requires_grad=True, device=device)
     output_quats = wp.zeros_like(quat_components)
@@ -173,7 +201,7 @@ def test_casting_constructors(test, device, dtype, register_kernels=False):
     np64 = np.dtype(np.float64)
     wp64 = wp.dtype_from_numpy(np64)
 
-    def cast_float16(a: wp.array(dtype=wp_type, ndim=2), b: wp.array(dtype=wp16, ndim=2)):
+    def cast_float16(a: wp.array2d[wp_type], b: wp.array2d[wp16]):
         tid = wp.tid()
 
         q1 = quat_type(a[tid, 0], a[tid, 1], a[tid, 2], a[tid, 3])
@@ -184,7 +212,7 @@ def test_casting_constructors(test, device, dtype, register_kernels=False):
         b[tid, 2] = q2[2]
         b[tid, 3] = q2[3]
 
-    def cast_float32(a: wp.array(dtype=wp_type, ndim=2), b: wp.array(dtype=wp32, ndim=2)):
+    def cast_float32(a: wp.array2d[wp_type], b: wp.array2d[wp32]):
         tid = wp.tid()
 
         q1 = quat_type(a[tid, 0], a[tid, 1], a[tid, 2], a[tid, 3])
@@ -195,7 +223,7 @@ def test_casting_constructors(test, device, dtype, register_kernels=False):
         b[tid, 2] = q2[2]
         b[tid, 3] = q2[3]
 
-    def cast_float64(a: wp.array(dtype=wp_type, ndim=2), b: wp.array(dtype=wp64, ndim=2)):
+    def cast_float64(a: wp.array2d[wp_type], b: wp.array2d[wp64]):
         tid = wp.tid()
 
         q1 = quat_type(a[tid, 0], a[tid, 1], a[tid, 2], a[tid, 3])
@@ -263,8 +291,6 @@ def test_casting_constructors(test, device, dtype, register_kernels=False):
 
 
 def test_inverse(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 2.0e-3,
         np.float32: 1.0e-6,
@@ -277,9 +303,9 @@ def test_inverse(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(wptype)
 
     def check_quat_inverse(
-        quat_components: wp.array(dtype=wptype),
-        identity_quat: wp.array(dtype=quat_type),
-        inverse_quat: wp.array(dtype=wptype),
+        quat_components: wp.array[wptype],
+        identity_quat: wp.array[quat_type],
+        inverse_quat: wp.array[wptype],
     ):
         qread = quat_type(quat_components[0], quat_components[1], quat_components[2], quat_components[3])
         qresult = wp.quat_inverse(qread)
@@ -297,6 +323,8 @@ def test_inverse(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     quat_components = wp.array(rng.standard_normal(size=4).astype(dtype), requires_grad=True, device=device)
     identity_quat = wp.zeros((1,), dtype=quat_type, requires_grad=True, device=device)
@@ -324,8 +352,6 @@ def test_inverse(test, device, dtype, register_kernels=False):
 
 
 def test_dotproduct(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -336,15 +362,17 @@ def test_dotproduct(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_dot(
-        s: wp.array(dtype=quat_type),
-        v: wp.array(dtype=quat_type),
-        dot: wp.array(dtype=wptype),
+        s: wp.array[quat_type],
+        v: wp.array[quat_type],
+        dot: wp.array[wptype],
     ):
         dot[0] = wptype(2) * wp.dot(v[0], s[0])
 
     dotkernel = getkernel(check_quat_dot, suffix=dtype.__name__)
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -366,8 +394,6 @@ def test_dotproduct(test, device, dtype, register_kernels=False):
 
 
 def test_length(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -378,9 +404,9 @@ def test_length(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_length(
-        q: wp.array(dtype=quat_type),
-        l: wp.array(dtype=wptype),
-        l2: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        l: wp.array[wptype],
+        l2: wp.array[wptype],
     ):
         l[0] = wptype(2) * wp.length(q[0])
         l2[0] = wptype(2) * wp.length_sq(q[0])
@@ -389,6 +415,8 @@ def test_length(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     l = wp.zeros(1, dtype=wptype, requires_grad=True, device=device)
@@ -414,8 +442,6 @@ def test_length(test, device, dtype, register_kernels=False):
 
 
 def test_normalize(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -426,11 +452,11 @@ def test_normalize(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_normalize(
-        q: wp.array(dtype=quat_type),
-        n0: wp.array(dtype=wptype),
-        n1: wp.array(dtype=wptype),
-        n2: wp.array(dtype=wptype),
-        n3: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        n0: wp.array[wptype],
+        n1: wp.array[wptype],
+        n2: wp.array[wptype],
+        n3: wp.array[wptype],
     ):
         n = wptype(2) * (wp.normalize(q[0]))
 
@@ -440,11 +466,11 @@ def test_normalize(test, device, dtype, register_kernels=False):
         n3[0] = n[3]
 
     def check_normalize_alt(
-        q: wp.array(dtype=quat_type),
-        n0: wp.array(dtype=wptype),
-        n1: wp.array(dtype=wptype),
-        n2: wp.array(dtype=wptype),
-        n3: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        n0: wp.array[wptype],
+        n1: wp.array[wptype],
+        n2: wp.array[wptype],
+        n3: wp.array[wptype],
     ):
         n = wptype(2) * (q[0] / wp.length(q[0]))
 
@@ -458,6 +484,8 @@ def test_normalize(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     # I've already tested the things I'm using in check_normalize_alt, so I'll just
     # make sure the two are giving the same results/gradients
@@ -496,8 +524,6 @@ def test_normalize(test, device, dtype, register_kernels=False):
 
 
 def test_addition(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -508,12 +534,12 @@ def test_addition(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_add(
-        q: wp.array(dtype=quat_type),
-        v: wp.array(dtype=quat_type),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        v: wp.array[quat_type],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         result = q[0] + v[0]
 
@@ -526,6 +552,8 @@ def test_addition(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -559,8 +587,6 @@ def test_addition(test, device, dtype, register_kernels=False):
 
 
 def test_subtraction(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -571,12 +597,12 @@ def test_subtraction(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_sub(
-        q: wp.array(dtype=quat_type),
-        v: wp.array(dtype=quat_type),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        v: wp.array[quat_type],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         result = v[0] - q[0]
 
@@ -589,6 +615,8 @@ def test_subtraction(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=4).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -623,8 +651,6 @@ def test_subtraction(test, device, dtype, register_kernels=False):
 
 
 def test_scalar_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -635,16 +661,16 @@ def test_scalar_multiplication(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_scalar_mul(
-        s: wp.array(dtype=wptype),
-        q: wp.array(dtype=quat_type),
-        l0: wp.array(dtype=wptype),
-        l1: wp.array(dtype=wptype),
-        l2: wp.array(dtype=wptype),
-        l3: wp.array(dtype=wptype),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        s: wp.array[wptype],
+        q: wp.array[quat_type],
+        l0: wp.array[wptype],
+        l1: wp.array[wptype],
+        l2: wp.array[wptype],
+        l3: wp.array[wptype],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         lresult = s[0] * q[0]
         rresult = q[0] * s[0]
@@ -664,6 +690,8 @@ def test_scalar_multiplication(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=1).astype(dtype), requires_grad=True, device=device)
     q = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -706,8 +734,6 @@ def test_scalar_multiplication(test, device, dtype, register_kernels=False):
 
 
 def test_scalar_division(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-3,
         np.float32: 1.0e-6,
@@ -718,12 +744,12 @@ def test_scalar_division(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_scalar_div(
-        s: wp.array(dtype=wptype),
-        q: wp.array(dtype=quat_type),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        s: wp.array[wptype],
+        q: wp.array[quat_type],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         result = q[0] / s[0]
 
@@ -737,6 +763,8 @@ def test_scalar_division(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=1).astype(dtype), requires_grad=True, device=device)
     q = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -768,8 +796,6 @@ def test_scalar_division(test, device, dtype, register_kernels=False):
 
 
 def test_quat_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -780,12 +806,12 @@ def test_quat_multiplication(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_mul(
-        s: wp.array(dtype=quat_type),
-        q: wp.array(dtype=quat_type),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        s: wp.array[quat_type],
+        q: wp.array[quat_type],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         result = s[0] * q[0]
 
@@ -799,6 +825,8 @@ def test_quat_multiplication(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     q = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -861,8 +889,6 @@ def test_quat_multiplication(test, device, dtype, register_kernels=False):
 
 
 def test_indexing(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -873,11 +899,11 @@ def test_indexing(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_indexing(
-        q: wp.array(dtype=quat_type),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         r0[0] = wptype(2) * q[0][0]
@@ -889,6 +915,8 @@ def test_indexing(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     r0 = wp.zeros(1, dtype=wptype, requires_grad=True, device=device)
@@ -914,7 +942,7 @@ def test_indexing(test, device, dtype, register_kernels=False):
     assert_np_equal(r3.numpy()[0], 2.0 * q.numpy()[0, 3], tol=tol)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def test_assignment():
     q = wp.quat(1.0, 2.0, 3.0, 4.0)
     q[0] = 1.23
@@ -928,8 +956,6 @@ def test_assignment():
 
 
 def test_quat_lerp(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -940,13 +966,13 @@ def test_quat_lerp(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype=wptype)
 
     def check_quat_lerp(
-        s: wp.array(dtype=quat_type),
-        q: wp.array(dtype=quat_type),
-        t: wp.array(dtype=wptype),
-        r0: wp.array(dtype=wptype),
-        r1: wp.array(dtype=wptype),
-        r2: wp.array(dtype=wptype),
-        r3: wp.array(dtype=wptype),
+        s: wp.array[quat_type],
+        q: wp.array[quat_type],
+        t: wp.array[wptype],
+        r0: wp.array[wptype],
+        r1: wp.array[wptype],
+        r2: wp.array[wptype],
+        r3: wp.array[wptype],
     ):
         result = wp.lerp(s[0], q[0], t[0])
 
@@ -960,6 +986,8 @@ def test_quat_lerp(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
     q = wp.array(rng.standard_normal(size=(1, 4)).astype(dtype), dtype=quat_type, requires_grad=True, device=device)
@@ -998,8 +1026,6 @@ def test_quat_lerp(test, device, dtype, register_kernels=False):
 
 
 def test_quat_rotate(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -1011,12 +1037,12 @@ def test_quat_rotate(test, device, dtype, register_kernels=False):
     vec3_type = wp.types.vector(length=3, dtype=wptype)
 
     def check_quat_rotate(
-        q: wp.array(dtype=quat_type),
-        v: wp.array(dtype=vec3_type),
-        outputs: wp.array(dtype=wptype),
-        outputs_inv: wp.array(dtype=wptype),
-        outputs_manual: wp.array(dtype=wptype),
-        outputs_inv_manual: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        v: wp.array[vec3_type],
+        outputs: wp.array[wptype],
+        outputs_inv: wp.array[wptype],
+        outputs_manual: wp.array[wptype],
+        outputs_inv_manual: wp.array[wptype],
     ):
         result = wp.quat_rotate(q[0], v[0])
         result_inv = wp.quat_rotate_inv(q[0], v[0])
@@ -1044,6 +1070,8 @@ def test_quat_rotate(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q_np = rng.standard_normal(size=(1, 4))
     q_np /= np.linalg.norm(q_np)
@@ -1133,8 +1161,6 @@ def test_quat_rotate(test, device, dtype, register_kernels=False):
 
 
 def test_quat_to_matrix(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -1146,9 +1172,9 @@ def test_quat_to_matrix(test, device, dtype, register_kernels=False):
     vec3 = wp.types.vector(length=3, dtype=wptype)
 
     def check_quat_to_matrix(
-        q: wp.array(dtype=quat_type),
-        outputs: wp.array(dtype=wptype),
-        outputs_manual: wp.array(dtype=wptype),
+        q: wp.array[quat_type],
+        outputs: wp.array[wptype],
+        outputs_manual: wp.array[wptype],
     ):
         result = wp.quat_to_matrix(q[0])
 
@@ -1192,6 +1218,8 @@ def test_quat_to_matrix(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = rng.standard_normal(size=(1, 4))
     q /= np.linalg.norm(q)
@@ -1238,7 +1266,6 @@ def test_quat_to_matrix(test, device, dtype, register_kernels=False):
 
 
 def test_slerp_grad(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
     seed = 42
 
     wptype = wp.dtype_from_numpy(np.dtype(dtype))
@@ -1246,10 +1273,10 @@ def test_slerp_grad(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(wptype)
 
     def slerp_kernel(
-        q0: wp.array(dtype=quat_type),
-        q1: wp.array(dtype=quat_type),
-        t: wp.array(dtype=wptype),
-        loss: wp.array(dtype=wptype),
+        q0: wp.array[quat_type],
+        q1: wp.array[quat_type],
+        t: wp.array[wptype],
+        loss: wp.array[wptype],
         index: int,
     ):
         tid = wp.tid()
@@ -1260,10 +1287,10 @@ def test_slerp_grad(test, device, dtype, register_kernels=False):
     slerp_kernel = getkernel(slerp_kernel, suffix=dtype.__name__)
 
     def slerp_kernel_forward(
-        q0: wp.array(dtype=quat_type),
-        q1: wp.array(dtype=quat_type),
-        t: wp.array(dtype=wptype),
-        loss: wp.array(dtype=wptype),
+        q0: wp.array[quat_type],
+        q1: wp.array[quat_type],
+        t: wp.array[wptype],
+        loss: wp.array[wptype],
         index: int,
     ):
         tid = wp.tid()
@@ -1278,7 +1305,7 @@ def test_slerp_grad(test, device, dtype, register_kernels=False):
 
     slerp_kernel_forward = getkernel(slerp_kernel_forward, suffix=dtype.__name__)
 
-    def quat_sampler_slerp(kernel_seed: int, quats: wp.array(dtype=quat_type)):
+    def quat_sampler_slerp(kernel_seed: int, quats: wp.array[quat_type]):
         tid = wp.tid()
 
         state = wp.rand_init(kernel_seed, tid)
@@ -1292,11 +1319,12 @@ def test_slerp_grad(test, device, dtype, register_kernels=False):
 
         quats[tid] = qn
 
-    quat_sampler = getkernel(quat_sampler_slerp, suffix=dtype.__name__)
+    quat_sampler = getkernel(quat_sampler_slerp, suffix=dtype.__name__, enable_backward=False)
 
     if register_kernels:
         return
 
+    rng = np.random.default_rng(123)
     N = 50
 
     q0 = wp.zeros(N, dtype=quat_type, device=device, requires_grad=True)
@@ -1409,7 +1437,7 @@ def test_quat_to_axis_angle_grad(test, device, dtype, register_kernels=False):
     vec4 = wp.types.vector(4, wptype)
     quat_type = wp.types.quaternion(wptype)
 
-    def quat_to_axis_angle_kernel(quats: wp.array(dtype=quat_type), loss: wp.array(dtype=wptype), coord_idx: int):
+    def quat_to_axis_angle_kernel(quats: wp.array[quat_type], loss: wp.array[wptype], coord_idx: int):
         tid = wp.tid()
         axis = vec3()
         angle = wptype(0.0)
@@ -1421,9 +1449,7 @@ def test_quat_to_axis_angle_grad(test, device, dtype, register_kernels=False):
 
     quat_to_axis_angle_kernel = getkernel(quat_to_axis_angle_kernel, suffix=dtype.__name__)
 
-    def quat_to_axis_angle_kernel_forward(
-        quats: wp.array(dtype=quat_type), loss: wp.array(dtype=wptype), coord_idx: int
-    ):
+    def quat_to_axis_angle_kernel_forward(quats: wp.array[quat_type], loss: wp.array[wptype], coord_idx: int):
         tid = wp.tid()
         q = quats[tid]
         axis = vec3()
@@ -1442,7 +1468,7 @@ def test_quat_to_axis_angle_grad(test, device, dtype, register_kernels=False):
 
     quat_to_axis_angle_kernel_forward = getkernel(quat_to_axis_angle_kernel_forward, suffix=dtype.__name__)
 
-    def quat_sampler(kernel_seed: int, angles: wp.array(dtype=float), quats: wp.array(dtype=quat_type)):
+    def quat_sampler(kernel_seed: int, angles: wp.array[float], quats: wp.array[quat_type]):
         tid = wp.tid()
 
         state = wp.rand_init(kernel_seed, tid)
@@ -1455,7 +1481,7 @@ def test_quat_to_axis_angle_grad(test, device, dtype, register_kernels=False):
 
         quats[tid] = qn
 
-    quat_sampler = getkernel(quat_sampler, suffix=dtype.__name__)
+    quat_sampler = getkernel(quat_sampler, suffix=dtype.__name__, enable_backward=False)
 
     if register_kernels:
         return
@@ -1533,7 +1559,6 @@ def test_quat_to_axis_angle_grad(test, device, dtype, register_kernels=False):
 
 
 def test_quat_rpy_grad(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
     N = 3
 
     wptype = wp.dtype_from_numpy(np.dtype(dtype))
@@ -1541,7 +1566,7 @@ def test_quat_rpy_grad(test, device, dtype, register_kernels=False):
     vec3 = wp.types.vector(3, wptype)
     quat_type = wp.types.quaternion(wptype)
 
-    def rpy_to_quat_kernel(rpy_arr: wp.array(dtype=vec3), loss: wp.array(dtype=wptype), coord_idx: int):
+    def rpy_to_quat_kernel(rpy_arr: wp.array[vec3], loss: wp.array[wptype], coord_idx: int):
         tid = wp.tid()
         rpy = rpy_arr[tid]
         roll = rpy[0]
@@ -1554,7 +1579,7 @@ def test_quat_rpy_grad(test, device, dtype, register_kernels=False):
 
     rpy_to_quat_kernel = getkernel(rpy_to_quat_kernel, suffix=dtype.__name__)
 
-    def rpy_to_quat_kernel_forward(rpy_arr: wp.array(dtype=vec3), loss: wp.array(dtype=wptype), coord_idx: int):
+    def rpy_to_quat_kernel_forward(rpy_arr: wp.array[vec3], loss: wp.array[wptype], coord_idx: int):
         tid = wp.tid()
         rpy = rpy_arr[tid]
         roll = rpy[0]
@@ -1582,6 +1607,7 @@ def test_quat_rpy_grad(test, device, dtype, register_kernels=False):
     if register_kernels:
         return
 
+    rng = np.random.default_rng(123)
     rpy_arr = rng.uniform(low=-np.pi, high=np.pi, size=(N, 3))
     rpy_arr = wp.array(rpy_arr, dtype=vec3, device=device, requires_grad=True)
 
@@ -1632,7 +1658,7 @@ def test_quat_from_matrix(test, device, dtype, register_kernels=False):
     mat44 = wp.types.matrix((4, 4), wptype)
     quat_type = wp.types.quaternion(wptype)
 
-    def quat_from_matrix(m: wp.array2d(dtype=wptype), loss: wp.array(dtype=wptype), idx: int):
+    def quat_from_matrix(m: wp.array2d[wptype], loss: wp.array[wptype], idx: int):
         tid = wp.tid()
 
         # fmt: off
@@ -1655,7 +1681,7 @@ def test_quat_from_matrix(test, device, dtype, register_kernels=False):
         wp.expect_eq(q1, q2)
         wp.atomic_add(loss, 0, q1[idx])
 
-    def quat_from_matrix_forward(mats: wp.array2d(dtype=wptype), loss: wp.array(dtype=wptype), idx: int):
+    def quat_from_matrix_forward(mats: wp.array2d[wptype], loss: wp.array[wptype], idx: int):
         tid = wp.tid()
 
         # fmt: off
@@ -1782,22 +1808,24 @@ def test_quat_from_matrix(test, device, dtype, register_kernels=False):
 def test_quat_identity(test, device, dtype, register_kernels=False):
     wptype = wp.dtype_from_numpy(np.dtype(dtype))
 
-    def quat_identity_test(output: wp.array(dtype=wptype)):
+    def quat_identity_test(output: wp.array[wptype]):
         q = wp.quat_identity(dtype=wptype)
         output[0] = q[0]
         output[1] = q[1]
         output[2] = q[2]
         output[3] = q[3]
 
-    def quat_identity_test_default(output: wp.array(dtype=wp.float32)):
+    def quat_identity_test_default(output: wp.array[wp.float32]):
         q = wp.quat_identity()
         output[0] = q[0]
         output[1] = q[1]
         output[2] = q[2]
         output[3] = q[3]
 
-    quat_identity_kernel = getkernel(quat_identity_test, suffix=dtype.__name__)
-    quat_identity_default_kernel = getkernel(quat_identity_test_default, suffix=np.float32.__name__)
+    quat_identity_kernel = getkernel(quat_identity_test, suffix=dtype.__name__, enable_backward=False)
+    quat_identity_default_kernel = getkernel(
+        quat_identity_test_default, suffix=np.float32.__name__, enable_backward=False
+    )
 
     if register_kernels:
         return
@@ -1816,23 +1844,26 @@ def test_quat_identity(test, device, dtype, register_kernels=False):
     assert_np_equal(output.numpy(), expected)
 
 
-def test_quat_euler_conversion(test, device, dtype, register_kernels=False):
+def test_quat_euler_conversion(test, device, dtype):
     rng = np.random.default_rng(123)
-    N = 3
+    n = 3
 
-    rpy_arr = rng.uniform(low=-np.pi, high=np.pi, size=(N, 3))
+    rpy_arr = rng.uniform(low=-np.pi, high=np.pi, size=(n, 3))
 
     quats_from_euler = [[float(x) for x in quat_from_euler(wp.vec3(*rpy), 0, 1, 2)] for rpy in rpy_arr]
     quats_from_rpy = [[float(x) for x in wp.quat_rpy(rpy[0], rpy[1], rpy[2])] for rpy in rpy_arr]
 
-    assert_np_equal(np.array(quats_from_euler), np.array(quats_from_rpy), tol=1e-4)
+    assert_np_equal(
+        np.array(quats_from_euler),
+        np.array(quats_from_rpy),
+        tol=1e-4,
+    )
 
 
 def test_anon_type_instance(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
     wptype = wp.dtype_from_numpy(np.dtype(dtype))
 
-    def quat_create_test(input: wp.array(dtype=wptype), output: wp.array(dtype=wptype)):
+    def quat_create_test(input: wp.array[wptype], output: wp.array[wptype]):
         # component constructor:
         q = wp.types.quaternion(input[0], input[1], input[2], input[3])
         output[0] = wptype(2) * q[0]
@@ -1853,6 +1884,7 @@ def test_anon_type_instance(test, device, dtype, register_kernels=False):
     if register_kernels:
         return
 
+    rng = np.random.default_rng(123)
     quat_components = wp.array(rng.standard_normal(size=8).astype(dtype), requires_grad=True, device=device)
     output_quats = wp.zeros(8, dtype=wptype, requires_grad=True, device=device)
     wp.launch(quat_create_kernel, dim=1, inputs=(quat_components,), outputs=(output_quats,), device=device)
@@ -1880,7 +1912,7 @@ def test_anon_type_instance(test, device, dtype, register_kernels=False):
 # which tests some different code paths that
 # need to ensure types are correctly canonicalized
 # during codegen
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def test_constructor_default():
     qzero = wp.quat()
     wp.expect_eq(qzero[0], 0.0)
@@ -1948,8 +1980,8 @@ def test_quat_backward(test, device):
     wp.synchronize_device(device)
 
 
-@wp.kernel
-def quat_len_kernel(q: wp.quat, out: wp.array(dtype=int)):
+@wp.kernel(enable_backward=False)
+def quat_len_kernel(q: wp.quat, out: wp.array[int]):
     length = wp.static(len(q))
     wp.expect_eq(wp.static(len(q)), 4)
     out[0] = wp.static(len(q))
@@ -1970,7 +2002,7 @@ def test_quat_len(test, device):
 
 
 @wp.kernel
-def quat_extract_subscript(x: wp.array(dtype=wp.quat), y: wp.array(dtype=float)):
+def quat_extract_subscript(x: wp.array[wp.quat], y: wp.array[float]):
     tid = wp.tid()
 
     a = x[tid]
@@ -1979,7 +2011,7 @@ def quat_extract_subscript(x: wp.array(dtype=wp.quat), y: wp.array(dtype=float))
 
 
 @wp.kernel
-def quat_extract_attribute(x: wp.array(dtype=wp.quat), y: wp.array(dtype=float)):
+def quat_extract_attribute(x: wp.array[wp.quat], y: wp.array[float]):
     tid = wp.tid()
 
     a = x[tid]
@@ -2006,7 +2038,7 @@ def test_quat_extract(test, device):
 
 
 @wp.kernel
-def quat_assign_subscript(x: wp.array(dtype=float), y: wp.array(dtype=wp.quat)):
+def quat_assign_subscript(x: wp.array[float], y: wp.array[wp.quat]):
     i = wp.tid()
 
     a = wp.quat()
@@ -2018,7 +2050,7 @@ def quat_assign_subscript(x: wp.array(dtype=float), y: wp.array(dtype=wp.quat)):
 
 
 @wp.kernel
-def quat_assign_attribute(x: wp.array(dtype=float), y: wp.array(dtype=wp.quat)):
+def quat_assign_attribute(x: wp.array[float], y: wp.array[wp.quat]):
     i = wp.tid()
 
     a = wp.quat()
@@ -2048,7 +2080,7 @@ def test_quat_assign(test, device):
 
 
 @wp.kernel
-def quat_array_extract_subscript(x: wp.array2d(dtype=wp.quat), y: wp.array2d(dtype=float)):
+def quat_array_extract_subscript(x: wp.array2d[wp.quat], y: wp.array2d[float]):
     i, j = wp.tid()
 
     a = x[i, j][0]
@@ -2059,7 +2091,7 @@ def quat_array_extract_subscript(x: wp.array2d(dtype=wp.quat), y: wp.array2d(dty
 
 
 @wp.kernel
-def quat_array_extract_attribute(x: wp.array2d(dtype=wp.quat), y: wp.array2d(dtype=float)):
+def quat_array_extract_attribute(x: wp.array2d[wp.quat], y: wp.array2d[float]):
     i, j = wp.tid()
 
     a = x[i, j].x
@@ -2088,7 +2120,7 @@ def test_quat_array_extract(test, device):
 
 
 @wp.kernel
-def quat_array_assign_subscript(x: wp.array2d(dtype=float), y: wp.array2d(dtype=wp.quat)):
+def quat_array_assign_subscript(x: wp.array2d[float], y: wp.array2d[wp.quat]):
     i, j = wp.tid()
 
     y[i, j][0] = 1.0 * x[i, j]
@@ -2098,7 +2130,7 @@ def quat_array_assign_subscript(x: wp.array2d(dtype=float), y: wp.array2d(dtype=
 
 
 @wp.kernel
-def quat_array_assign_attribute(x: wp.array2d(dtype=float), y: wp.array2d(dtype=wp.quat)):
+def quat_array_assign_attribute(x: wp.array2d[float], y: wp.array2d[wp.quat]):
     i, j = wp.tid()
 
     y[i, j].x = 1.0 * x[i, j]
@@ -2119,15 +2151,14 @@ def test_quat_array_assign(test, device):
         tape.backward()
 
         assert_np_equal(y.numpy(), np.array([[[1.0, 2.0, 3.0, 4.0]]], dtype=float))
-        # TODO: gradient propagation for in-place array assignment
-        # assert_np_equal(x.grad.numpy(), np.array([[10.0]], dtype=float))
+        assert_np_equal(x.grad.numpy(), np.array([[10.0]], dtype=float))
 
     run(quat_array_assign_subscript)
     run(quat_array_assign_attribute)
 
 
 @wp.kernel
-def quat_add_inplace_subscript(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def quat_add_inplace_subscript(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
 
     a = wp.quat()
@@ -2142,7 +2173,7 @@ def quat_add_inplace_subscript(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.
 
 
 @wp.kernel
-def quat_add_inplace_attribute(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def quat_add_inplace_attribute(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
 
     a = wp.quat()
@@ -2175,7 +2206,7 @@ def test_quat_add_inplace(test, device):
 
 
 @wp.kernel
-def quat_sub_inplace_subscript(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def quat_sub_inplace_subscript(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
 
     a = wp.quat()
@@ -2190,7 +2221,7 @@ def quat_sub_inplace_subscript(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.
 
 
 @wp.kernel
-def quat_sub_inplace_attribute(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def quat_sub_inplace_attribute(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
 
     a = wp.quat()
@@ -2224,7 +2255,7 @@ def test_quat_sub_inplace(test, device):
 
 
 @wp.kernel
-def quat_array_add_inplace(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def quat_array_add_inplace(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
     y[i] += x[i]
 
@@ -2244,7 +2275,7 @@ def test_quat_array_add_inplace(test, device):
 
 
 @wp.kernel
-def quat_array_sub_inplace(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def quat_array_sub_inplace(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
     y[i] -= x[i]
 
@@ -2264,7 +2295,7 @@ def test_quat_array_sub_inplace(test, device):
 
 
 @wp.kernel
-def scalar_quat_div(x: wp.array(dtype=wp.quat), y: wp.array(dtype=wp.quat)):
+def scalar_quat_div(x: wp.array[wp.quat], y: wp.array[wp.quat]):
     i = wp.tid()
     y[i] = 1.0 / x[i]
 
@@ -2304,7 +2335,7 @@ def test_quat_indexing_assign(test, device):
         wp.expect_eq(q[-3], 4.0)
         wp.expect_eq(q[-4], 123.0)
 
-    @wp.kernel(module="unique")
+    @wp.kernel(enable_backward=False, module="unique")
     def kernel():
         fn()
 
@@ -2367,7 +2398,7 @@ def test_quat_slicing_assign(test, device):
         q[:-1] -= vec3(23.0, 24.0, 25.0)
         wp.expect_eq(q == wp.quat(-8.0, 15.0, 12.0, 40.0), True)
 
-    @wp.kernel(module="unique")
+    @wp.kernel(enable_backward=False, module="unique")
     def kernel():
         fn()
 
@@ -2378,7 +2409,7 @@ def test_quat_slicing_assign(test, device):
 
 def test_quat_slicing_assign_backward(test, device):
     @wp.kernel(module="unique")
-    def quat_slice_assign(arr_x: wp.array(dtype=wp.vec2), arr_y: wp.array(dtype=wp.quat)):
+    def quat_slice_assign(arr_x: wp.array[wp.vec2], arr_y: wp.array[wp.quat]):
         i = wp.tid()
 
         y = arr_y[i]
@@ -2492,7 +2523,7 @@ for dtype in np_float_types:
     add_function_test_register_kernel(
         TestQuat, f"test_quat_to_matrix_{dtype.__name__}", test_quat_to_matrix, devices=devices, dtype=dtype
     )
-    add_function_test_register_kernel(
+    add_function_test(
         TestQuat,
         f"test_quat_euler_conversion_{dtype.__name__}",
         test_quat_euler_conversion,

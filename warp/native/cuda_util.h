@@ -92,6 +92,8 @@ CUresult cuCtxSetCurrent_f(CUcontext ctx);
 CUresult cuCtxPushCurrent_f(CUcontext ctx);
 CUresult cuCtxPopCurrent_f(CUcontext* ctx);
 CUresult cuCtxSynchronize_f();
+CUresult cuProfilerStart_f();
+CUresult cuProfilerStop_f();
 CUresult cuCtxGetDevice_f(CUdevice* dev);
 CUresult cuCtxCreate_f(CUcontext* ctx, unsigned int flags, CUdevice dev);
 CUresult cuCtxDestroy_f(CUcontext ctx);
@@ -177,7 +179,9 @@ CUresult cuGraphicsSubResourceGetMappedArray_f(
 );
 CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource);
 CUresult cuModuleGetGlobal_f(CUdeviceptr* dptr, size_t* bytes, CUmodule hmod, const char* name);
+CUresult cuOccupancyMaxActiveClusters_f(int* numClusters, CUfunction func, const CUlaunchConfig* config);
 CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int value);
+CUresult cuFuncGetAttribute_f(int* pi, CUfunction_attribute attrib, CUfunction hfunc);
 CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event);
 CUresult cuIpcOpenEventHandle_f(CUevent* phEvent, CUipcEventHandle handle);
 CUresult cuIpcGetMemHandle_f(CUipcMemHandle* pHandle, CUdeviceptr dptr);
@@ -200,6 +204,11 @@ CUresult cuTexObjectCreate_f(
     const CUDA_RESOURCE_VIEW_DESC* pResViewDesc
 );
 CUresult cuTexObjectDestroy_f(CUtexObject texObject);
+CUresult cuMipmappedArrayCreate_f(
+    CUmipmappedArray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pMipmappedArrayDesc, unsigned int numMipmapLevels
+);
+CUresult cuMipmappedArrayDestroy_f(CUmipmappedArray hMipmappedArray);
+CUresult cuMipmappedArrayGetLevel_f(CUarray* pLevelArray, CUmipmappedArray hMipmappedArray, unsigned int level);
 
 bool init_cuda_driver();
 bool is_cuda_driver_initialized();
@@ -232,6 +241,26 @@ inline CUgraph get_capture_graph(CUstream stream)
 bool get_capture_dependencies(CUstream stream, std::vector<CUgraphNode>& dependencies_ret);
 
 bool get_graph_leaf_nodes(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_nodes_ret);
+bool get_dependent_leaf_nodes(cudaGraphNode_t ancestor, std::vector<cudaGraphNode_t>& leaf_nodes_ret);
+
+enum NodeDependencyResult {
+    NODE_DEPENDENCY_RESULT_DEPENDENT = 0,  // argument node depends on referent node
+    NODE_DEPENDENCY_RESULT_INDEPENDENT = 1,  // argument node does not depend on referent node
+    NODE_DEPENDENCY_RESULT_ERROR = -1,  // an error occurred
+};
+
+NodeDependencyResult graph_node_depends_on(cudaGraphNode_t argument, cudaGraphNode_t referent);
+
+enum GraphAllocQueryResult {
+    GRAPH_ALLOC_QUERY_RESULT_AVAILABLE = 0,  // query node can safely access the alloc
+    GRAPH_ALLOC_QUERY_RESULT_FREED = 1,  // alloc is freed before query node is reached
+    GRAPH_ALLOC_QUERY_RESULT_INACCESSIBLE = 2,  // alloc is not accessible by query node
+    GRAPH_ALLOC_QUERY_RESULT_ERROR = -1,  // an error occurred
+    GRAPH_ALLOC_QUERY_RESULT_USE_AFTER_FREE = -2,  // query node depends on the alloc, but the free
+                                                   // is independent of the query node
+};
+
+GraphAllocQueryResult graph_alloc_query(cudaGraphNode_t alloc_node, cudaGraphNode_t query_node);
 
 inline CUcontext get_stream_context(CUstream stream)
 {
@@ -243,6 +272,19 @@ inline CUcontext get_stream_context(CUstream stream)
 }
 
 inline CUcontext get_stream_context(void* stream) { return get_stream_context(static_cast<CUstream>(stream)); }
+
+// Returns the process-unique id of the stream. Stream ids are never reused,
+// unlike stream handles.
+// CAUTION: Must not be called on a capturing stream
+// (returns cudaErrorStreamCaptureUnsupported and invalidates the capture).
+inline uint64_t get_stream_id(CUstream stream)
+{
+    unsigned long long id = 0;
+    check_cuda(cudaStreamGetId(stream, &id));
+    return uint64_t(id);
+}
+
+inline uint64_t get_stream_id(void* stream) { return get_stream_id(static_cast<CUstream>(stream)); }
 
 
 //
@@ -294,11 +336,11 @@ private:
 
 // CUDA timing range used during event-based timing
 struct CudaTimingRange {
-    void* context;
-    const char* name;
-    int flag;
-    CUevent start;
-    CUevent end;
+    void* context = nullptr;
+    const char* name = nullptr;
+    int flag = 0;
+    CUevent start = {};
+    CUevent end = {};
 };
 
 // Timing result used to pass timings to Python
@@ -352,6 +394,35 @@ constexpr int WP_TIMING_GRAPH = 16;  // graph launch
 
 extern CudaTimingState* g_cuda_timing_state;
 
+// Information used for freeing allocations.
+struct FreeInfo {
+    void* context = NULL;
+    void* ptr = NULL;
+    bool is_async = false;
+};
+
+struct CaptureInfo {
+    CUstream stream = NULL;  // the main stream where capture begins and ends
+    CUcontext context = NULL;  // context where capture was started
+    uint64_t id = 0;  // unique capture id from CUDA
+    bool external = false;  // whether this is an external capture
+    cudaStreamCaptureMode mode = cudaStreamCaptureModeThreadLocal;  // mode used to open the capture (for pause/resume)
+    std::vector<FreeInfo> tmp_allocs;  // temporary allocations owned by the graph (e.g., staged array fill values)
+};
+
+struct StreamInfo {
+    CUevent cached_event = NULL;  // event used for stream synchronization (cached to avoid creating temporary events)
+    CaptureInfo* capture = NULL;  // capture info (only if started on this stream)
+};
+
+CaptureInfo* get_capture_info(CUstream stream);
+StreamInfo* get_stream_info(CUstream stream);
+
+// Find the registered capture that owns the given capture id, either directly
+// (top-level capture) or as the parent of a child graph capture currently being
+// recorded. Works for any stream participating in the capture, including forked
+// streams. Returns NULL for unregistered captures.
+CaptureInfo* find_capture_info(uint64_t capture_id);
 
 #else
 

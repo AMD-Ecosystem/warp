@@ -93,8 +93,6 @@ def test_components(test, device, dtype):
 
 
 def test_indexing(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-3,
         np.float32: 1.0e-6,
@@ -108,9 +106,9 @@ def test_indexing(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(kernel_cache, wptype)
 
     def check_mat_indexing(
-        m2: wp.array(dtype=mat22),
-        m4: wp.array(dtype=mat44),
-        outcomponents: wp.array(dtype=wptype),
+        m2: wp.array[mat22],
+        m4: wp.array[mat44],
+        outcomponents: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         idx = 0
@@ -128,6 +126,8 @@ def test_indexing(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     m2 = wp.array(randvals(rng, [1, 2, 2], dtype), dtype=mat22, requires_grad=True, device=device)
     m4 = wp.array(randvals(rng, [1, 4, 4], dtype), dtype=mat44, requires_grad=True, device=device)

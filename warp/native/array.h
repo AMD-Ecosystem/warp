@@ -95,6 +95,17 @@ namespace wp {
         FP_ASSERT_ADJ(value, adj_value); \
     }
 
+// Slot-only variant: forward ``value`` is not captured by the slot-level
+// adjoint path, so only ``adj_value`` is checked.
+#define FP_VERIFY_ADJ_SLOT(adj_value) \
+    if (!isfinite(adj_value)) \
+    { \
+        printf("%s:%d - %s(arr, ...) ",  __FILE__, __LINE__, __FUNCTION__); \
+        print(adj_value); \
+        printf(")\n"); \
+        assert(0); \
+    }
+
 
 #else
 
@@ -109,6 +120,7 @@ namespace wp {
 #define FP_VERIFY_ADJ_2(value, adj_value) {}
 #define FP_VERIFY_ADJ_3(value, adj_value) {}
 #define FP_VERIFY_ADJ_4(value, adj_value) {}
+#define FP_VERIFY_ADJ_SLOT(adj_value) {}
 
 #endif  // WP_FP_CHECK
 
@@ -157,8 +169,6 @@ struct shape_t {
 
 CUDA_CALLABLE inline int extract(const shape_t& s, int i) { return s.dims[i]; }
 
-CUDA_CALLABLE inline void adj_extract(const shape_t& s, int i, const shape_t& adj_s, int adj_i, int adj_ret) { }
-
 inline CUDA_CALLABLE void print(shape_t s)
 {
     // todo: only print valid dims, currently shape has a fixed size
@@ -166,7 +176,7 @@ inline CUDA_CALLABLE void print(shape_t s)
     // should probably store ndim with shape
     printf("(%d, %d, %d, %d)\n", s.dims[0], s.dims[1], s.dims[2], s.dims[3]);
 }
-inline CUDA_CALLABLE void adj_print(shape_t s, shape_t& adj_s) { }
+inline CUDA_CALLABLE void adj_print(shape_t s, shape_t& adj_s) { /* nop: shape_t has no gradient */ }
 
 
 template <typename T> struct array_t {
@@ -733,6 +743,8 @@ template <typename T> CUDA_CALLABLE inline T& index(const indexedarray_t<T>& iar
 }
 
 
+// Unlike the variadic slice overload, these default-construct their result.
+// See 7e5fb05b for the sm_89 NVCC miscompile behind that difference.
 template <typename T> CUDA_CALLABLE inline array_t<T> view(array_t<T>& src, int i)
 {
     assert(src.ndim > 1);
@@ -815,6 +827,15 @@ template <typename T> CUDA_CALLABLE inline array_t<T> view(array_t<T>& src, int 
 }
 
 
+CUDA_CALLABLE inline slice_t view_arg_as_slice(int index) { return { index, index, 1 }; }
+
+CUDA_CALLABLE inline slice_t view_arg_as_slice(const slice_t& slice) { return slice; }
+
+CUDA_CALLABLE inline bool view_arg_is_slice(int) { return false; }
+
+CUDA_CALLABLE inline bool view_arg_is_slice(const slice_t&) { return true; }
+
+
 template <typename T, size_t... Idxs>
 CUDA_CALLABLE inline size_t byte_offset_helper(array_t<T>& src, const slice_t (&slices)[sizeof...(Idxs)], index_sequence<Idxs...>)
 {
@@ -829,13 +850,14 @@ CUDA_CALLABLE inline array_t<T> view(array_t<T>& src, const Slices&... slice_arg
     static_assert(N >= 1 && N <= 4, "view supports 1 to 4 slices");
     assert(src.ndim >= N);
 
-    slice_t slices[N] = { slice_args... };
+    slice_t slices[N] = { view_arg_as_slice(slice_args)... };
+    bool is_slice_arg[N] = { view_arg_is_slice(slice_args)... };
     int slice_idxs[N];
     int slice_count = 0;
 
     for (int i = 0; i < N; ++i) {
-        if (slices[i].step == 0) {
-            // We have a slice representing an integer index.
+        if (!is_slice_arg[i]) {
+            // We have an integer index.
             if (slices[i].start < 0) {
                 slices[i].start += src.shape[i];
             }
@@ -848,7 +870,10 @@ CUDA_CALLABLE inline array_t<T> view(array_t<T>& src, const Slices&... slice_arg
 
     size_t offset = byte_offset_helper(src, slices, make_index_sequence<N> {});
 
-    array_t<T> out;
+    // Copy-construct rather than default-construct to work around an NVCC
+    // miscompile observed on older architectures (sm_89).
+    array_t<T> out(src);
+    out.flags = 0;
 
     out.data = data_at_byte_offset(src, offset);
     if (src.grad) {
@@ -858,7 +883,7 @@ CUDA_CALLABLE inline array_t<T> view(array_t<T>& src, const Slices&... slice_arg
     int dim = 0;
     for (; dim < slice_count; ++dim) {
         int idx = slice_idxs[dim];
-        out.shape[dim] = slice_get_length(slices[idx]);
+        out.shape[dim] = slice_get_length_unchecked(slices[idx]);
         out.strides[dim] = src.strides[idx] * slices[idx].step;
     }
     for (; dim < slice_count + 4 - N; ++dim) {
@@ -964,17 +989,24 @@ template <typename T> CUDA_CALLABLE inline indexedarray_t<T> view(indexedarray_t
 template <template <typename> class A1, template <typename> class A2, template <typename> class A3, typename T>
 inline CUDA_CALLABLE void adj_view(A1<T>& src, int i, A2<T>& adj_src, int adj_i, A3<T>& adj_ret)
 {
+    // nop: view aliases the underlying array's storage; gradients flow through
+    // subsequent operations on the view via the underlying array's .grad
 }
 template <template <typename> class A1, template <typename> class A2, template <typename> class A3, typename T>
 inline CUDA_CALLABLE void adj_view(A1<T>& src, int i, int j, A2<T>& adj_src, int adj_i, int adj_j, A3<T>& adj_ret)
 {
+    // nop: view aliases the underlying array's storage; gradients flow through
+    // subsequent operations on the view via the underlying array's .grad
 }
 template <template <typename> class A1, template <typename> class A2, template <typename> class A3, typename T>
 inline CUDA_CALLABLE void
 adj_view(A1<T>& src, int i, int j, int k, A2<T>& adj_src, int adj_i, int adj_j, int adj_k, A3<T>& adj_ret)
 {
+    // nop: view aliases the underlying array's storage; gradients flow through
+    // subsequent operations on the view via the underlying array's .grad
 }
 
+// Fallback overload for unsupported view signatures; intentionally empty.
 template <typename... Args> CUDA_CALLABLE inline void adj_view(Args&&...) { }
 
 // TODO: lower_bound() for indexed arrays?
@@ -1002,25 +1034,6 @@ template <typename T> CUDA_CALLABLE inline int lower_bound(const array_t<T>& arr
 template <typename T> CUDA_CALLABLE inline int lower_bound(const array_t<T>& arr, T value)
 {
     return lower_bound(arr, 0, arr.shape[0], value);
-}
-
-template <typename T>
-inline CUDA_CALLABLE void adj_lower_bound(const array_t<T>& arr, T value, array_t<T> adj_arr, T adj_value, int adj_ret)
-{
-}
-template <typename T>
-inline CUDA_CALLABLE void adj_lower_bound(
-    const array_t<T>& arr,
-    int arr_begin,
-    int arr_end,
-    T value,
-    array_t<T> adj_arr,
-    int adj_arr_begin,
-    int adj_arr_end,
-    T adj_value,
-    int adj_ret
-)
-{
 }
 
 template <template <typename> class A, typename T> inline CUDA_CALLABLE T atomic_add(const A<T>& buf, int i, T value)
@@ -1395,6 +1408,38 @@ adj_array_store(const array_t<T>& buf, int i, T value, const array_t<T>& adj_buf
 
     FP_VERIFY_ADJ_1(value, adj_value)
 }
+
+// Slot-level variant of adj_array_store. Reads and (optionally) zeros a
+// specific slot within an array element, rather than treating the whole
+// element as the adjoint value. Used to give in-place composite-component
+// writes (``arr[i].y = rhs``, ``arr[i][r, c] = rhs``, ``arr[i].field = rhs``)
+// a correct O(1) backward pass that matches the O(1) single-slot forward
+// instead of the whole-element cost the full ``adj_array_store`` incurs.
+//
+// The ``access`` functor maps an element ``T&`` to the slot reference
+// within it — encode any composite-component access chain at codegen
+// time via a short lambda. Variadic ``Ints`` carries the array indices
+// so this template handles 1-D through N-D arrays uniformly.
+template <typename T, typename Accessor, typename AdjSlot, typename... Ints>
+inline CUDA_CALLABLE void adj_array_store_slot(
+    const array_t<T>& buf, const array_t<T>& adj_buf, AdjSlot& adj_value, Accessor access, Ints... indices
+)
+{
+    if (adj_buf.data) {
+        AdjSlot& slot = access(index(adj_buf, indices...));
+        adj_value += slot;
+        if (buf.grad && adj_buf.data == buf.grad && !(buf.flags & ARRAY_FLAG_RETAIN_GRAD))
+            slot = AdjSlot {};
+    } else if (buf.grad) {
+        AdjSlot& slot = access(index_grad(buf, indices...));
+        adj_value += slot;
+        if (!(buf.flags & ARRAY_FLAG_RETAIN_GRAD))
+            slot = AdjSlot {};
+    }
+
+    FP_VERIFY_ADJ_SLOT(adj_value)
+}
+
 template <typename T>
 inline CUDA_CALLABLE void adj_array_store(
     const array_t<T>& buf, int i, int j, T value, const array_t<T>& adj_buf, int adj_i, int adj_j, T& adj_value
@@ -2258,11 +2303,6 @@ inline CUDA_CALLABLE void adj_atomic_xor(
 
 
 template <template <typename> class A, typename T> CUDA_CALLABLE inline int len(const A<T>& a) { return a.shape[0]; }
-
-template <template <typename> class A, typename T>
-CUDA_CALLABLE inline void adj_len(const A<T>& a, A<T>& adj_a, int& adj_ret)
-{
-}
 
 }  // namespace wp
 

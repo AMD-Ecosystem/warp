@@ -81,8 +81,15 @@ BUILTINS_REF_DIR = "language_reference"
 SKIP = (
     "warp._src",
     "warp.examples",
+    "warp.jax_experimental",
     "warp.tests",
 )
+
+ROOT_REEXPORTS_DOCUMENTED_IN_ROOT = ("DeterministicMode",)
+
+MODULE_SYMBOL_EXCLUDES = {
+    "warp.config": frozenset(("DeterministicMode",)),
+}
 
 
 # Mock Dependencies
@@ -212,11 +219,15 @@ def get_public_symbols(
     run_isolated: bool = False,
 ) -> tuple[str, ...]:
     """Return the list of public names for a given module name."""
+    excluded_symbols = MODULE_SYMBOL_EXCLUDES.get(module_name, ())
+
     if run_isolated:
-        return tuple(sorted(filter(is_symbol_public, get_isolated_dir(module_name))))
+        return tuple(
+            sorted(x for x in filter(is_symbol_public, get_isolated_dir(module_name)) if x not in excluded_symbols)
+        )
 
     module = importlib.import_module(module_name)
-    return tuple(sorted(filter(is_symbol_public, dir(module))))
+    return tuple(sorted(x for x in filter(is_symbol_public, dir(module)) if x not in excluded_symbols))
 
 
 class SymbolType(IntEnum):
@@ -707,7 +718,9 @@ def run():
                 {
                     x: other_module_name
                     for x in symbols
-                    if x in other_symbols and getattr(module, x) is getattr(other_module, x)
+                    if x in other_symbols
+                    and getattr(module, x) is getattr(other_module, x)
+                    and not (module_name == "warp" and x in ROOT_REEXPORTS_DOCUMENTED_IN_ROOT)
                 }
             )
 

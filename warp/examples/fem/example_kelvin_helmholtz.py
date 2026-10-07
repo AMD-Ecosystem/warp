@@ -516,7 +516,7 @@ class Example:
         # corruption in libamdhip64). Capture itself succeeds, so the graph-is-None
         # check below does not catch it; skip capture up front and run eagerly.
         device = wp.get_device()
-        self.use_cuda_graph = device.is_cuda and not device.is_hip
+        self.use_cuda_graph = device.is_cuda and not device.is_hip and wp.is_conditional_graph_supported()
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
                 self.simulate()

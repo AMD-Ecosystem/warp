@@ -13,6 +13,10 @@ inline CUDA_CALLABLE float smootherstep(float t) { return t * t * t * (t * (t * 
 
 inline CUDA_CALLABLE float smootherstep_gradient(float t) { return 30.f * t * t * (t * (t - 2.f) + 1.f); }
 
+// Second derivative of smootherstep: S(t) = 6t^5 - 15t^4 + 10t^3, so
+// S''(t) = 120t^3 - 180t^2 + 60t = 60t(2t-1)(t-1).
+inline CUDA_CALLABLE float smootherstep_hessian(float t) { return 60.f * t * (t * (t * 2.f - 3.f) + 1.f); }
+
 inline CUDA_CALLABLE float smoothstep(float t) { return t * t * (3.f - t * 2.f); }
 
 inline CUDA_CALLABLE float smoothstep_gradient(float t) { return 6.f * t * (1.f - t); }
@@ -441,6 +445,195 @@ inline CUDA_CALLABLE vec4 noise_4d_gradient(
     return gradient;
 }
 
+// Analytic Hessians of Perlin noise (second partials with respect to dx, dy,
+// [dz, dt]). Used by the analytic curlnoise adjoint to chain through the
+// consumed gradient field. Derivation: differentiate
+// ``noise_Nd_gradient`` symbolically. The noise is a smootherstep-tensor
+// interpolation of per-corner values ``v = dot(d, g)`` that are linear in
+// the input, so v's second partials vanish and all the second-derivative
+// content comes from differentiating through S(dx), S(dy), ... themselves.
+
+// Per-level bundle used in Hessian composition: function value, gradient
+// (wrt all input axes), and Hessian (symmetric). Kept as a templated
+// struct so the composition rule is shared across 2D / 3D / 4D.
+template <unsigned N> struct noise_level_t {
+    float val = 0.0f;
+    vec_t<N, float> grad;
+    mat_t<N, N, float> hess;
+};
+
+// Leaf node: v_ij... = dot(d, g). Linear in input → Hessian is zero.
+template <unsigned N>
+inline CUDA_CALLABLE noise_level_t<N> noise_level_leaf(const vec_t<N, float>& d, const vec_t<N, float>& g)
+{
+    noise_level_t<N> F;
+    F.val = dot(d, g);
+    F.grad = g;
+    F.hess = mat_t<N, N, float>();
+    return F;
+}
+
+// Compose an ``interp(A, B; u)`` step where u = x_k (the k-th input axis).
+// S, S1, S2 are smootherstep(u), its first derivative, and its second
+// derivative pre-evaluated at u. Using the product / chain rule:
+//   F = A + (B - A) S(u)
+//   ∇F = ∇A + (∇B - ∇A) S(u) + (B - A) S'(u) e_k
+//   H_F[i,j] = H_A[i,j] + (H_B[i,j] - H_A[i,j]) S(u)
+//            + S'(u) * ((∇B - ∇A)[i] δ_{j,k} + (∇B - ∇A)[j] δ_{i,k})
+//            + (B - A) S''(u) δ_{i,k} δ_{j,k}
+template <unsigned N>
+inline CUDA_CALLABLE noise_level_t<N>
+noise_level_compose(const noise_level_t<N>& A, const noise_level_t<N>& B, unsigned k, float S, float S1, float S2)
+{
+    noise_level_t<N> F;
+    float dv = B.val - A.val;
+    F.val = A.val + dv * S;
+
+    vec_t<N, float> dg;
+    for (unsigned i = 0; i < N; ++i)
+        dg[i] = B.grad[i] - A.grad[i];
+
+    for (unsigned i = 0; i < N; ++i)
+        F.grad[i] = A.grad[i] + dg[i] * S;
+    F.grad[k] += dv * S1;
+
+    for (unsigned i = 0; i < N; ++i)
+        for (unsigned j = 0; j < N; ++j)
+            F.hess.data[i][j] = A.hess.data[i][j] + (B.hess.data[i][j] - A.hess.data[i][j]) * S;
+    for (unsigned i = 0; i < N; ++i) {
+        F.hess.data[i][k] += dg[i] * S1;
+        F.hess.data[k][i] += dg[i] * S1;
+    }
+    F.hess.data[k][k] += dv * S2;
+
+    return F;
+}
+
+inline CUDA_CALLABLE mat22 noise_2d_hessian(uint32 state, int x0, int y0, int x1, int y1, float dx, float dy)
+{
+    vec2 g00 = random_gradient_2d(state, x0, y0);
+    vec2 g10 = random_gradient_2d(state, x1, y0);
+    vec2 g01 = random_gradient_2d(state, x0, y1);
+    vec2 g11 = random_gradient_2d(state, x1, y1);
+
+    noise_level_t<2> l00 = noise_level_leaf<2>(vec2(dx, dy), g00);
+    noise_level_t<2> l10 = noise_level_leaf<2>(vec2(dx - 1.f, dy), g10);
+    noise_level_t<2> l01 = noise_level_leaf<2>(vec2(dx, dy - 1.f), g01);
+    noise_level_t<2> l11 = noise_level_leaf<2>(vec2(dx - 1.f, dy - 1.f), g11);
+
+    float S_x = smootherstep(dx), S1_x = smootherstep_gradient(dx), S2_x = smootherstep_hessian(dx);
+    float S_y = smootherstep(dy), S1_y = smootherstep_gradient(dy), S2_y = smootherstep_hessian(dy);
+
+    noise_level_t<2> xi0 = noise_level_compose<2>(l00, l10, 0u, S_x, S1_x, S2_x);
+    noise_level_t<2> xi1 = noise_level_compose<2>(l01, l11, 0u, S_x, S1_x, S2_x);
+    noise_level_t<2> N = noise_level_compose<2>(xi0, xi1, 1u, S_y, S1_y, S2_y);
+
+    return N.hess;
+}
+
+inline CUDA_CALLABLE mat33
+noise_3d_hessian(uint32 state, int x0, int y0, int z0, int x1, int y1, int z1, float dx, float dy, float dz)
+{
+    vec3 g000 = random_gradient_3d(state, x0, y0, z0);
+    vec3 g100 = random_gradient_3d(state, x1, y0, z0);
+    vec3 g010 = random_gradient_3d(state, x0, y1, z0);
+    vec3 g110 = random_gradient_3d(state, x1, y1, z0);
+    vec3 g001 = random_gradient_3d(state, x0, y0, z1);
+    vec3 g101 = random_gradient_3d(state, x1, y0, z1);
+    vec3 g011 = random_gradient_3d(state, x0, y1, z1);
+    vec3 g111 = random_gradient_3d(state, x1, y1, z1);
+
+    noise_level_t<3> l000 = noise_level_leaf<3>(vec3(dx, dy, dz), g000);
+    noise_level_t<3> l100 = noise_level_leaf<3>(vec3(dx - 1.f, dy, dz), g100);
+    noise_level_t<3> l010 = noise_level_leaf<3>(vec3(dx, dy - 1.f, dz), g010);
+    noise_level_t<3> l110 = noise_level_leaf<3>(vec3(dx - 1.f, dy - 1.f, dz), g110);
+    noise_level_t<3> l001 = noise_level_leaf<3>(vec3(dx, dy, dz - 1.f), g001);
+    noise_level_t<3> l101 = noise_level_leaf<3>(vec3(dx - 1.f, dy, dz - 1.f), g101);
+    noise_level_t<3> l011 = noise_level_leaf<3>(vec3(dx, dy - 1.f, dz - 1.f), g011);
+    noise_level_t<3> l111 = noise_level_leaf<3>(vec3(dx - 1.f, dy - 1.f, dz - 1.f), g111);
+
+    float S_x = smootherstep(dx), S1_x = smootherstep_gradient(dx), S2_x = smootherstep_hessian(dx);
+    float S_y = smootherstep(dy), S1_y = smootherstep_gradient(dy), S2_y = smootherstep_hessian(dy);
+    float S_z = smootherstep(dz), S1_z = smootherstep_gradient(dz), S2_z = smootherstep_hessian(dz);
+
+    noise_level_t<3> xi00 = noise_level_compose<3>(l000, l100, 0u, S_x, S1_x, S2_x);
+    noise_level_t<3> xi10 = noise_level_compose<3>(l010, l110, 0u, S_x, S1_x, S2_x);
+    noise_level_t<3> xi01 = noise_level_compose<3>(l001, l101, 0u, S_x, S1_x, S2_x);
+    noise_level_t<3> xi11 = noise_level_compose<3>(l011, l111, 0u, S_x, S1_x, S2_x);
+
+    noise_level_t<3> yi0 = noise_level_compose<3>(xi00, xi10, 1u, S_y, S1_y, S2_y);
+    noise_level_t<3> yi1 = noise_level_compose<3>(xi01, xi11, 1u, S_y, S1_y, S2_y);
+
+    noise_level_t<3> N = noise_level_compose<3>(yi0, yi1, 2u, S_z, S1_z, S2_z);
+
+    return N.hess;
+}
+
+inline CUDA_CALLABLE mat44 noise_4d_hessian(
+    uint32 state, int x0, int y0, int z0, int t0, int x1, int y1, int z1, int t1, float dx, float dy, float dz, float dt
+)
+{
+    vec4 g0000 = random_gradient_4d(state, x0, y0, z0, t0);
+    vec4 g1000 = random_gradient_4d(state, x1, y0, z0, t0);
+    vec4 g0100 = random_gradient_4d(state, x0, y1, z0, t0);
+    vec4 g1100 = random_gradient_4d(state, x1, y1, z0, t0);
+    vec4 g0010 = random_gradient_4d(state, x0, y0, z1, t0);
+    vec4 g1010 = random_gradient_4d(state, x1, y0, z1, t0);
+    vec4 g0110 = random_gradient_4d(state, x0, y1, z1, t0);
+    vec4 g1110 = random_gradient_4d(state, x1, y1, z1, t0);
+    vec4 g0001 = random_gradient_4d(state, x0, y0, z0, t1);
+    vec4 g1001 = random_gradient_4d(state, x1, y0, z0, t1);
+    vec4 g0101 = random_gradient_4d(state, x0, y1, z0, t1);
+    vec4 g1101 = random_gradient_4d(state, x1, y1, z0, t1);
+    vec4 g0011 = random_gradient_4d(state, x0, y0, z1, t1);
+    vec4 g1011 = random_gradient_4d(state, x1, y0, z1, t1);
+    vec4 g0111 = random_gradient_4d(state, x0, y1, z1, t1);
+    vec4 g1111 = random_gradient_4d(state, x1, y1, z1, t1);
+
+    noise_level_t<4> l0000 = noise_level_leaf<4>(vec4(dx, dy, dz, dt), g0000);
+    noise_level_t<4> l1000 = noise_level_leaf<4>(vec4(dx - 1.f, dy, dz, dt), g1000);
+    noise_level_t<4> l0100 = noise_level_leaf<4>(vec4(dx, dy - 1.f, dz, dt), g0100);
+    noise_level_t<4> l1100 = noise_level_leaf<4>(vec4(dx - 1.f, dy - 1.f, dz, dt), g1100);
+    noise_level_t<4> l0010 = noise_level_leaf<4>(vec4(dx, dy, dz - 1.f, dt), g0010);
+    noise_level_t<4> l1010 = noise_level_leaf<4>(vec4(dx - 1.f, dy, dz - 1.f, dt), g1010);
+    noise_level_t<4> l0110 = noise_level_leaf<4>(vec4(dx, dy - 1.f, dz - 1.f, dt), g0110);
+    noise_level_t<4> l1110 = noise_level_leaf<4>(vec4(dx - 1.f, dy - 1.f, dz - 1.f, dt), g1110);
+    noise_level_t<4> l0001 = noise_level_leaf<4>(vec4(dx, dy, dz, dt - 1.f), g0001);
+    noise_level_t<4> l1001 = noise_level_leaf<4>(vec4(dx - 1.f, dy, dz, dt - 1.f), g1001);
+    noise_level_t<4> l0101 = noise_level_leaf<4>(vec4(dx, dy - 1.f, dz, dt - 1.f), g0101);
+    noise_level_t<4> l1101 = noise_level_leaf<4>(vec4(dx - 1.f, dy - 1.f, dz, dt - 1.f), g1101);
+    noise_level_t<4> l0011 = noise_level_leaf<4>(vec4(dx, dy, dz - 1.f, dt - 1.f), g0011);
+    noise_level_t<4> l1011 = noise_level_leaf<4>(vec4(dx - 1.f, dy, dz - 1.f, dt - 1.f), g1011);
+    noise_level_t<4> l0111 = noise_level_leaf<4>(vec4(dx, dy - 1.f, dz - 1.f, dt - 1.f), g0111);
+    noise_level_t<4> l1111 = noise_level_leaf<4>(vec4(dx - 1.f, dy - 1.f, dz - 1.f, dt - 1.f), g1111);
+
+    float S_x = smootherstep(dx), S1_x = smootherstep_gradient(dx), S2_x = smootherstep_hessian(dx);
+    float S_y = smootherstep(dy), S1_y = smootherstep_gradient(dy), S2_y = smootherstep_hessian(dy);
+    float S_z = smootherstep(dz), S1_z = smootherstep_gradient(dz), S2_z = smootherstep_hessian(dz);
+    float S_t = smootherstep(dt), S1_t = smootherstep_gradient(dt), S2_t = smootherstep_hessian(dt);
+
+    noise_level_t<4> xi000 = noise_level_compose<4>(l0000, l1000, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi100 = noise_level_compose<4>(l0100, l1100, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi010 = noise_level_compose<4>(l0010, l1010, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi110 = noise_level_compose<4>(l0110, l1110, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi001 = noise_level_compose<4>(l0001, l1001, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi101 = noise_level_compose<4>(l0101, l1101, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi011 = noise_level_compose<4>(l0011, l1011, 0u, S_x, S1_x, S2_x);
+    noise_level_t<4> xi111 = noise_level_compose<4>(l0111, l1111, 0u, S_x, S1_x, S2_x);
+
+    noise_level_t<4> yi00 = noise_level_compose<4>(xi000, xi100, 1u, S_y, S1_y, S2_y);
+    noise_level_t<4> yi10 = noise_level_compose<4>(xi010, xi110, 1u, S_y, S1_y, S2_y);
+    noise_level_t<4> yi01 = noise_level_compose<4>(xi001, xi101, 1u, S_y, S1_y, S2_y);
+    noise_level_t<4> yi11 = noise_level_compose<4>(xi011, xi111, 1u, S_y, S1_y, S2_y);
+
+    noise_level_t<4> zi0 = noise_level_compose<4>(yi00, yi10, 2u, S_z, S1_z, S2_z);
+    noise_level_t<4> zi1 = noise_level_compose<4>(yi01, yi11, 2u, S_z, S1_z, S2_z);
+
+    noise_level_t<4> N = noise_level_compose<4>(zi0, zi1, 3u, S_t, S1_t, S2_t);
+
+    return N.hess;
+}
+
 // non-periodic Perlin noise
 
 inline CUDA_CALLABLE float noise(uint32 state, float x)
@@ -780,6 +973,16 @@ curlnoise(uint32 state, const vec2& xy, const uint32 octaves, const float lacuna
     }
     return vec2(-curl_sum[1], curl_sum[0]);
 }
+// Analytic adjoint of 2D curlnoise.
+//
+// Forward (per octave i; freq_i = lacunarity^i, amp_i = gain^i, pt_i = freq_i * xy):
+//   g_i = ∇N(pt_i)  (noise_2d_gradient at pt_i with the shared state)
+//   curl_sum += amp_i * g_i
+//   ret = (-curl_sum.y, curl_sum.x)
+//
+// Per-octave Jacobian of ret wrt xy (chain rule through pt = freq * xy):
+//   J_i = amp_i * freq_i * [[-H[0,1], -H[1,1]], [H[0,0], H[0,1]]]
+// where H = noise_2d_hessian at pt_i. Reverse-mode accumulates J^T @ adj_ret.
 inline CUDA_CALLABLE void adj_curlnoise(
     uint32 state,
     const vec2& xy,
@@ -794,6 +997,28 @@ inline CUDA_CALLABLE void adj_curlnoise(
     const vec2& adj_ret
 )
 {
+    float freq = 1.f;
+    float amplitude = 1.f;
+
+    for (uint32 i = 0; i < octaves; ++i) {
+        vec2 pt = freq * xy;
+        float dx = pt[0] - floor(pt[0]);
+        float dy = pt[1] - floor(pt[1]);
+
+        int x0 = (int)floor(pt[0]);
+        int y0 = (int)floor(pt[1]);
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+
+        mat22 H = noise_2d_hessian(state, x0, y0, x1, y1, dx, dy);
+        float k = amplitude * freq;
+
+        adj_xy[0] += k * (-H.data[1][0] * adj_ret[0] + H.data[0][0] * adj_ret[1]);
+        adj_xy[1] += k * (-H.data[1][1] * adj_ret[0] + H.data[0][1] * adj_ret[1]);
+
+        amplitude *= gain;
+        freq *= lacunarity;
+    }
 }
 
 inline CUDA_CALLABLE vec3
@@ -836,6 +1061,17 @@ curlnoise(uint32 state, const vec3& xyz, const uint32 octaves, const float lacun
 
     return vec3(curl_sum_3[1] - curl_sum_2[2], curl_sum_1[2] - curl_sum_3[0], curl_sum_2[0] - curl_sum_1[1]);
 }
+// Analytic adjoint of 3D curlnoise.
+//
+// Forward uses three independent noise fields N1, N2, N3 (per-octave state
+// mutations with rand_init). Per octave i, with g_k = ∇N_k(pt_i):
+//   ret = sum_i amp_i * (g3.y - g2.z, g1.z - g3.x, g2.x - g1.y)
+//
+// Per-octave Jacobian of ret wrt xyz (3x3; chain rule multiplies by freq):
+//   J_i.row0 = H3.row1 - H2.row2
+//   J_i.row1 = H1.row2 - H3.row0
+//   J_i.row2 = H2.row0 - H1.row1
+// where H_k is the Hessian of N_k at pt_i. Reverse-mode accumulates J^T @ adj_ret.
 inline CUDA_CALLABLE void adj_curlnoise(
     uint32 state,
     const vec3& xyz,
@@ -847,9 +1083,41 @@ inline CUDA_CALLABLE void adj_curlnoise(
     const uint32& adj_octaves,
     const float& adj_lacunarity,
     const float& adj_gain,
-    vec3& adj_ret
+    const vec3& adj_ret
 )
 {
+    float freq = 1.f;
+    float amplitude = 1.f;
+
+    for (uint32 i = 0; i < octaves; ++i) {
+        vec3 pt = freq * xyz;
+        float dx = pt[0] - floor(pt[0]);
+        float dy = pt[1] - floor(pt[1]);
+        float dz = pt[2] - floor(pt[2]);
+
+        int x0 = (int)floor(pt[0]);
+        int y0 = (int)floor(pt[1]);
+        int z0 = (int)floor(pt[2]);
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+        int z1 = z0 + 1;
+
+        mat33 H1 = noise_3d_hessian(state, x0, y0, z0, x1, y1, z1, dx, dy, dz);
+        state = rand_init(state, 10019689);
+        mat33 H2 = noise_3d_hessian(state, x0, y0, z0, x1, y1, z1, dx, dy, dz);
+        state = rand_init(state, 13112221);
+        mat33 H3 = noise_3d_hessian(state, x0, y0, z0, x1, y1, z1, dx, dy, dz);
+
+        float k = amplitude * freq;
+        for (uint32 c = 0; c < 3; ++c) {
+            adj_xyz[c] += k
+                * (adj_ret[0] * (H3.data[1][c] - H2.data[2][c]) + adj_ret[1] * (H1.data[2][c] - H3.data[0][c])
+                   + adj_ret[2] * (H2.data[0][c] - H1.data[1][c]));
+        }
+
+        amplitude *= gain;
+        freq *= lacunarity;
+    }
 }
 
 inline CUDA_CALLABLE vec3
@@ -895,6 +1163,10 @@ curlnoise(uint32 state, const vec4& xyzt, const uint32 octaves, const float lacu
 
     return vec3(curl_sum_3[1] - curl_sum_2[2], curl_sum_1[2] - curl_sum_3[0], curl_sum_2[0] - curl_sum_1[1]);
 }
+// Analytic adjoint of 4D curlnoise. Same structure as the 3D case but
+// Hessians are 4x4 (the input has a trailing ``t`` axis not in the curl
+// output). adj_xyzt picks up contributions along all 4 axes via the
+// extra Hessian column.
 inline CUDA_CALLABLE void adj_curlnoise(
     uint32 state,
     const vec4& xyzt,
@@ -909,6 +1181,41 @@ inline CUDA_CALLABLE void adj_curlnoise(
     const vec3& adj_ret
 )
 {
+    float freq = 1.f;
+    float amplitude = 1.f;
+
+    for (uint32 i = 0; i < octaves; ++i) {
+        vec4 pt = freq * xyzt;
+        float dx = pt[0] - floor(pt[0]);
+        float dy = pt[1] - floor(pt[1]);
+        float dz = pt[2] - floor(pt[2]);
+        float dt = pt[3] - floor(pt[3]);
+
+        int x0 = (int)floor(pt[0]);
+        int y0 = (int)floor(pt[1]);
+        int z0 = (int)floor(pt[2]);
+        int t0 = (int)floor(pt[3]);
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+        int z1 = z0 + 1;
+        int t1 = t0 + 1;
+
+        mat44 H1 = noise_4d_hessian(state, x0, y0, z0, t0, x1, y1, z1, t1, dx, dy, dz, dt);
+        state = rand_init(state, 10019689);
+        mat44 H2 = noise_4d_hessian(state, x0, y0, z0, t0, x1, y1, z1, t1, dx, dy, dz, dt);
+        state = rand_init(state, 13112221);
+        mat44 H3 = noise_4d_hessian(state, x0, y0, z0, t0, x1, y1, z1, t1, dx, dy, dz, dt);
+
+        float k = amplitude * freq;
+        for (uint32 c = 0; c < 4; ++c) {
+            adj_xyzt[c] += k
+                * (adj_ret[0] * (H3.data[1][c] - H2.data[2][c]) + adj_ret[1] * (H1.data[2][c] - H3.data[0][c])
+                   + adj_ret[2] * (H2.data[0][c] - H1.data[1][c]));
+        }
+
+        amplitude *= gain;
+        freq *= lacunarity;
+    }
 }
 
 }  // namespace wp

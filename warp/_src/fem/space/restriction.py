@@ -12,8 +12,6 @@ from warp._src.fem.utils import compress_node_indices, host_read_at_index
 from .partition import SpacePartition
 from .topology import SpaceTopology
 
-_wp_module_name_ = "warp.fem.space.restriction"
-
 wp.set_module_options({"enable_backward": False})
 
 
@@ -63,6 +61,8 @@ class SpaceRestriction:
 
     def rebuild(self, device: Optional["wp.DeviceLike"] = None, temporary_store: cache.TemporaryStore | None = None):
         """Rebuild internal indices for the space restriction."""
+        self.node_arg_value.invalidate(self)
+
         max_nodes_per_element = self.space_topology.MAX_NODES_PER_ELEMENT
 
         @cache.dynamic_kernel(

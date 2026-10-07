@@ -8,7 +8,7 @@ from warp.tests.unittest_utils import *
 
 
 @wp.kernel
-def test_unpack_array_slice_kernel(arr: wp.array(dtype=int)):
+def test_unpack_array_slice_kernel(arr: wp.array[int]):
     v1 = wp.vec3i(*arr[:3])
     wp.expect_eq(v1, wp.vec3i(1, 2, 3))
 
@@ -162,8 +162,8 @@ def test_unpack_quat_slice_kernel():
 
 
 def test_unpack_error_non_constant_bounds(test, device):
-    @wp.kernel
-    def kernel(arr: wp.array(dtype=int), n: int):
+    @wp.kernel(module="unique")
+    def kernel(arr: wp.array[int], n: int):
         # n is not compile-time constant
         v = wp.vec3i(*arr[:n])
 
@@ -172,8 +172,8 @@ def test_unpack_error_non_constant_bounds(test, device):
 
 
 def test_unpack_error_missing_stop_bound(test, device):
-    @wp.kernel
-    def kernel(arr: wp.array(dtype=int)):
+    @wp.kernel(module="unique")
+    def kernel(arr: wp.array[int]):
         v = wp.vec3i(*arr[0:])  # Missing upper bound
 
     with test.assertRaisesRegex(wp.WarpCodegenValueError, "requires explicit upper bound"):
@@ -181,7 +181,7 @@ def test_unpack_error_missing_stop_bound(test, device):
 
 
 def test_unpack_error_unsupported_type(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel():
         x = 42
 
@@ -193,8 +193,8 @@ def test_unpack_error_unsupported_type(test, device):
 
 
 def test_unpack_error_negative_index(test, device):
-    @wp.kernel
-    def kernel(arr: wp.array(dtype=int)):
+    @wp.kernel(module="unique")
+    def kernel(arr: wp.array[int]):
         v = wp.vec3i(*arr[:-3])
 
     with test.assertRaisesRegex(wp.WarpCodegenValueError, "cannot be negative for arrays"):
@@ -202,8 +202,8 @@ def test_unpack_error_negative_index(test, device):
 
 
 def test_unpack_error_negative_step(test, device):
-    @wp.kernel
-    def kernel(arr: wp.array(dtype=int)):
+    @wp.kernel(module="unique")
+    def kernel(arr: wp.array[int]):
         v = wp.vec3i(*arr[5:2:-1])
 
     with test.assertRaisesRegex(wp.WarpCodegenValueError, "step cannot be negative"):

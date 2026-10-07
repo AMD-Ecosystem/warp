@@ -8,8 +8,6 @@ from warp._src.fem.linalg import array_axpy, symmetric_eigenvalues_qr
 from warp._src.types import type_is_matrix, type_size
 from warp.sparse import BsrMatrix, bsr_assign, bsr_axpy, bsr_block_index, bsr_copy, bsr_mm, bsr_mv
 
-_wp_module_name_ = "warp.fem.dirichlet"
-
 
 def normalize_dirichlet_projector(projector_matrix: BsrMatrix, fixed_value: wp.array | None = None):
     """
@@ -36,7 +34,7 @@ def normalize_dirichlet_projector(projector_matrix: BsrMatrix, fixed_value: wp.a
             kernel=_normalize_dirichlet_projector_kernel,
             dim=projector_matrix.nrow,
             device=projector_values.device,
-            inputs=[projector_matrix.offsets, projector_matrix.columns, projector_values],
+            inputs=[projector_matrix.offsets, projector_matrix.row_counts, projector_matrix.columns, projector_values],
         )
 
     else:
@@ -58,7 +56,13 @@ def normalize_dirichlet_projector(projector_matrix: BsrMatrix, fixed_value: wp.a
             kernel=_normalize_dirichlet_projector_and_values_kernel,
             dim=projector_matrix.nrow,
             device=projector_values.device,
-            inputs=[projector_matrix.offsets, projector_matrix.columns, projector_values, fixed_value],
+            inputs=[
+                projector_matrix.offsets,
+                projector_matrix.row_counts,
+                projector_matrix.columns,
+                projector_values,
+                fixed_value,
+            ],
         )
 
 
@@ -144,13 +148,14 @@ def _normalize_projector_and_value(A: Any, b: Any):
 @wp.kernel
 def _normalize_dirichlet_projector_and_values_kernel(
     offsets: wp.array(dtype=int),
+    row_counts: wp.array(dtype=int),
     columns: wp.array(dtype=int),
     block_values: wp.array(dtype=Any),
     fixed_values: wp.array(dtype=Any),
 ):
     row = wp.tid()
 
-    diag = bsr_block_index(row, row, offsets, columns)
+    diag = bsr_block_index(row, row, offsets, columns, row_counts)
 
     if diag != -1:
         P = block_values[diag]
@@ -164,12 +169,13 @@ def _normalize_dirichlet_projector_and_values_kernel(
 @wp.kernel
 def _normalize_dirichlet_projector_kernel(
     offsets: wp.array(dtype=int),
+    row_counts: wp.array(dtype=int),
     columns: wp.array(dtype=int),
     block_values: wp.array(dtype=Any),
 ):
     row = wp.tid()
 
-    diag = bsr_block_index(row, row, offsets, columns)
+    diag = bsr_block_index(row, row, offsets, columns, row_counts)
 
     if diag != -1:
         P = block_values[diag]

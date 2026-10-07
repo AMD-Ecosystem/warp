@@ -17,17 +17,21 @@ from warp.tests.unittest_utils import *
 kernel_cache = {}
 
 
+_prev_log_level = None
+
+
 def setUpModule():
-    wp.config.quiet = True
+    global _prev_log_level
+    _prev_log_level = wp.config.log_level
+    wp.config.log_level = wp.LOG_WARNING
 
 
 def tearDownModule():
-    wp.config.quiet = False
+    if _prev_log_level is not None:
+        wp.config.log_level = _prev_log_level
 
 
 def test_constructors(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-3,
         np.float32: 1.0e-6,
@@ -43,8 +47,8 @@ def test_constructors(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(kernel_cache, wptype)
 
     def check_scalar_mat_constructor(
-        input: wp.array(dtype=wptype),
-        outcomponents: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        outcomponents: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         m2result = wptype(2) * mat22(input[0])
@@ -62,8 +66,8 @@ def test_constructors(test, device, dtype, register_kernels=False):
                 idx = idx + 1
 
     def check_component_mat_constructor(
-        input: wp.array(dtype=wptype),
-        outcomponents: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        outcomponents: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         m2result = wptype(2) * mat22(input[0], input[1], input[2], input[3])
@@ -98,8 +102,8 @@ def test_constructors(test, device, dtype, register_kernels=False):
                 idx = idx + 1
 
     def check_vector_mat_constructor(
-        input: wp.array(dtype=wptype),
-        outcomponents: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        outcomponents: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         m2result = wptype(2) * wp.matrix_from_cols(vec2(input[0], input[2]), vec2(input[1], input[3]))
@@ -127,6 +131,8 @@ def test_constructors(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(randvals(rng, [1], dtype), requires_grad=True, device=device)
     val = input.numpy()[0]
@@ -182,8 +188,6 @@ def test_constructors(test, device, dtype, register_kernels=False):
 
 
 def test_diag(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-3,
         np.float32: 1.0e-6,
@@ -196,8 +200,8 @@ def test_diag(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(kernel_cache, wptype)
 
     def check_mat_diag(
-        s5: wp.array(dtype=vec5),
-        outcomponents: wp.array(dtype=wptype),
+        s5: wp.array[vec5],
+        outcomponents: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         m55result = wptype(2) * wp.diag(s5[0])
@@ -212,6 +216,8 @@ def test_diag(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s5 = wp.array(randvals(rng, [1, 5], dtype), dtype=vec5, requires_grad=True, device=device)
     outcomponents = wp.zeros(5 * 5, dtype=wptype, requires_grad=True, device=device)
@@ -240,7 +246,7 @@ def test_diag(test, device, dtype, register_kernels=False):
 
 
 def test_anon_constructor_error_shape_arg_missing(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel():
         wp.types.matrix(1.0, 2.0, 3.0)
 
@@ -252,7 +258,7 @@ def test_anon_constructor_error_shape_arg_missing(test, device):
 
 
 def test_anon_constructor_error_shape_mismatch(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel():
         wp.types.matrix(wp.types.matrix(shape=(1, 2), dtype=float), shape=(3, 4), dtype=float)
 
@@ -264,7 +270,7 @@ def test_anon_constructor_error_shape_mismatch(test, device):
 
 
 def test_anon_constructor_error_type_mismatch(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel(x: wp.float32):
         wp.types.matrix(x, shape=(3, 2), dtype=wp.float16)
 
@@ -276,7 +282,7 @@ def test_anon_constructor_error_type_mismatch(test, device):
 
 
 def test_anon_constructor_error_invalid_arg_count(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel():
         wp.types.matrix(1.0, 2.0, 3.0, shape=(2, 2), dtype=float)
 
@@ -288,7 +294,7 @@ def test_anon_constructor_error_invalid_arg_count(test, device):
 
 
 def test_tpl_constructor_error_incompatible_sizes(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel():
         wp.mat33(wp.mat22(1.0, 2.0, 3.0, 4.0))
 
@@ -300,7 +306,7 @@ def test_tpl_constructor_error_incompatible_sizes(test, device):
 
 
 def test_tpl_constructor_error_invalid_arg_count(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel():
         wp.mat22(1.0, 2.0, 3.0)
 
@@ -615,8 +621,6 @@ def test_matrix_constructor_value_func():
 
 
 def test_quat_constructor(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-3,
         np.float32: 1.0e-6,
@@ -631,11 +635,11 @@ def test_quat_constructor(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(kernel_cache, wptype)
 
     def check_mat_quat_constructor(
-        p: wp.array(dtype=vec3),
-        r: wp.array(dtype=quat),
-        s: wp.array(dtype=vec3),
-        outcomponents: wp.array(dtype=wptype),
-        outcomponents_alt: wp.array(dtype=wptype),
+        p: wp.array[vec3],
+        r: wp.array[quat],
+        s: wp.array[vec3],
+        outcomponents: wp.array[wptype],
+        outcomponents_alt: wp.array[wptype],
     ):
         m = wp.transform_compose(p[0], r[0], s[0])
 
@@ -661,6 +665,8 @@ def test_quat_constructor(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     # translation:
     p = wp.array(rng.standard_normal(size=(1, 3)).astype(dtype), dtype=vec3, requires_grad=True, device=device)
@@ -716,7 +722,7 @@ def test_identity(test, device, dtype, register_kernels=False):
     wptype = wp._src.types.np_dtype_to_warp_type[np.dtype(dtype)]
 
     def check_identity_mat(
-        output: wp.array(dtype=wptype),
+        output: wp.array[wptype],
     ):
         m2result = wp.identity(dtype=wptype, n=2)
         m5result = wp.identity(dtype=wptype, n=5)
@@ -743,8 +749,6 @@ def test_identity(test, device, dtype, register_kernels=False):
 
 
 def test_anon_type_instance(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -754,8 +758,8 @@ def test_anon_type_instance(test, device, dtype, register_kernels=False):
     wptype = wp._src.types.np_dtype_to_warp_type[np.dtype(dtype)]
 
     def check_scalar_init(
-        input: wp.array(dtype=wptype),
-        output: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        output: wp.array[wptype],
     ):
         m2result = wp.types.matrix(input[0], shape=(2, 2))
         m4result = wp.types.matrix(input[1], shape=(4, 4))
@@ -776,8 +780,8 @@ def test_anon_type_instance(test, device, dtype, register_kernels=False):
                 idx = idx + 1
 
     def check_component_init(
-        input: wp.array(dtype=wptype),
-        output: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        output: wp.array[wptype],
     ):
         m2result = wp.types.matrix(input[0], input[1], input[2], input[3], shape=(2, 2))
         m4result = wp.types.matrix(
@@ -821,6 +825,8 @@ def test_anon_type_instance(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(randvals(rng, [3], dtype), requires_grad=True, device=device)
     output = wp.zeros(2 * 2 + 4 * 4 + 3 * 2, dtype=wptype, requires_grad=True, device=device)

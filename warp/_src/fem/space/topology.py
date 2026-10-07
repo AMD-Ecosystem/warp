@@ -9,8 +9,6 @@ from warp._src.fem import cache
 from warp._src.fem.geometry import DeformedGeometry, Geometry
 from warp._src.fem.types import NULL_ELEMENT_INDEX, NULL_NODE_INDEX, ElementIndex
 
-_wp_module_name_ = "warp.fem.space.topology"
-
 
 class SpaceTopology:
     """
@@ -28,6 +26,12 @@ class SpaceTopology:
     """maximum number of interpolation nodes per element of the geometry.
 
     .. note:: This will change to be defined per-element in future versions
+    """
+
+    ElementArg: type
+    """Structure type holding the geometry element arguments passed to device functions.
+
+    Assigned per instance from the underlying geometry.
     """
 
     _dynamic_attribute_constructors: ClassVar = {
@@ -80,7 +84,7 @@ class SpaceTopology:
 
     @staticmethod
     def element_node_count(
-        geo_arg: "ElementArg",  # noqa: F821
+        geo_arg: "SpaceTopology.ElementArg",
         topo_arg: "TopologyArg",
         element_index: ElementIndex,
     ) -> int:
@@ -89,7 +93,7 @@ class SpaceTopology:
 
     @staticmethod
     def element_node_index(
-        geo_arg: "ElementArg",  # noqa: F821
+        geo_arg: "SpaceTopology.ElementArg",
         topo_arg: "TopologyArg",
         element_index: ElementIndex,
         node_index_in_elt: int,
@@ -99,7 +103,7 @@ class SpaceTopology:
 
     @staticmethod
     def side_neighbor_node_counts(
-        side_arg: "ElementArg",  # noqa: F821
+        side_arg: "SpaceTopology.ElementArg",
         topo_arg: "TopologyArg",
         side_index: ElementIndex,
     ) -> tuple[int, int]:
@@ -386,6 +390,12 @@ class RegularDiscontinuousSpaceTopologyMixin:
 
     def node_count(self):
         return self.geometry.cell_count() * self.MAX_NODES_PER_ELEMENT
+
+    def rebuild(self) -> None:
+        """Refresh this topology after rebuilding its geometry.
+
+        Regular discontinuous topologies have no cached connectivity, so no additional work is required.
+        """
 
     @cached_property
     def name(self):

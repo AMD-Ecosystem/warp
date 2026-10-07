@@ -94,11 +94,12 @@ The Python script compiles a SAXPY kernel to CUBIN:
 @wp.kernel
 def saxpy(alpha: wp.float32, x: wp.array(dtype=wp.float32), y: wp.array(dtype=wp.float32)):
     """SAXPY: Single-Precision A·X Plus Y
-    
+
     Computes: y = alpha * x + y
     """
     tid = wp.tid()
     y[tid] = alpha * x[tid] + y[tid]
+
 
 # Compile to CUBIN (use_ptx=False for CUBIN, strip_hash=True for predictable kernel names)
 wp.compile_aot_module("__main__", module_dir="generated/", use_ptx=False, strip_hash=True)
@@ -129,7 +130,7 @@ cudaMalloc(&d_x, N * sizeof(float));
 cudaMalloc(&d_y, N * sizeof(float));
 
 // 3. Create Warp data structures (kernel signature: saxpy(alpha, x, y))
-wp::launch_bounds_t dim = {.shape = {N, 0, 0, 0}, .ndim = 1, .size = size_t(N)};
+wp::launch_bounds_t<1> dim = {.shape = {N}, .size = size_t(N), .coord_mult = 1};
 wp::float32 alpha = 2.5f;  // Scalar parameter
 wp::array_t<wp::float32> arr_x(d_x, N);
 wp::array_t<wp::float32> arr_y(d_y, N);
@@ -142,7 +143,7 @@ cuLaunchKernel(kernel, grid_dim, 1, 1, block_dim, 1, 1, 0, nullptr, params, null
 **Key points:**
 
 - Use Warp's `aot.h` header which automatically detects CUDA compilation and includes `builtin.h`
-- Provides `wp::launch_bounds_t` and `wp::array_t<T>` definitions plus error checking macros
+- Provides `wp::launch_bounds_t<N>` and `wp::array_t<T>` definitions plus error checking macros
 - Use CUDA Driver API for CUBIN loading (`cuModuleLoadData`)
 - Use CUDA Runtime API for memory management (`cudaMalloc`)
 - **All parameters** (scalars, arrays, structs) are passed as pointers in the `params[]` array—this is a

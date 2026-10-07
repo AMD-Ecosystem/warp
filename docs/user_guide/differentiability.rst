@@ -252,7 +252,7 @@ Jacobians
 #########
 
 To compute the Jacobian matrix :math:`J\in\mathbb{R}^{m\times n}` of a multi-valued function :math:`f: \mathbb{R}^n \to \mathbb{R}^m`,
-we can evaluate an entire row of the Jacobian in parallel by finding the Jacobian-vector product :math:`J^\top \mathbf{e}`.
+we can evaluate an entire row of the Jacobian in parallel by finding the vector-Jacobian product :math:`\mathbf{e}^\top J`.
 The vector :math:`\mathbf{e}\in\mathbb{R}^m` selects the indices in the output buffer to differentiate with respect to.
 In Warp, instead of passing a scalar loss buffer to :meth:`warp.Tape.backward`,
 we pass a dictionary ``grads`` mapping from the function output array to the selection vector :math:`\mathbf{e}`
@@ -511,6 +511,8 @@ Now, the output of the above code is:
     ys      [1.        1.4142135 0.       ]
     xs.grad [0.5        0.35355338 0.        ]
 
+.. _custom-replay-function:
+
 Example 2: Custom Replay Function
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -652,80 +654,28 @@ for the input array:
 Custom Native Functions
 #######################
 
-Users may insert native C++/CUDA code in Warp kernels using :func:`@wp.func_native <warp.func_native>` decorated functions.
-These accept native code as strings that get compiled after code generation, and are called within :func:`@wp.kernel <warp.kernel>` functions.
-For example:
+Native functions created with :func:`@wp.func_native <warp.func_native>` insert
+C++/CUDA snippets into generated Warp modules. The general feature is documented
+in :ref:`Native Snippets in Warp Kernels <native_functions>`; this section only
+covers how native snippets interact with tape replay and backward passes.
+
+When a native function participates in a tape-recorded computation, Warp needs
+an adjoint implementation for the native operation. Provide it with the
+``adj_snippet`` argument:
 
 .. testcode::
     :skipif: wp.get_cuda_device_count() == 0
 
     snippet = """
-        __shared__ int sum[128];
-
-        sum[tid] = arr[tid];
-        __syncthreads();
-
-        for (int stride = 64; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-                sum[tid] += sum[tid + stride];
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0) {
-            out[0] = sum[0];
-        }
-        """
-
-    @wp.func_native(snippet)
-    def reduce(arr: wp.array[int], out: wp.array[int], tid: int): ...
-
-
-    @wp.kernel
-    def reduce_kernel(arr: wp.array[int], out: wp.array[int]):
-        tid = wp.tid()
-        reduce(arr, out, tid)
-
-
-    N = 128
-    x = wp.array(np.arange(N, dtype=int), dtype=int)
-    out = wp.zeros(1, dtype=int)
-
-    wp.launch(kernel=reduce_kernel, dim=N, inputs=[x, out])
-
-    print(out)
-
-.. testoutput::
-    :skipif: wp.get_cuda_device_count() == 0
-
-    [8128]
-
-Notice the use of shared memory here: The Warp library does not expose shared memory as a feature, but the CUDA compiler will
-readily accept the above snippet. This means CUDA features not exposed in Warp are still accessible in Warp scripts.
-Warp kernels meant for the CPU won't be able to leverage CUDA features of course, but this same mechanism supports pure C++ snippets as well.
-
-Please bear in mind the following: the thread index in your snippet should be computed in a :func:`@wp.kernel <warp.kernel>` and passed to your snippet,
-as in the above example. This means your :func:`@wp.func_native <warp.func_native>` function signature should include the variables used in your snippet, 
-as well as a thread index of type ``int``. The function body itself should be stubbed with ``...`` (the snippet will be inserted during compilation).
-
-Should you wish to record your native function on the tape and then subsequently rewind the tape, you must include an adjoint snippet
-alongside your snippet as an additional input to the decorator, as in the following example:
-
-.. testcode::
-    :skipif: wp.get_cuda_device_count() == 0
-
-    snippet = """
-    out[tid] = a * x[tid] + y[tid];
+    out[tid] = 2.0f * x[tid] + y[tid];
     """
     adj_snippet = """
-    adj_a += x[tid] * adj_out[tid];
-    adj_x[tid] += a * adj_out[tid];
+    adj_x[tid] += 2.0f * adj_out[tid];
     adj_y[tid] += adj_out[tid];
     """
 
-    @wp.func_native(snippet, adj_snippet)
-    def saxpy(
-        a: float,
+    @wp.func_native(snippet=snippet, adj_snippet=adj_snippet)
+    def axpy(
         x: wp.array[float],
         y: wp.array[float],
         out: wp.array[float],
@@ -734,28 +684,23 @@ alongside your snippet as an additional input to the decorator, as in the follow
         ...
 
     @wp.kernel
-    def saxpy_kernel(
-        a: float,
+    def axpy_kernel(
         x: wp.array[float],
         y: wp.array[float],
-        out: wp.array[float]
+        out: wp.array[float],
     ):
         tid = wp.tid()
-        saxpy(a, x, y, out, tid)
+        axpy(x, y, out, tid)
 
-    N = 128
-    a = 2.0
+    N = 8
     x = wp.array(np.arange(N, dtype=np.float32), dtype=wp.float32, requires_grad=True)
     y = wp.zeros_like(x)
-    out = wp.array(np.arange(N, dtype=np.float32), dtype=wp.float32)
-    adj_out = wp.array(np.ones(N, dtype=np.float32), dtype=wp.float32)
+    out = wp.zeros_like(x)
 
-    tape = wp.Tape()
+    with wp.Tape() as tape:
+        wp.launch(kernel=axpy_kernel, dim=N, inputs=[x, y], outputs=[out])
 
-    with tape:
-        wp.launch(kernel=saxpy_kernel, dim=N, inputs=[a, x, y], outputs=[out])
-
-    tape.backward(grads={out: adj_out})
+    tape.backward(grads={out: wp.ones_like(out)})
 
     print(f"x.grad = {x.grad}")
     print(f"y.grad = {y.grad}")
@@ -763,111 +708,19 @@ alongside your snippet as an additional input to the decorator, as in the follow
 .. testoutput::
     :skipif: wp.get_cuda_device_count() == 0
 
-    x.grad = [2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2.
-     2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2.
-     2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2.
-     2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2.
-     2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2. 2.
-     2. 2. 2. 2. 2. 2. 2. 2.]
-    y.grad = [1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1.
-     1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1.
-     1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1.
-     1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1.
-     1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1.
-     1. 1. 1. 1. 1. 1. 1. 1.]
+    x.grad = [2. 2. 2. 2. 2. 2. 2. 2.]
+    y.grad = [1. 1. 1. 1. 1. 1. 1. 1.]
 
-You may also include a custom replay snippet to be executed as part of the adjoint (see `Custom Gradient Functions`_ for a full explanation).
-Consider the following example:
+During the backward pass, Warp runs a forward replay phase. By default, native
+functions replay the original ``snippet``. If replaying the native snippet would
+repeat an unsafe side effect, provide ``replay_snippet``.
+For example, a native snippet that writes cached indices using an atomic counter
+can use an empty replay snippet so the cached forward values are reused instead
+of overwritten during the backward pass.
 
-.. testcode::
-    :skipif: wp.get_cuda_device_count() == 0
-
-    num_threads = 8
-    counter = wp.zeros(1, dtype=wp.int32)
-    thread_values = wp.zeros(num_threads, dtype=wp.int32)
-    inputs = wp.array(np.arange(num_threads, dtype=np.float32), requires_grad=True)
-    outputs = wp.zeros_like(inputs)
-
-    snippet = """
-        int next_index = atomicAdd(counter, 1);
-        thread_values[tid] = next_index;
-        """
-    replay_snippet = ""
-
-
-    @wp.func_native(snippet, replay_snippet=replay_snippet)
-    def reversible_increment(counter: wp.array[int], thread_values: wp.array[int], tid: int):
-        ...
-
-
-    @wp.kernel
-    def run_atomic_add(
-        input: wp.array[float],
-        counter: wp.array[int],
-        thread_values: wp.array[int],
-        output: wp.array[float],
-    ):
-        tid = wp.tid()
-        reversible_increment(counter, thread_values, tid)
-        idx = thread_values[tid]
-        output[idx] = input[idx] ** 2.0
-
-
-    with wp.Tape() as tape:
-        wp.launch(run_atomic_add, dim=num_threads, inputs=[inputs, counter, thread_values], outputs=[outputs])
-
-    tape.backward(grads={outputs: wp.ones(num_threads, dtype=wp.float32)})
-
-    print(f"inputs.grad = {np.round(inputs.grad.numpy(), 5)}")
-
-.. testoutput::
-    :skipif: wp.get_cuda_device_count() == 0
-
-    inputs.grad = [ 0.  2.  4.  6.  8. 10. 12. 14.]
-
-By default, ``snippet`` would be called in the backward pass, but in this case, we have defined a custom replay snippet that is called instead.
-``replay_snippet`` is a no-op, which is all that we require, since ``thread_values`` are cached in the forward pass.
-If we did not have a ``replay_snippet`` defined, ``thread_values`` would be overwritten with counter values that exceed the input array size in the backward pass.
-
-A native snippet may also include a return statement. If this is the case, you must specify the return type in the native function definition, as in the following example:
-
-.. testcode::
-
-    snippet = """
-        float sq = x * x;
-        return sq;
-        """
-    adj_snippet = """
-        adj_x += 2.f * x * adj_ret;
-        """
-
-
-    @wp.func_native(snippet, adj_snippet)
-    def square(x: float) -> float:
-        ...
-
-
-    @wp.kernel
-    def square_kernel(input: wp.array[Any], output: wp.array[Any]):
-        tid = wp.tid()
-        x = input[tid]
-        output[tid] = square(x)
-
-
-    N = 5
-    x = wp.array(np.arange(N, dtype=float), dtype=float, requires_grad=True)
-    y = wp.zeros_like(x)
-
-    with wp.Tape() as tape:
-        wp.launch(kernel=square_kernel, dim=N, inputs=[x, y])
-
-    tape.backward(grads={y: wp.ones(N, dtype=float)})
-
-    print(f"x.grad = {x.grad}")
-
-.. testoutput::
-
-    x.grad = [0. 2. 4. 6. 8.]
+See :ref:`Native Snippets in Warp Kernels <native_functions>` for the full
+native-function syntax, CPU/CUDA behavior, return values, replay snippets, and
+limitations.
 
 ``grad()``
 #############
@@ -1412,7 +1265,7 @@ The code produces the expected output:
     b.grad = [-1. -1. -1. -1. -1. -1. -1. -1. -1. -1.]
 
 In-place multiplication and division are *not* supported and incorrect results will be obtained in the backward pass.
-A warning will be emitted during code generation if ``wp.config.verbose = True``.
+A warning will be emitted during code generation if ``wp.config.log_level = wp.LOG_DEBUG``.
 
 Vector, Matrix, and Quaternion Component Assignment
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1421,6 +1274,8 @@ Within a kernel, assigning a value to a locally defined vector, matrix, or quate
 important caveat: each component may only be assigned a value once (not including default initialization). Each component may
 then be safely updated with in-place addition or subtraction (``+=`` or ``-=``) operations, but direct re-assignment (``=``)
 will invalidate gradient computations related to the vector, matrix, or quaternion.
+
+.. _dynamic_loops:
 
 Dynamic Loops
 ^^^^^^^^^^^^^
@@ -1565,13 +1420,14 @@ In the backward pass, when computing the adjoint for ``sum``, which is used to c
 ``norm`` is not recomputed in the backward pass because dynamic loops are not replayed. This means that ``norm`` is 0.0 at the start of the adjoint calculation
 rather than the value computed in the forward pass, 3.0.
 
-There is a different remedy for this particular scenario. One can force a dynamic loop to replay in the backward pass by migrating the body of the loop to
-a Warp function:
+There is a workaround for this case. During the backward pass, Warp skips dynamic loops in the kernel body, but it replays calls to Warp functions.
+Replaying a function call runs the function again, including any dynamic loop it contains, and recomputes its return values. We can therefore move the loop
+into a Warp function that returns the accumulated values and keep the division in the kernel:
 
 .. testcode::
 
     @wp.func
-    def loop(x: wp.array[float], weights: wp.array[float], iters: int):
+    def weighted_sum(x: wp.array[float], weights: wp.array[float], iters: int):
         sum = float(0.0)
         norm = float(0.0)
 
@@ -1585,7 +1441,7 @@ a Warp function:
 
     @wp.kernel
     def dynamic_loop_sum(x: wp.array[float], weights: wp.array[float], loss: wp.array[float], iters: int):
-        sum, norm = loop(x, weights, iters)
+        sum, norm = weighted_sum(x, weights, iters)
 
         l = sum / norm
         wp.atomic_add(loss, 0, l)
@@ -1593,7 +1449,7 @@ a Warp function:
 
     iters = 3
     x = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
-    weights = wp.full(shape=iters, value=0.5, dtype=float, requires_grad=True)
+    weights = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
     loss = wp.zeros(1, dtype=float, requires_grad=True)
 
     with wp.Tape() as tape:
@@ -1609,10 +1465,70 @@ Now, the above code produces the expected results:
 
     [0.33333334 0.33333334 0.33333334]
 
-However, this only works because the ``x`` array adjoints do not require an intermediate
-value for ``sum``; they only need the adjoint of ``sum``. In general this workaround is only valid for simple add/subtract operations such as
-``+=`` or ``-=``.
+The backward pass handles ``weighted_sum()`` in two stages. It first replays the original function to recompute its return values. It then runs the
+function's generated adjoint to propagate gradients to ``x`` and ``weights``. In detail:
 
-.. note:: 
+1. Warp calls ``weighted_sum()`` again while replaying the kernel. The function runs its dynamic loop and recomputes the final values of ``sum`` and
+   ``norm``. The kernel's reverse sweep then reads these values where it needs them: the adjoint of the division ``l = sum / norm`` evaluates
+   :math:`\partial l / \partial \mathrm{sum} = 1 / \mathrm{norm}` and :math:`\partial l / \partial \mathrm{norm} = -\mathrm{sum} / \mathrm{norm}^2`
+   with the recomputed values, producing correct adjoints of ``sum`` and ``norm``.
+2. Warp runs the generated adjoint of ``weighted_sum()`` to propagate those adjoints into ``x`` and ``weights``. The adjoint rebuilds the function's local
+   variables by re-executing its statements, with one exception: it never runs the dynamic loop forward, so the accumulators stay at their pre-loop values
+   (here, 0.0) instead of their final sums. The adjoint does iterate over the loop range, but backward and only to apply the adjoint of each statement in
+   the loop body. That is enough here because the adjoint of ``sum += x[i] * w`` needs only ``w`` (recomputed each iteration from ``weights``) and the
+   adjoint of ``sum``, never the value of ``sum`` itself.
 
-    In a subsequent release, we will enable users to force-unroll dynamic loops in some circumstances, thereby obviating these workarounds.
+This limits the workaround in two ways:
+
+* Warp can differentiate simple ``+=`` and ``-=`` accumulations inside the loop because their adjoints do not depend on intermediate accumulator values.
+  Other operations inside the loop body remain subject to the restrictions described earlier in this section.
+* After the loop, the function's adjoint differentiates any use of an accumulator at its pre-loop value. Operations whose derivatives do not depend on the
+  accumulated value, such as scaling by a constant, still produce correct gradients inside the function. Operations whose derivatives do need the final
+  value, such as the division ``sum / norm``, must be performed in the caller, where the replayed call provides the correct values.
+
+To illustrate the second limitation, suppose we instead perform the division inside the Warp function:
+
+.. testcode::
+
+    @wp.func
+    def weighted_mean(x: wp.array[float], weights: wp.array[float], iters: int):
+        sum = float(0.0)
+        norm = float(0.0)
+
+        for i in range(iters):
+            w = weights[i]
+            norm += w
+            sum += x[i] * w
+
+        return sum / norm
+
+
+    @wp.kernel
+    def dynamic_loop_divide(x: wp.array[float], weights: wp.array[float], loss: wp.array[float], iters: int):
+        l = weighted_mean(x, weights, iters)
+
+        wp.atomic_add(loss, 0, l)
+
+
+    iters = 3
+    x = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
+    weights = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    with wp.Tape() as tape:
+        wp.launch(dynamic_loop_divide, dim=1, inputs=[x, weights, loss, iters])
+
+    tape.backward(loss)
+
+    print(x.grad)
+
+The forward pass computes the correct loss, but the adjoint of the division is evaluated with ``norm`` still at its pre-loop value of 0.0, producing incorrect
+gradients:
+
+.. testoutput::
+
+    [inf inf inf]
+
+The pre-loop value read by the adjoint is not necessarily zero, so this failure is not always as visible as an ``inf``: the backward pass may instead
+produce zeros or finite but incorrect gradients. As a rule, return the raw accumulated values from the function and move any operation whose derivative
+depends on them to the caller.

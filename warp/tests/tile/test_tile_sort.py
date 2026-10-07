@@ -8,14 +8,21 @@ import numpy as np
 import warp as wp
 from warp.tests.unittest_utils import *
 
+# Compilation hygiene
+#
+# Tile sort generates substantial code for every length and block dim. These tests do not exercise autodiff, so
+# compiling backward kernels would substantially increase the module size without adding coverage. The bfloat16
+# kernel only runs at one block dim and uses a unique module so it is not included in all five regular sort module
+# variants.
+
 
 def create_sort_kernel(KEY_TYPE, MAX_SORT_LENGTH):
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def tile_sort_kernel(
-        input_keys: wp.array(dtype=KEY_TYPE),
-        input_values: wp.array(dtype=wp.int32),
-        output_keys: wp.array(dtype=KEY_TYPE),
-        output_values: wp.array(dtype=wp.int32),
+        input_keys: wp.array[KEY_TYPE],
+        input_values: wp.array[wp.int32],
+        output_keys: wp.array[KEY_TYPE],
+        output_values: wp.array[wp.int32],
     ):
         # Load input into shared memory
         keys = wp.tile_load(input_keys, shape=MAX_SORT_LENGTH, storage="shared")
@@ -77,33 +84,85 @@ def test_tile_sort(test, device):
                 block_dim=TILE_DIM,
                 device=device,
             )
-            wp.synchronize()
 
             # Sort using NumPy for validation
             sorted_indices = np.argsort(np_keys)
             np_sorted_keys = np_keys[sorted_indices]
             np_sorted_values = np_values[sorted_indices]
 
+            context = f"dtype={dtype}, TILE_DIM={TILE_DIM}, length={length}"
             if dtype == wp.float32:
-                keys_match = np.allclose(output_keys.numpy(), np_sorted_keys, atol=1e-6)  # Use tolerance for floats
+                np.testing.assert_allclose(
+                    output_keys.numpy(),
+                    np_sorted_keys,
+                    rtol=1e-5,
+                    atol=1e-6,
+                    err_msg=f"Key sorting mismatch for {context}",
+                )
             else:  # Integer types
-                keys_match = np.array_equal(output_keys.numpy(), np_sorted_keys)
+                np.testing.assert_array_equal(
+                    output_keys.numpy(),
+                    np_sorted_keys,
+                    err_msg=f"Key sorting mismatch for {context}",
+                )
 
-            values_match = np.array_equal(output_values.numpy(), np_sorted_values)
+            np.testing.assert_array_equal(
+                output_values.numpy(),
+                np_sorted_values,
+                err_msg=f"Value sorting mismatch for {context}",
+            )
 
-            if not keys_match or not values_match:
-                print(f"Test failed for dtype={dtype}, TILE_DIM={TILE_DIM}, length={length}")
-                print("")
-                print(output_keys.numpy())
-                print(np_sorted_keys)
-                print("")
-                print(output_values.numpy())
-                print(np_sorted_values)
-                print("")
 
-            # Validate results
-            test.assertTrue(keys_match, f"Key sorting mismatch for dtype={dtype}!")
-            test.assertTrue(values_match, f"Value sorting mismatch for dtype={dtype}!")
+def create_bfloat16_payload_sort_kernel(length):
+    @wp.kernel(enable_backward=False, module="unique")
+    def tile_sort_bfloat16_kernel(
+        input_keys: wp.array[wp.float32],
+        input_values: wp.array[wp.bfloat16],
+        output_keys: wp.array[wp.float32],
+        output_values: wp.array[wp.bfloat16],
+    ):
+        keys = wp.tile_load(input_keys, shape=length, storage="shared")
+        values = wp.tile_load(input_values, shape=length, storage="shared")
+        wp.tile_sort(keys, values)
+        wp.tile_store(output_keys, keys)
+        wp.tile_store(output_values, values)
+
+    return tile_sort_bfloat16_kernel
+
+
+def test_tile_sort_bfloat16_payload(test, device):
+    """Sort keys with a bfloat16 value payload.
+
+    Exercises the bfloat16 warp-shuffle overload in the radix sort. Integer values are exact
+    in bfloat16.
+    """
+    length = 8
+    np_keys = np.arange(length - 1, -1, -1, dtype=np.float32)
+    np_values = np.arange(1, length + 1, dtype=np.float32)
+
+    input_keys = wp.array(np_keys, dtype=wp.float32, device=device)
+    input_values = wp.array(np_values, dtype=wp.bfloat16, device=device)
+    output_keys = wp.zeros_like(input_keys, device=device)
+    output_values = wp.zeros_like(input_values, device=device)
+
+    wp.launch_tiled(
+        create_bfloat16_payload_sort_kernel(length),
+        dim=1,
+        inputs=[input_keys, input_values, output_keys, output_values],
+        block_dim=32,
+        device=device,
+    )
+
+    sorted_indices = np.argsort(np_keys)
+    np.testing.assert_allclose(output_keys.numpy(), np_keys[sorted_indices], atol=1e-6)
+
+    # Without ml_dtypes, .numpy() returns the raw uint16 bfloat16 bit patterns; decode to float32.
+    np_out = output_values.numpy()
+    if np_out.dtype == np.uint16:
+        decoded = (np_out.astype(np.uint32) << 16).view(np.float32)
+    else:
+        decoded = np_out.astype(np.float32)
+    assert_np_equal(decoded, np_values[sorted_indices])
 
 
 devices = get_test_devices()
@@ -114,6 +173,7 @@ class TestTileSort(unittest.TestCase):
 
 
 add_function_test(TestTileSort, "test_tile_sort", test_tile_sort, devices=devices)
+add_function_test(TestTileSort, "test_tile_sort_bfloat16_payload", test_tile_sort_bfloat16_payload, devices=devices)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

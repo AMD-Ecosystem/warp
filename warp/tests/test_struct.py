@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import gc  # Added for garbage collection tests
+import io
 import unittest
-from typing import Any
+import warnings
+import weakref
+from typing import Any, Literal
 
 import numpy as np
 
 import warp as wp
+from warp._src import logger as _logger
 from warp.fem import Sample as StructFromAnotherModule
 from warp.tests.unittest_utils import *
 
@@ -16,13 +21,13 @@ from warp.tests.unittest_utils import *
 class Model:
     dt: float
     gravity: wp.vec3
-    m: wp.array(dtype=float)
+    m: wp.array[float]
 
 
 @wp.struct
 class State:
-    x: wp.array(dtype=wp.vec3)
-    v: wp.array(dtype=wp.vec3)
+    x: wp.array[wp.vec3]
+    v: wp.array[wp.vec3]
 
 
 @wp.kernel
@@ -85,7 +90,7 @@ def test_step(test, device):
 
 
 @wp.kernel
-def kernel_loss(x: wp.array(dtype=wp.vec3), loss: wp.array(dtype=float)):
+def kernel_loss(x: wp.array[wp.vec3], loss: wp.array[float]):
     i = wp.tid()
     wp.atomic_add(loss, 0, x[i][0] * x[i][0] + x[i][1] * x[i][1] + x[i][2] * x[i][2])
 
@@ -161,7 +166,7 @@ def test_empty(input: Empty):
 
 @wp.struct
 class Uninitialized:
-    data: wp.array(dtype=int)
+    data: wp.array[int]
 
 
 @wp.kernel
@@ -171,7 +176,7 @@ def test_uninitialized(input: Uninitialized):
 
 @wp.struct
 class Baz:
-    data: wp.array(dtype=int)
+    data: wp.array[int]
     z: wp.vec3
 
 
@@ -225,7 +230,7 @@ class MatStruct:
 
 
 @wp.kernel
-def kernel_nested_mat(out: wp.array(dtype=wp.mat44)):
+def kernel_nested_mat(out: wp.array[wp.mat44]):
     s = MatStruct()
 
     s.m[0, 0] = 2.0
@@ -255,8 +260,8 @@ def test_nested_mat(test, device):
 
 
 def test_assign_view(test, device):
-    @wp.kernel
-    def kernel_assign_view(out: wp.array2d(dtype=wp.mat44)):
+    @wp.kernel(module="unique")
+    def kernel_assign_view(out: wp.array2d[wp.mat44]):
         out[0][2, 2] = 6.0
 
     m = wp.array([[wp.mat44()]], dtype=wp.mat44, device=device)
@@ -269,7 +274,7 @@ def test_assign_view(test, device):
 
 
 def test_struct_attribute_error(test, device):
-    @wp.kernel
+    @wp.kernel(module="unique")
     def kernel(foo: Foo):
         _ = foo.nonexisting
 
@@ -295,7 +300,7 @@ def test_struct_inheritance_error(test, device):
 
 
 @wp.kernel
-def test_struct_instantiate(data: wp.array(dtype=int)):
+def test_struct_instantiate(data: wp.array[int]):
     baz = Baz(data, wp.vec3(0.0, 0.0, 26.0))
     bar = Bar(baz, 25.0)
     foo = Foo(bar, 24)
@@ -362,7 +367,7 @@ def GetTestData(value: wp.int32):
 
 
 @wp.kernel
-def test_return_struct(data: wp.array(dtype=wp.int32)):
+def test_return_struct(data: wp.array[wp.int32]):
     tid = wp.tid()
     data[tid] = GetTestData(tid).value
 
@@ -399,7 +404,7 @@ class DefaultAttribStruct:
     d: wp.float64
     v: wp.vec3
     m: wp.mat22
-    a: wp.array(dtype=wp.int32)
+    a: wp.array[wp.int32]
     s: DefaultAttribNested
 
 
@@ -449,7 +454,7 @@ class InnerStruct:
 
 @wp.struct
 class ArrayStruct:
-    array: wp.array(dtype=InnerStruct)
+    array: wp.array[InnerStruct]
 
 
 @wp.kernel
@@ -478,12 +483,12 @@ class VecStruct:
 
 @wp.struct
 class Bar2:
-    z: wp.array(dtype=float)
+    z: wp.array[float]
 
 
 @wp.struct
 class Foo2:
-    x: wp.array(dtype=float)
+    x: wp.array[float]
     y: Bar2
 
 
@@ -656,7 +661,7 @@ def test_struct_array_hash(test, device):
         i: int
 
     @wp.kernel
-    def dummy_kernel(a: wp.array(dtype=ContentHashStruct)):
+    def dummy_kernel(a: wp.array[ContentHashStruct]):
         i = wp.tid()
 
     module_hash_0 = wp.get_module(dummy_kernel.__module__).hash_module()
@@ -667,7 +672,7 @@ def test_struct_array_hash(test, device):
         i: int
 
     @wp.kernel
-    def dummy_kernel(a: wp.array(dtype=ContentHashStruct)):
+    def dummy_kernel(a: wp.array[ContentHashStruct]):
         i = wp.tid()
 
     module_hash_1 = wp.get_module(dummy_kernel.__module__).hash_module()
@@ -684,7 +689,7 @@ def test_struct_array_hash(test, device):
         i: float
 
     @wp.kernel
-    def dummy_kernel(a: wp.array(dtype=ContentHashStruct)):
+    def dummy_kernel(a: wp.array[ContentHashStruct]):
         i = wp.tid()
 
     module_hash_2 = wp.get_module(dummy_kernel.__module__).hash_module()
@@ -697,19 +702,19 @@ def test_struct_array_hash(test, device):
 # Tests for garbage collection behavior with arrays in structs
 @wp.struct
 class StructWithArray:
-    data: wp.array(dtype=float)
+    data: wp.array[float]
     some_value: int
 
 
 @wp.kernel
-def access_array_kernel(s: StructWithArray, out: wp.array(dtype=float)):
+def access_array_kernel(s: StructWithArray, out: wp.array[float]):
     # This kernel is used to verify data integrity by reading the first element.
     # Assumes s.data has at least 1 element for this test.
     out[0] = s.data[0]
 
 
 @wp.kernel
-def compute_loss_from_struct_array_kernel(s_in: StructWithArray, loss_val: wp.array(dtype=float)):
+def compute_loss_from_struct_array_kernel(s_in: StructWithArray, loss_val: wp.array[float]):
     # Compute a simple scalar loss from the array elements for grad testing.
     # Assumes s_in.data has at least 2 elements for this test.
     res = 0.0
@@ -784,6 +789,97 @@ def test_struct_array_gc_requires_grad_toggle(test, device):
     tape.backward(loss=loss_wp)
 
 
+def test_struct_array_gc_replacement_clears_grad_keepalive(test, device):
+    """Test that replacing a struct array clears the old gradient keepalive.
+
+    Replacing a grad-tracked array in a struct should release the old gradient
+    keepalive when the new field value cannot reference that gradient.
+    """
+    for replacement in ("none", "non_grad_array"):
+        with test.subTest(replacement=replacement):
+            s = StructWithArray()
+            old_array = wp.array([1.0, 2.0, 3.0], dtype=float, device=device, requires_grad=True)
+            # Weak references do not keep objects alive. Calling old_grad_ref()
+            # returns the gradient array while a strong reference exists, and
+            # None after the old gradient has been released.
+            old_grad_ref = weakref.ref(old_array.grad)
+            s.data = old_array
+            test.assertIs(getattr(s, "_data_grad", None), old_grad_ref())
+            test.assertIsNotNone(old_grad_ref())
+            del old_array
+
+            if replacement == "none":
+                s.data = None
+            else:
+                s.data = wp.array([4.0, 5.0, 6.0], dtype=float, device=device)
+
+            gc.collect()
+
+            test.assertIsNone(getattr(s, "_data_grad", None))
+            test.assertIsNone(old_grad_ref())
+
+
+@wp.struct
+class ScaledVecStruct:
+    v: wp.vec3
+
+
+@wp.struct
+class ScaledVecAndArrayStruct:
+    v: wp.vec3
+    arr: wp.array[wp.float32]
+
+
+@wp.func
+def make_scaled_vec_struct(x: wp.vec3) -> ScaledVecStruct:
+    s = ScaledVecStruct()
+    s.v = 2.0 * x
+    return s
+
+
+@wp.func
+def make_scaled_vec_and_array_struct(x: wp.vec3, arr: wp.array[wp.float32]) -> ScaledVecAndArrayStruct:
+    s = ScaledVecAndArrayStruct()
+    s.v = 2.0 * x
+    s.arr = arr
+    return s
+
+
+@wp.kernel
+def scaled_vec_struct_dot_kernel(x: wp.array[wp.vec3], loss: wp.array[wp.float32]):
+    s = make_scaled_vec_struct(x[0])
+    loss[0] = wp.dot(s.v, s.v)
+
+
+@wp.kernel
+def scaled_vec_and_array_struct_dot_kernel(x: wp.array[wp.vec3], arr: wp.array[wp.float32], loss: wp.array[wp.float32]):
+    s = make_scaled_vec_and_array_struct(x[0], arr)
+    loss[0] = wp.dot(s.v, s.v)
+
+
+def test_struct_returned_from_func_grad(test, device):
+    """Check that gradients propagate through a struct returned by a ``@wp.func``."""
+
+    # loss = dot(2x, 2x), so d/dx = 8x. For x = [1, 2, 3] the gradient is [8, 16, 24].
+    expected = np.array([8.0, 16.0, 24.0], dtype=np.float32)
+
+    unused_arr = wp.zeros(1, dtype=wp.float32, device=device)
+
+    for struct_name, kernel, extra_inputs in (
+        ("ScaledVecStruct", scaled_vec_struct_dot_kernel, []),
+        ("ScaledVecAndArrayStruct", scaled_vec_and_array_struct_dot_kernel, [unused_arr]),
+    ):
+        with test.subTest(struct=struct_name):
+            x = wp.array([wp.vec3(1.0, 2.0, 3.0)], dtype=wp.vec3, requires_grad=True, device=device)
+            loss = wp.zeros(1, dtype=wp.float32, requires_grad=True, device=device)
+
+            with wp.Tape() as tape:
+                wp.launch(kernel, dim=1, inputs=[x, *extra_inputs, loss], device=device)
+            tape.backward(loss=loss)
+
+            assert_np_equal(x.grad.numpy()[0], expected, tol=1e-5)
+
+
 class TestStruct(unittest.TestCase):
     # check structs default initialized in Python correctly
     def test_struct_default_attributes_python(self):
@@ -792,7 +888,7 @@ class TestStruct(unittest.TestCase):
         wp.launch(check_default_attributes_kernel, dim=1, inputs=[s])
 
     def test_struct_field_type_preservation(self):
-        """Assigning a Warp scalar to a struct field should preserve the Warp type (GH-1288)."""
+        """Assigning a Warp scalar to a struct field should preserve the Warp type."""
 
         @wp.struct
         class ScalarStruct:
@@ -838,6 +934,143 @@ class TestStruct(unittest.TestCase):
         s.f64 = 1.5
         self.assertIsInstance(s.i32, int)
         self.assertIsInstance(s.f64, float)
+
+    def test_struct_array_field_assignment_validation(self):
+        @wp.struct
+        class ArrayFieldStruct:
+            values: wp.array[wp.int32]
+
+        @wp.struct
+        class IndexedArrayFieldStruct:
+            values: wp.indexedarray[wp.int32]
+
+        @wp.struct
+        class Array2DFieldStruct:
+            values: wp.array2d[wp.int32]
+
+        @wp.struct
+        class IndexedArray2DFieldStruct:
+            values: wp.indexedarray[wp.int32, Literal[2]]
+
+        wrong_dtype_array = wp.array([1.0], dtype=wp.float32)
+        indices = wp.array([0], dtype=wp.int32)
+        wrong_dtype_indexedarray = wp.indexedarray1d(wrong_dtype_array, [indices])
+
+        cases = (
+            (ArrayFieldStruct, "array", wrong_dtype_array, r"expects a Warp array, got list"),
+            (
+                IndexedArrayFieldStruct,
+                "indexedarray",
+                wrong_dtype_indexedarray,
+                r"expects a Warp indexed array, got list",
+            ),
+        )
+
+        for struct_type, case_name, wrong_dtype, non_array_error in cases:
+            with self.subTest(case_name=case_name, error="non_array"):
+                s = struct_type()
+                with self.assertRaisesRegex(TypeError, non_array_error):
+                    s.values = [1, 2, 3]
+
+            with self.subTest(case_name=case_name, error="wrong_dtype"):
+                s = struct_type()
+                with self.assertRaisesRegex(TypeError, r"Struct field 'values' expects dtype int32, got float32"):
+                    s.values = wrong_dtype
+
+        wrong_ndim_array = wp.array([1], dtype=wp.int32)
+        wrong_ndim_indexedarray = wp.indexedarray1d(wrong_ndim_array, [indices])
+        ndim_cases = (
+            (Array2DFieldStruct, "array", wrong_ndim_array),
+            (IndexedArray2DFieldStruct, "indexedarray", wrong_ndim_indexedarray),
+        )
+        for struct_type, case_name, wrong_ndim in ndim_cases:
+            with self.subTest(case_name=case_name, error="wrong_ndim"):
+                s = struct_type()
+                with self.assertRaisesRegex(
+                    TypeError,
+                    r"Struct field 'values' expects an array with 2 dimension\(s\), got 1 dimension\(s\)",
+                ):
+                    s.values = wrong_ndim
+
+    def test_struct_scalar_to_composite_field_rejected(self):
+        """A single value assigned to a composite struct field must be rejected."""
+
+        @wp.struct
+        class CompositeFieldStruct:
+            v: wp.vec3
+            m: wp.mat22
+            q: wp.quat
+            t: wp.transform
+
+        fields = (("v", "vec3f"), ("m", "mat22f"), ("q", "quatf"), ("t", "transformf"))
+        values = (123, 1.5, wp.float32(1.5), wp.int32(2))
+
+        for field, type_name in fields:
+            for value in values:
+                with self.subTest(field=field, value_type=type(value).__name__):
+                    s = CompositeFieldStruct()
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        rf"Struct field '{field}' expects {type_name} but got a single value",
+                    ):
+                        setattr(s, field, value)
+
+        # Conversions from containers must keep working.
+        s = CompositeFieldStruct()
+
+        s.v = wp.vec3(1.0, 2.0, 3.0)
+        assert_np_equal(np.array(s.v), np.array([1.0, 2.0, 3.0], dtype=np.float32))
+
+        s.v = [4.0, 5.0, 6.0]
+        assert_np_equal(np.array(s.v), np.array([4.0, 5.0, 6.0], dtype=np.float32))
+
+        s.v = (7.0, 8.0, 9.0)
+        assert_np_equal(np.array(s.v), np.array([7.0, 8.0, 9.0], dtype=np.float32))
+
+        s.v = np.array([10.0, 11.0, 12.0])
+        assert_np_equal(np.array(s.v), np.array([10.0, 11.0, 12.0], dtype=np.float32))
+
+        s.m = [[1.0, 2.0], [3.0, 4.0]]
+        assert_np_equal(np.array(s.m).reshape(2, 2), np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))
+
+        # None still zero-initializes.
+        s.v = None
+        assert_np_equal(np.array(s.v), np.zeros(3, dtype=np.float32))
+
+    def test_struct_numpy_and_boolean_scalar_to_composite_field_deprecated(self):
+        """NumPy numeric scalars and Python, NumPy, and Warp Booleans must warn while promotion is supported."""
+
+        @wp.struct
+        class CompositeFieldStruct:
+            v: wp.vec3
+            m: wp.mat22
+            q: wp.quat
+            t: wp.transform
+
+        fields = (("v", "vec3f"), ("m", "mat22f"), ("q", "quatf"), ("t", "transformf"))
+        values = (True, np.bool_(True), wp.bool(True), np.float32(1.5), np.int64(3))
+
+        saved_warnings_seen = _logger._warnings_seen.copy()
+        try:
+            for field, type_name in fields:
+                for value in values:
+                    with self.subTest(field=field, value_type=type(value).__name__):
+                        s = CompositeFieldStruct()
+                        _logger._warnings_seen.clear()
+                        with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()) as stderr:
+                            warnings.simplefilter("always", DeprecationWarning)
+                            setattr(s, field, value)
+
+                        self.assertRegex(
+                            stderr.getvalue(),
+                            rf"type `{type(value).__name__}`.*`{type_name}`.*struct field '{field}'.*deprecated",
+                        )
+
+                        result = np.array(getattr(s, field)).reshape(-1)
+                        assert_np_equal(result, np.full(result.size, float(value), dtype=np.float32))
+        finally:
+            _logger._warnings_seen.clear()
+            _logger._warnings_seen.update(saved_warnings_seen)
 
     def test_nested_vec_assignment(self):
         v = VecStruct()
@@ -898,16 +1131,16 @@ for device in devices:
         kernel=test_struct_instantiate,
         name="test_struct_instantiate",
         dim=1,
-        inputs=[wp.array([1], dtype=int, device=device)],
         devices=[device],
+        inputs_factory=lambda selected_device: [wp.array([1], dtype=int, device=selected_device)],
     )
     add_kernel_test(
         TestStruct,
         kernel=test_return_struct,
         name="test_return_struct",
         dim=1,
-        inputs=[wp.zeros(10, dtype=int, device=device)],
         devices=[device],
+        inputs_factory=lambda selected_device: [wp.zeros(10, dtype=int, device=selected_device)],
     )
 
 add_kernel_test(
@@ -924,7 +1157,16 @@ add_function_test(
     TestStruct, "test_struct_array_gc_requires_grad_toggle", test_struct_array_gc_requires_grad_toggle, devices=devices
 )
 add_function_test(
+    TestStruct,
+    "test_struct_array_gc_replacement_clears_grad_keepalive",
+    test_struct_array_gc_replacement_clears_grad_keepalive,
+    devices=devices,
+)
+add_function_test(
     TestStruct, "test_struct_array_gc_direct_assignment", test_struct_array_gc_direct_assignment, devices=devices
+)
+add_function_test(
+    TestStruct, "test_struct_returned_from_func_grad", test_struct_returned_from_func_grad, devices=devices
 )
 
 

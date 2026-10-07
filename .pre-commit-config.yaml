@@ -26,9 +26,15 @@ repos:
         language: python
         always_run: true
         pass_filenames: false
+      - id: warp-check-skill-sync
+        name: "warp: check project skills"
+        entry: python tools/pre-commit-hooks/sync_skills.py --pre-commit
+        language: python
+        files: ^(\.pre-commit-config\.yaml$|\.claude/skills/|\.codex/skills/|tools/pre-commit-hooks/sync_skills\.py$)
+        pass_filenames: false
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.15.9
+    rev: v0.16.5
     hooks:
       # Run the linter.
       - id: ruff
@@ -37,16 +43,16 @@ repos:
       - id: ruff-format
   - repo: https://github.com/astral-sh/uv-pre-commit
     # uv version.
-    rev: 0.11.3
+    rev: 0.12.7
     hooks:
       # Update the uv lockfile
       - id: uv-lock
   - repo: https://github.com/crate-ci/typos
-    rev: v1.45.0
+    rev: v1.50.0
     hooks:
       - id: typos
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v22.1.2
+    rev: v23.1.0
     hooks:
       - id: clang-format
         types_or: [c++, c, cuda]

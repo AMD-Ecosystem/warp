@@ -15,6 +15,7 @@ import numpy as np
 
 import warp as wp
 import warp.fem as fem
+from warp.sparse import bsr_mv
 from warp.tests.unittest_utils import add_function_test, get_test_devices
 
 vec2d = wp.vec2d
@@ -51,6 +52,13 @@ def diffusion_form(s: fem.Sample, u: fem.Field, v: fem.Field):
 @fem.integrand
 def boundary_integral(s: fem.Sample, domain: fem.Domain):
     return fem.scalar_type(domain)(1.0)
+
+
+@fem.integrand
+def lookup_integrand(s: fem.Sample, domain: fem.Domain):
+    position = domain(s)
+    closest = fem.lookup(domain, position, s)
+    return domain(closest)[0]
 
 
 # -- Geometry factories --
@@ -226,7 +234,6 @@ def test_fp64_diffusion_matrix(test, device):
                     n = matrix.nrow
                     ones = wp.array(np.ones(n, dtype=np.float64), dtype=wp.float64)
                     row_sums = wp.zeros(n, dtype=wp.float64)
-                    from warp.sparse import bsr_mv  # noqa: PLC0415
 
                     bsr_mv(matrix, ones, row_sums)
                     np.testing.assert_allclose(
@@ -310,6 +317,18 @@ def test_fp64_nanogrid_volume(test, device):
         np.testing.assert_allclose(vol, 1.0, rtol=1e-14, err_msg="Nanogrid volume")
 
 
+def test_fp64_lookup(test, device):
+    with wp.ScopedDevice(device):
+        for geo_name, (factory, _, _) in GEOS.items():
+            geo = factory()
+            # don't build BVH for structured geometries
+            if geo_name not in {"Grid2D", "Grid3D"}:
+                geo.build_bvh()
+            domain = fem.Cells(geo)
+            # for now just test that this doesn't crash
+            _ = fem.integrate(lookup_integrand, domain=domain)
+
+
 # -- Test class --
 
 
@@ -327,7 +346,7 @@ add_function_test(TestFemFp64, "test_fp64_boundary_integral", test_fp64_boundary
 add_function_test(TestFemFp64, "test_fp64_interpolation", test_fp64_interpolation, devices=devices)
 add_function_test(TestFemFp64, "test_fp64_scalar_type_operator", test_fp64_scalar_type_operator, devices=devices)
 add_function_test(TestFemFp64, "test_fp64_nanogrid_volume", test_fp64_nanogrid_volume, devices=devices)
-
+add_function_test(TestFemFp64, "test_fp64_lookup", test_fp64_lookup, devices=devices)
 
 if __name__ == "__main__":
     unittest.main()

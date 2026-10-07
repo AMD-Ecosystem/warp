@@ -9,6 +9,7 @@ import enum
 import functools
 import inspect
 import math
+import operator
 import struct
 import sys
 import types
@@ -22,17 +23,16 @@ from typing import (
     Literal,
     NamedTuple,
     TypeVar,
+    Union,
     get_args,
     get_origin,
 )
 
 import numpy as np
-import numpy.typing as npt
 
 import warp
 import warp.config
-
-_wp_module_name_ = "warp.types"
+from warp._src.logger import log_warning
 
 # type hints
 T = TypeVar("T")
@@ -58,7 +58,7 @@ else:
 
 
 class scalar_base:
-    def __init__(self, x=0):
+    def __init__(self, x: int | float = 0):
         self.value = x
 
     def __bool__(self) -> builtins.bool:
@@ -976,7 +976,7 @@ def vector(length, dtype):
                     try:
                         for x in value:
                             converted.append(vec_t.scalar_import(x))
-                    except ctypes.ArgumentError:
+                    except (TypeError, ctypes.ArgumentError):
                         raise TypeError(
                             f"Expected to assign a slice from a sequence of `{self._wp_scalar_type_.__name__}` values "
                             f"but got `{type(x).__name__}` instead"
@@ -1301,7 +1301,7 @@ def matrix(shape, dtype):
                 try:
                     for x in v:
                         converted.append(mat_t.scalar_import(x))
-                except ctypes.ArgumentError:
+                except (TypeError, ctypes.ArgumentError):
                     raise TypeError(
                         f"Expected to assign a slice from a sequence of `{self._wp_scalar_type_.__name__}` values "
                         f"but got `{type(x).__name__}` instead"
@@ -1338,7 +1338,7 @@ def matrix(shape, dtype):
                 try:
                     for x in v:
                         converted.append(mat_t.scalar_import(x))
-                except ctypes.ArgumentError:
+                except (TypeError, ctypes.ArgumentError):
                     raise TypeError(
                         f"Expected to assign a slice from a sequence of `{self._wp_scalar_type_.__name__}` values "
                         f"but got `{type(x).__name__}` instead"
@@ -1692,27 +1692,63 @@ def transformation(dtype=Any):
 
         def __init__(self, *args, **kwargs):
             arg_len = len(args)
-            if arg_len == 1:
-                if len(kwargs) == 0:
-                    if is_float(args[0]) or is_int(args[0]):
-                        # Initialize from a single scalar.
-                        super().__init__(args[0])
-                        return
-                    if getattr(args[0], "_wp_generic_type_str_", None) == self._wp_generic_type_str_:
-                        # Copy constructor.
-                        super().__init__(*args[0])
-                        return
+            if kwargs:
+                # Only the keyword forms need the original "from components"
+                # signature to be resolved, which is also what reports
+                # unexpected keyword arguments.
+                if arg_len > 2:
+                    # Binding everything at once would report the positional
+                    # count first and hide an unexpected keyword behind it, so
+                    # the keywords are checked on their own.
+                    self._wp_init_from_components_sig_.bind_partial(**kwargs)
+                bound_args = self._wp_init_from_components_sig_.bind(*args, **kwargs)
+                bound_args.apply_defaults()
+                p, q = bound_args.args
             elif arg_len > 2:
                 # Fallback to the vector's constructor.
                 super().__init__(*args)
                 return
+            elif arg_len == 0:
+                # Initialize to the identity.
+                super().__init__()
+                self[6] = 1.0
+                return
+            elif arg_len == 1:
+                value = args[0]
+                if is_float(value) or is_int(value):
+                    # Initialize from a single scalar.
+                    super().__init__(value)
+                    return
+                if getattr(value, "_wp_generic_type_str_", None) == self._wp_generic_type_str_:
+                    # Copy constructor.
+                    if type(value) is type(self):
+                        # Identical types on both sides, so the storage can be
+                        # copied as-is.
+                        ctypes.memmove(self, value, ctypes.sizeof(self))
+                    else:
+                        # Anything else, such as another dtype, goes through the
+                        # vector's constructor to convert each component.
+                        super().__init__(*value)
+                    return
+                if not hasattr(value, "__len__"):
+                    # Fallback to the vector's constructor to fill all the
+                    # components with a single value, like the other vector
+                    # types do.
+                    try:
+                        super().__init__(value)
+                    except (TypeError, ctypes.ArgumentError):
+                        raise TypeError(
+                            "Invalid argument in transformation constructor: "
+                            f"expected a scalar value, got {type(value).__name__}"
+                        ) from None
+                    return
 
-            # For backward compatibility, try to check if the arguments
-            # match the original signature that'd allow initializing
-            # the `p` and `q` components separately.
-            bound_args = self._wp_init_from_components_sig_.bind(*args, **kwargs)
-            bound_args.apply_defaults()
-            p, q = bound_args.args
+                # A lone sequence initializes `p`, leaving `q` to its default.
+                p, q = value, self._wp_init_from_components_sig_.parameters["q"].default
+            else:
+                # For backward compatibility, the two positional arguments
+                # initialize the `p` and `q` components separately.
+                p, q = args
 
             # Even if the arguments match the original "from components"
             # signature, we still need to make sure that they represent
@@ -1723,6 +1759,14 @@ def transformation(dtype=Any):
                 self[0:3] = p
                 self[3:7] = q
                 return
+
+            # The `p`/`q` components were explicitly given but at least one of
+            # them isn't a sequence that can be unpacked.
+            name, value = ("p", p) if not hasattr(p, "__len__") else ("q", q)
+            raise TypeError(
+                f"Invalid argument '{name}' in transformation constructor: "
+                f"expected a sequence, got {type(value).__name__}"
+            )
 
         def __getattr__(self, name):
             if name == "p":
@@ -2136,9 +2180,39 @@ class range_t:
 
 # definition just for kernel type (cannot be a parameter), see bvh.h
 class BvhQuery:
-    """Object used to track state during BVH traversal."""
+    """Object used to track state during BVH traversal.
+
+    Erased parent of the concrete query-kind tags: codegen produces this type only
+    when the concrete kind is lost (a branch merging two kinds, or a function
+    parameter annotated with the parent). Iteration then dispatches on the kind
+    stored in the query at construction.
+    """
 
     _wp_native_name_ = "bvh_query_t"
+
+
+class _BvhQueryAabb(BvhQuery):
+    """Internal dispatch type for AABB queries. Users see BvhQuery."""
+
+    _wp_erase_to_ = BvhQuery
+
+
+class _BvhQueryRay(BvhQuery):
+    """Internal dispatch type for ray queries. Users see BvhQuery."""
+
+    _wp_erase_to_ = BvhQuery
+
+
+class _BvhQueryCapsule(BvhQuery):
+    """Internal dispatch type for capsule queries. Users see BvhQuery."""
+
+    _wp_erase_to_ = BvhQuery
+
+
+class _BvhQuerySphere(BvhQuery):
+    """Internal dispatch type for sphere queries. Users see BvhQuery."""
+
+    _wp_erase_to_ = BvhQuery
 
 
 class BvhQueryTiled:
@@ -2148,10 +2222,32 @@ class BvhQueryTiled:
 
 
 # definition just for kernel type (cannot be a parameter), see mesh.h
-class MeshQueryAABB:
-    """Object used to track state during mesh traversal."""
+class MeshQuery:
+    """Object used to track state during mesh traversal.
+
+    Erased parent of the concrete query-kind tags: codegen produces this type only
+    when the concrete kind is lost (a branch merging two kinds, or a function
+    parameter annotated with the parent). Iteration then dispatches on the kind
+    stored in the query at construction.
+    """
 
     _wp_native_name_ = "mesh_query_aabb_t"
+
+
+class MeshQueryAABB(MeshQuery):
+    """Object used to track state during a mesh AABB query.
+
+    The concrete AABB query kind; public for backward compatibility with code
+    annotated against the pre-1.17 type name.
+    """
+
+    _wp_erase_to_ = MeshQuery
+
+
+class _MeshQuerySphere(MeshQuery):
+    """Internal dispatch type for sphere mesh queries. Users see MeshQuery."""
+
+    _wp_erase_to_ = MeshQuery
 
 
 class MeshQueryAABBTiled:
@@ -2162,21 +2258,49 @@ class MeshQueryAABBTiled:
 
 # definition just for kernel type (cannot be a parameter), see hashgrid.h
 class HashGridQuery:
-    """Object used to track state during neighbor traversal (float32)."""
+    """Object used to track state during :class:`warp.HashGrid` neighbor traversal.
+
+    Query objects are returned by :func:`warp.hash_grid_query`; users normally do not construct them directly.
+    Use ``warp.HashGridQuery[dtype]`` in function annotations when the query's coordinate precision must be
+    explicit, for example ``warp.HashGridQuery[warp.float64]``.
+    """
 
     _wp_native_name_ = "hash_grid_query_f"
+    _wp_public_name_ = "HashGridQuery"
+    _wp_query_dtype_ = float32
+
+    @classmethod
+    def __class_getitem__(cls, dtype):
+        return hash_grid_query_type(dtype)
 
 
-class HashGridQueryH:
-    """Object used to track state during neighbor traversal (float16)."""
-
+class _HashGridQueryH(HashGridQuery):
     _wp_native_name_ = "hash_grid_query_h"
+    _wp_query_dtype_ = float16
 
 
-class HashGridQueryD:
-    """Object used to track state during neighbor traversal (float64)."""
-
+class _HashGridQueryD(HashGridQuery):
     _wp_native_name_ = "hash_grid_query_d"
+    _wp_query_dtype_ = float64
+
+
+_hash_grid_query_types = {
+    float16: _HashGridQueryH,
+    float32: HashGridQuery,
+    float64: _HashGridQueryD,
+}
+
+
+def hash_grid_query_type(dtype):
+    dtype = type_to_warp(dtype)
+    query_type = _hash_grid_query_types.get(dtype)
+    if query_type is None:
+        raise TypeError(f"Unsupported dtype {dtype} for HashGridQuery. Supported types: float16, float32, float64")
+    return query_type
+
+
+def type_is_hash_grid_query(t):
+    return isinstance(t, type) and getattr(t, "_wp_public_name_", None) == "HashGridQuery"
 
 
 # maximum number of dimensions, must match array.h
@@ -2193,33 +2317,49 @@ ARRAY_TYPE_FABRIC_INDEXED = 3
 ARRAY_FLAG_RETAIN_GRAD = 1 << 0
 
 
-# represents bounds for kernel launch (number of threads across multiple dimensions)
-class launch_bounds_t(ctypes.Structure):
-    _fields_ = (
-        ("shape", ctypes.c_int32 * LAUNCH_MAX_DIMS),
-        ("ndim", ctypes.c_int32),
-        ("size", ctypes.c_size_t),
-    )
-
+def _make_launch_bounds_class(ndim: int):
     def __init__(self, shape: int | Sequence[int]):
         if isinstance(shape, int):
-            # 1d launch
-            self.ndim = 1
-            self.size = shape
-            self.shape[0] = shape
+            shape = (shape,)
 
-        else:
-            # nd launch
-            self.ndim = len(shape)
-            self.size = 1
+        size = 1
+        for i, extent in enumerate(shape):
+            self.shape[i] = extent
+            size *= extent
 
-            for i in range(self.ndim):
-                self.shape[i] = shape[i]
-                self.size = self.size * shape[i]
+        self.size = size
+        self.coord_mult = 1
 
-        # initialize the remaining dims to 1
-        for i in range(self.ndim, LAUNCH_MAX_DIMS):
-            self.shape[i] = 1
+    return type(
+        f"launch_bounds_{ndim}d_t",
+        (ctypes.Structure,),
+        {
+            "_fields_": (
+                ("shape", ctypes.c_int32 * ndim),
+                ("size", ctypes.c_size_t),
+                ("coord_mult", ctypes.c_size_t),
+            ),
+            "__init__": __init__,
+        },
+    )
+
+
+_launch_bounds_classes = {n: _make_launch_bounds_class(n) for n in range(1, LAUNCH_MAX_DIMS + 1)}
+LaunchBounds = Union[tuple(_launch_bounds_classes.values())]  # noqa: UP007 - dynamic union
+
+
+def launch_bounds_t(dim: int | Sequence[int]) -> LaunchBounds:
+    """Create a launch bounds struct sized for ``dim``."""
+    if isinstance(dim, int):
+        dim = (dim,)
+    elif isinstance(dim, list):
+        dim = tuple(dim)
+
+    cls = _launch_bounds_classes.get(len(dim))
+    if cls is None:
+        raise ValueError(f"Unsupported launch bounds dimensionality: {len(dim)}")
+
+    return cls(dim)
 
 
 INT_WIDTH = ctypes.sizeof(ctypes.c_int) * 8
@@ -2234,6 +2374,8 @@ class slice_t:
         self.start = start
         self.stop = stop
         self.step = step
+        self.start_omitted = False
+        self.stop_omitted = False
 
     def get_length(self, parent_length, wrap=False):
         if any(isinstance(x, warp._src.codegen.Var) for x in (self.start, self.stop, self.step)):
@@ -2442,7 +2584,9 @@ def type_size_in_bytes(dtype: type) -> int:
     size = _type_size_cache.get(dtype)
 
     if size is None:
-        if dtype.__module__ == "ctypes":
+        if is_native_type(dtype):
+            size = ctypes.sizeof(dtype)
+        elif dtype.__module__ == "ctypes":
             size = ctypes.sizeof(dtype)
         elif hasattr(dtype, "_type_"):
             size = getattr(dtype, "_length_", 1) * ctypes.sizeof(dtype._type_)
@@ -2502,6 +2646,8 @@ def type_typestr(dtype: type) -> str:
         return "<u8"
     elif isinstance(dtype, warp._src.codegen.Struct):
         return f"|V{ctypes.sizeof(dtype.ctype)}"
+    elif is_native_type(dtype):
+        return f"|V{ctypes.sizeof(dtype)}"
     elif hasattr(dtype, "_wp_ctype_"):
         # texture types (Texture2D, Texture3D) have _wp_ctype_ pointing to their ctypes struct
         return f"|V{ctypes.sizeof(dtype._wp_ctype_)}"
@@ -2644,6 +2790,12 @@ def type_is_composite(t):
 
 
 value_types = (int, float, builtins.bool, *scalar_and_bool_types)
+_native_value_types: set[type] = set()
+
+
+def is_native_type(t: Any) -> builtins.bool:
+    """Return whether ``t`` is a native value type registered through ``warp.build_experimental``."""
+    return isinstance(t, type) and t in _native_value_types
 
 
 def type_is_value(t: Any) -> builtins.bool:
@@ -2713,7 +2865,7 @@ def is_composite(x):
 
 def is_value(x: Any) -> builtins.bool:
     """Return ``True`` if the value is a value type instance (scalar, vector, matrix, quaternion, or transformation)."""
-    return isinstance(x, value_types) or is_composite(x)
+    return isinstance(x, value_types) or is_composite(x) or type(x) in _native_value_types
 
 
 def is_struct(x) -> builtins.bool:
@@ -2913,6 +3065,30 @@ def types_equal(a, b):
     return types_equal_generic(a, b, match_generic=False)
 
 
+def type_erased_parent(t):
+    """Return the public erased parent of a query-kind dispatch type, or ``None``.
+
+    Concrete query-kind types (e.g. the internal subclasses of ``BvhQuery`` and
+    ``MeshQuery``) carry a ``_wp_erase_to_`` class attribute naming the public
+    parent they decay to when the concrete kind cannot be tracked statically.
+    """
+    if isinstance(t, type):
+        return getattr(t, "_wp_erase_to_", None)
+    return None
+
+
+def type_erasure_join(a, b):
+    """Return the common erased parent of two query-kind types, or ``None``.
+
+    Used by codegen to merge values whose types are sibling query-kind types (or a
+    concrete kind and its erased parent): the merged value decays to the parent,
+    whose iterator dispatches on the kind stored in the query object at runtime.
+    """
+    parent_a = type_erased_parent(a) or a
+    parent_b = type_erased_parent(b) or b
+    return parent_a if parent_a is parent_b else None
+
+
 def strides_from_shape(shape: tuple, dtype):
     ndims = len(shape)
     strides = [None] * ndims
@@ -2995,6 +3171,109 @@ def array_ctype_from_interface(interface: dict, dtype=None, owner=None):
     return array_ctype
 
 
+class Reference:
+    """Internal carrier for a pass-by-reference value.
+
+    Used for both public ``wp.ref[T]`` annotations and codegen lvalues such as
+    array elements and struct fields.
+
+    Args:
+        dtype: The referenced value type ``T``.
+    """
+
+    def __init__(self, dtype):
+        self.value_type = dtype
+
+    @property
+    def dtype(self):
+        return self.value_type
+
+    def __repr__(self):
+        name = getattr(self.value_type, "__name__", repr(self.value_type))
+        return f"wp.ref[{name}]"
+
+    def __eq__(self, other):
+        return isinstance(other, Reference) and self.value_type is other.value_type
+
+    def __hash__(self):
+        return hash((Reference, self.value_type))
+
+
+class ref:
+    """Pass-by-reference parameter annotation: ``wp.ref[T]``.
+
+    Annotate a ``@wp.func`` or ``@wp.func_native`` parameter as ``wp.ref[T]``
+    to receive an addressable argument by reference. Mutations to the parameter
+    are visible in the caller's storage without a return value.
+
+    Accepted argument expressions at call sites include local variables,
+    reference parameters, array elements, struct fields, and
+    vector/matrix/quaternion/transform components. Literals, arithmetic
+    temporaries, and function-call results are rejected at compile time.
+
+    ``wp.ref[T]`` is not allowed in ``@wp.kernel`` signatures; pass addressable
+    values into helper functions instead.
+    """
+
+    def __class_getitem__(cls, dtype):
+        return Reference(dtype)
+
+
+def is_reference(t) -> builtins.bool:
+    """Return ``True`` if *t* is a ``Reference`` instance."""
+    return isinstance(t, Reference)
+
+
+def strip_reference(arg: Any) -> Any:
+    if isinstance(arg, str):
+        return arg
+
+    if is_reference(arg):
+        return arg.value_type
+
+    if isinstance(arg, Sequence):
+        return tuple(strip_reference(x) for x in arg)
+
+    return arg
+
+
+def address_of(expr):
+    """Return the address of an addressable expression as a ``wp.uint64``.
+
+    Only valid inside ``@wp.kernel`` and ``@wp.func`` bodies.  The codegen
+    intercepts this call and emits a pointer cast; it is not a normal Python
+    function and cannot be called from regular Python code.
+
+    Accepted expressions: local variables, array elements (``arr[i]``), struct
+    fields (``s.field``), and ``wp.ref[T]`` parameters.  Literals and
+    function-call results are rejected with a ``WarpCodegenError`` at compile
+    time.
+
+    Use ``array.ptr`` for the base pointer of an entire ``wp.array``.  Use
+    ``wp.address_of(arr[i])`` when the pointer to a specific element is needed.
+
+    Returns:
+        wp.uint64: The address of the expression's storage.
+
+    Raises:
+        RuntimeError: Always, when called from regular Python (outside a kernel
+                      or func body).
+
+    Example::
+
+        @wp.func_native("*(int32_t*)ptr = 42;")
+        def set_via_ptr(ptr: wp.uint64): ...
+
+
+        @wp.kernel(enable_backward=False)
+        def my_kernel(result: wp.array[wp.int32]):
+            val = wp.int32(0)
+            set_via_ptr(wp.address_of(val))
+            result[0] = val  # writes 42
+    """
+    raise RuntimeError("wp.address_of() can only be called inside a @wp.kernel or @wp.func body")
+
+
 class array(Array[DType, NDim]):
     """A fixed-size multi-dimensional array containing values of the same type.
 
@@ -3011,6 +3290,15 @@ class array(Array[DType, NDim]):
         is_contiguous (bool): Indicates whether this array has a contiguous memory layout.
         deleter (Callable[[int, int], None]): A function to be called when the array is deleted,
             taking two arguments: pointer and size. If ``None``, then no function is called.
+
+    Notes:
+        At Python scope, slicing returns a zero-copy view into the same
+        allocation and may produce a non-contiguous array. Scalar item indexing
+        is intentionally unsupported on ``wp.array`` objects; use slices to
+        create views, or call :meth:`numpy` or :meth:`list` to read values on
+        the host. Inside kernels, arrays support element-wise indexing.
+        This keeps host-side behavior consistent across CPU and GPU arrays and
+        avoids encouraging per-element device synchronization or copies.
     """
 
     @classmethod
@@ -3021,11 +3309,12 @@ class array(Array[DType, NDim]):
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
         instance.deleter = None
+        instance._memory_kind = None
         return instance
 
     def __init__(
         self,
-        data: list | tuple | npt.NDArray | None = None,
+        data: list | tuple | np.ndarray | None = None,
         dtype: Any = Any,
         shape: int | tuple[int, ...] | list[int] | None = None,
         strides: tuple[int, ...] | None = None,
@@ -3100,6 +3389,9 @@ class array(Array[DType, NDim]):
             dtype = float32
         elif dtype is builtins.bool:
             dtype = bool
+
+        if is_native_type(dtype) and (requires_grad or grad is not None or retain_grad):
+            raise ValueError("Native value-type arrays do not support automatic differentiation")
 
         # convert shape to tuple (or leave shape=None if neither shape nor length were specified)
         if shape is not None:
@@ -3181,7 +3473,7 @@ class array(Array[DType, NDim]):
             else:
                 # Warn if the data type is compatible with the requested dtype
                 if not np_dtype_is_compatible(data_dtype_np, dtype):
-                    warp._src.utils.warn(
+                    log_warning(
                         f"The input data type {data_dtype_np} does not appear to be "
                         f"compatible with the requested dtype {dtype}. If "
                         "data-type sizes do not match, then this may lead to memory-access violations."
@@ -3320,6 +3612,38 @@ class array(Array[DType, NDim]):
                     arr = arr.view(np.uint16)
                 else:
                     raise RuntimeError(f"Unsupported input data dtype: {arr.dtype}")
+        elif is_native_type(dtype):
+            npdtype = np.dtype(dtype)
+            if isinstance(data, np.ndarray):
+                if dtype._wp_native_type_.fields is None:
+                    valid_source_dtype = (
+                        data.dtype.kind == "V"
+                        and data.dtype.fields is None
+                        and data.dtype.itemsize == ctypes.sizeof(dtype)
+                    )
+                else:
+                    valid_source_dtype = data.dtype == npdtype or data.dtype == np.dtype(npdtype.descr)
+                if not valid_source_dtype:
+                    expected_dtype = (
+                        np.dtype(f"V{ctypes.sizeof(dtype)}") if dtype._wp_native_type_.fields is None else npdtype
+                    )
+                    raise RuntimeError(
+                        f"Invalid source data type for native array, expected {expected_dtype}, got {data.dtype}"
+                    )
+                arr = data
+            elif isinstance(data, (list, tuple)):
+                try:
+                    ctype_arr = (dtype * len(data))(*data)
+                    arr = np.frombuffer(ctype_arr, dtype=npdtype)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Error while trying to construct Warp array from a sequence of {dtype.__name__} values: {e}"
+                    ) from e
+            else:
+                raise RuntimeError(
+                    "Invalid data argument for a native array, expected a sequence of ctypes values "
+                    "or a NumPy structured array"
+                )
         elif isinstance(dtype, warp._src.codegen.Struct):
             if isinstance(data, np.ndarray):
                 # construct from numpy structured array
@@ -3512,6 +3836,12 @@ class array(Array[DType, NDim]):
         self.pinned = pinned if device.is_cpu else False
         self.is_contiguous = is_contiguous
         self.deleter = deleter
+        if device.is_cpu:
+            self._memory_kind = (
+                warp._src.context.MemoryKind.PINNED if self.pinned else warp._src.context.MemoryKind.HOST
+            )
+        else:
+            self._memory_kind = None
 
     def _init_new(self, dtype, shape, strides, device, pinned):
         try:
@@ -3544,27 +3874,27 @@ class array(Array[DType, NDim]):
             capacity = size * dtype_size
         else:
             strides = tuple(strides)
+            if len(strides) != ndim:
+                raise ValueError(f"Invalid number of strides, expected {ndim} strides, got {len(strides)}")
             is_contiguous = strides == contiguous_strides
 
-            # To calculate the required capacity, find the dimension with largest stride.
-            # Normally it is the first one, but it could be different (e.g., transposed arrays).
-            max_stride = strides[0]
-            max_dim = 0
-            for i in range(1, ndim):
-                if strides[i] > max_stride:
-                    max_stride = strides[i]
-                    max_dim = i
-
-            if max_stride > 0:
-                capacity = shape[max_dim] * strides[max_dim]
+            if any(stride < 0 for stride in strides):
+                raise NotImplementedError("Negative strides are not supported for newly allocated arrays.")
+            elif size == 0:
+                capacity = 0
             else:
-                # single element storage with zero strides
-                capacity = dtype_size
+                max_offset = sum((dim - 1) * stride for dim, stride in zip(shape, strides, strict=True))
+                capacity = max_offset + dtype_size
 
         allocator = device.get_allocator(pinned=pinned)
+        allocator_memory_kind = getattr(allocator, "memory_kind", None)
+        if not isinstance(allocator_memory_kind, warp._src.context.MemoryKind):
+            allocator_memory_kind = None
+
         # Resolve the deallocate callable before allocating so a bad descriptor/__getattr__
         # cannot leak a freshly-allocated pointer between allocate() and self.deleter assignment.
         deleter = allocator.deallocate
+
         if capacity > 0:
             if device.is_cuda:
                 with device.context_guard:
@@ -3586,6 +3916,19 @@ class array(Array[DType, NDim]):
         self.is_contiguous = is_contiguous
         self.deleter = deleter
         self._allocator = allocator
+        self._memory_kind = allocator_memory_kind
+        # Record the originating APIC capture's identity when this allocation is made
+        # under an APIC capture targeting this CUDA device. Such memory is graph-scoped
+        # (its backing is freed when the capture ends) and only *this* capture's
+        # recorded ops regenerate it, so APICapture.track_array marks the region
+        # transient (serialized size-only on save, repopulated on replay). Store the
+        # capture's apic_state -- not a bare is_capturing flag, which outlives its
+        # capture and is also true under non-APIC captures -- so the marker is not
+        # applied to allocations from a different/non-APIC capture or merely first used
+        # here. _init_new is the single device-allocation chokepoint, so this covers the
+        # bare constructor, wp.empty/zeros/full, and auto-allocated gradients.
+        _apic = warp._src.context._get_apic_capture_for_device(device)
+        self._apic_capture_origin = _apic.apic_state if (_apic is not None and device.is_cuda) else None
 
     def _init_annotation(self, dtype, ndim):
         self.dtype = dtype
@@ -3598,15 +3941,20 @@ class array(Array[DType, NDim]):
         self.device = None
         self.pinned = False
         self.is_contiguous = False
+        self._memory_kind = None
 
     def __del__(self):
         # Skip deallocation for partially-initialized arrays (e.g. when allocation failed)
         # and for zero-size arrays which were never allocated.
-        if not hasattr(self, "device") or self.device is None or self.ptr is None:
+        if not hasattr(self, "device") or self.device is None or self.ptr is None or self.deleter is None:
             return
         try:
-            with self.device.context_guard:
+            allocator = getattr(self, "_allocator", None)
+            if allocator is not None and not getattr(allocator, "deallocate_requires_context_guard", True):
                 self.deleter(self.ptr, self.capacity)
+            else:
+                with self.device.context_guard:
+                    self.deleter(self.ptr, self.capacity)
         except (TypeError, AttributeError):
             # Suppress TypeError and AttributeError when callables become None during shutdown
             pass
@@ -3624,6 +3972,10 @@ class array(Array[DType, NDim]):
                 arr_shape = self.shape
                 arr_strides = self.strides
                 descr = self.dtype.numpy_dtype()
+            elif is_native_type(self.dtype):
+                arr_shape = self.shape
+                arr_strides = self.strides
+                descr = np.dtype(self.dtype).descr if self.dtype._wp_native_type_.fields is not None else None
             elif issubclass(self.dtype, ctypes.Array):
                 # vector type, flatten the dimensions into one tuple
                 arr_shape = (*self.shape, *self.dtype._shape_)
@@ -3731,6 +4083,11 @@ class array(Array[DType, NDim]):
     def __repr__(self):
         return type_repr(self)
 
+    @property
+    def memory_kind(self):
+        """Observed memory kind backing this array."""
+        return warp._src.context._get_array_memory_kind(self)
+
     def __getitem__(self, key):
         if isinstance(key, int):
             if self.ndim == 1:
@@ -3775,6 +4132,8 @@ class array(Array[DType, NDim]):
                     stop = self.shape[idx]
                 if step is None:
                     step = 1
+                if step == 0:
+                    raise ValueError("slice step cannot be zero")
                 if start < 0:
                     start = self.shape[idx] + start
                 if stop < 0:
@@ -3884,6 +4243,8 @@ class array(Array[DType, NDim]):
             self._grad = None
             self._requires_grad = False
         else:
+            if is_native_type(self.dtype):
+                raise ValueError("Native value-type arrays do not support automatic differentiation")
             # make sure the given gradient array is compatible
             if grad.dtype != self.dtype:
                 raise ValueError(
@@ -3913,6 +4274,8 @@ class array(Array[DType, NDim]):
 
     @requires_grad.setter
     def requires_grad(self, value: builtins.bool):
+        if value and is_native_type(self.dtype):
+            raise ValueError("Native value-type arrays do not support automatic differentiation")
         if value and self._grad is None:
             self._alloc_grad()
         elif not value:
@@ -3968,25 +4331,40 @@ class array(Array[DType, NDim]):
             parent = parent._ref
 
     def mark_write(self, **kwargs):
-        """Detect if we are writing to an array that has already been read from."""
+        """Warn if this array is written to after it has been read from in a recorded launch.
+
+        Attribute the warning by passing ``arg_name``/``kernel_name``/``filename``/``lineno``
+        (kernel launch) or ``operation``/``filename``/``lineno`` (other writes).
+        """
         if self._is_read:
-            if "arg_name" and "kernel_name" and "filename" and "lineno" in kwargs:
-                print(
-                    f"Warning: Array {self} passed to argument {kwargs['arg_name']} in kernel {kwargs['kernel_name']} at {kwargs['filename']}:{kwargs['lineno']} is being written to but has already been read from in a previous launch. This may corrupt gradient computation in the backward pass."
+            if "arg_name" in kwargs and "kernel_name" in kwargs and "filename" in kwargs and "lineno" in kwargs:
+                log_warning(
+                    f"Array {self} passed to argument {kwargs['arg_name']} in kernel {kwargs['kernel_name']} at {kwargs['filename']}:{kwargs['lineno']} is being written to but has already been read from in a previous launch. This may corrupt gradient computation in the backward pass."
+                )
+            elif "operation" in kwargs and "filename" in kwargs and "lineno" in kwargs:
+                log_warning(
+                    f"Array {self} is being written to by {kwargs['operation']} at {kwargs['filename']}:{kwargs['lineno']} but has already been read from in a previous launch. This may corrupt gradient computation in the backward pass."
                 )
             else:
-                print(
-                    f"Warning: Array {self} is being written to but has already been read from in a previous launch. This may corrupt gradient computation in the backward pass."
+                log_warning(
+                    f"Array {self} is being written to but has already been read from in a previous launch. This may corrupt gradient computation in the backward pass."
                 )
 
     def _apic_ensure_tracked(self):
         """Register this array as a memory region if an APIC capture is active."""
         apic_capture = getattr(warp._src.context.runtime, "_apic_capture", None)
-        if apic_capture is not None and self.ptr:
+        if apic_capture is not None:
             apic_capture.track_array(self)
 
     def zero_(self):
         """Zero out the array entries."""
+        if self.size == 0:
+            # Skip the zero-byte memset, but still record the initialization:
+            # otherwise verify_autograd_array_access keeps a stale "read" mark
+            # on the empty array and a later guarded write reports a false
+            # write-after-read.
+            self.mark_init()
+            return
         self._apic_ensure_tracked()
         if self.is_contiguous:
             # simple memset is usually faster than generic fill
@@ -4039,6 +4417,16 @@ class array(Array[DType, NDim]):
                     raise ValueError(
                         f"Invalid initializer value for struct {self.dtype.cls.__name__}, expected struct instance or 0"
                     )
+            elif is_native_type(self.dtype):
+                if isinstance(value, self.dtype):
+                    cvalue = value
+                elif value == 0:
+                    cvalue = self.dtype()
+                else:
+                    raise ValueError(
+                        f"Invalid initializer value for native type {self.dtype.__name__}, "
+                        f"expected {self.dtype.__name__} instance or 0"
+                    )
             elif issubclass(self.dtype, ctypes.Array):
                 # vector/matrix
                 cvalue = self.dtype(value)
@@ -4059,8 +4447,36 @@ class array(Array[DType, NDim]):
 
         # prefer using memtile for contiguous arrays, because it should be faster than generic fill
         if self.is_contiguous:
+            # Large multi-byte fills (> WP_FILL_VALUE_INLINE_BYTES_2 = 3968 bytes,
+            # defined in warp/native/warp.cu -- keep the literal below in sync)
+            # take a capturable_tmp_alloc fallback in wp_memtile_device (pause/resume
+            # + device staging) that the APIC byte-stream rebuild cannot reproduce,
+            # so a saved CUDA graph could not replay them. Surface the limitation
+            # instead of recording an unreplayable op. Small fills embed the value
+            # inline in the byte stream and replay fine.
+            apic_capture = warp._src.context._get_apic_capture_for_device(self.device)
+            if (
+                cvalue_size > 3968  # WP_FILL_VALUE_INLINE_BYTES_2 (warp/native/warp.cu)
+                and self.device.is_cuda
+                and apic_capture is not None
+            ):
+                raise NotImplementedError(
+                    "APIC capture does not yet support fill_() with values larger than 3968 bytes on CUDA arrays; "
+                    "use a smaller element type or move the fill outside the capture."
+                )
             self.device.memtile(self.ptr, cvalue_ptr, cvalue_size, self.size)
         else:
+            # The non-contiguous fill path (wp_array_fill_host / wp_array_fill_device)
+            # does not record into the APIC byte stream, so it would silently execute
+            # once at capture time and never replay. Surface the limitation now
+            # instead of producing wrong output at replay. Applies to both CPU
+            # (record-only) and CUDA (record-and-execute) captures.
+            apic_capture = warp._src.context._get_apic_capture_for_device(self.device)
+            if apic_capture is not None:
+                raise NotImplementedError(
+                    "APIC capture does not yet support fill_() on non-contiguous arrays; "
+                    "fill the underlying contiguous array first or move the fill outside the capture."
+                )
             carr = self.__ctype__()
             carr_ptr = ctypes.pointer(carr)
 
@@ -4095,7 +4511,7 @@ class array(Array[DType, NDim]):
         if is_bf16 and not _suppress_bfloat16_warning:
             ml_bf16 = _get_ml_dtypes_bfloat16()
             if ml_bf16 is None:
-                warp._src.utils.warn(
+                log_warning(
                     "bfloat16 arrays are returned as np.uint16 (raw bit representation) "
                     "because NumPy does not natively support bfloat16. "
                     "Use wp.to_torch() or wp.to_jax() for frameworks that support bfloat16 natively, "
@@ -4135,6 +4551,12 @@ class array(Array[DType, NDim]):
             if isinstance(self.dtype, warp._src.codegen.Struct):
                 npdtype = self.dtype.numpy_dtype()
                 npshape = self.shape
+            elif is_native_type(self.dtype):
+                if self.dtype._wp_native_type_.fields is None:
+                    npdtype = np.dtype(f"V{ctypes.sizeof(self.dtype)}")
+                else:
+                    npdtype = np.dtype(self.dtype)
+                npshape = self.shape
             elif issubclass(self.dtype, ctypes.Array):
                 npdtype = warp_type_to_np_dtype[self.dtype._wp_scalar_type_]
                 npshape = (*self.shape, *self.dtype._shape_)
@@ -4171,6 +4593,8 @@ class array(Array[DType, NDim]):
 
         if isinstance(self.dtype, warp._src.codegen.Struct):
             p = ctypes.cast(self.ptr, ctypes.POINTER(self.dtype.ctype))
+        elif is_native_type(self.dtype):
+            p = ctypes.cast(self.ptr, ctypes.POINTER(self.dtype))
         else:
             p = ctypes.cast(self.ptr, ctypes.POINTER(self.dtype._type_))
 
@@ -4189,6 +4613,10 @@ class array(Array[DType, NDim]):
             data = a.ctypes.data
             stride = a.strides[0]
             return [self.dtype.from_ptr(data + i * stride) for i in range(self.size)]
+        elif is_native_type(self.dtype):
+            a = a.flatten()
+            stride = a.strides[0]
+            return [self.dtype.from_buffer_copy(a, i * stride) for i in range(self.size)]
         elif issubclass(self.dtype, ctypes.Array):
             # vector/matrix - flatten, but preserve inner vector/matrix dimensions
             a = a.reshape((self.size, *self.dtype._shape_))
@@ -4284,7 +4712,9 @@ class array(Array[DType, NDim]):
             size *= d
 
         if size != self.size:
-            raise RuntimeError("Reshaped array must have the same total size as the original.")
+            raise RuntimeError(
+                f"cannot reshape array of shape {self.shape} (size {self.size}) into shape {shape} (size {size})"
+            )
 
         a = array(
             ptr=self.ptr,
@@ -4357,7 +4787,13 @@ class array(Array[DType, NDim]):
                 result_shape = (*self.shape, *self.dtype._shape_)
                 result_strides = (*self.strides, *strides_from_shape(self.dtype._shape_, self.dtype._wp_scalar_type_))
             else:
-                raise TypeError("Incompatible scalar type sizes")
+                raise TypeError(
+                    f"cannot create an array view with dtype {type_repr(dtype)} "
+                    f"from source dtype {type_repr(self.dtype)}: source scalar dtype "
+                    f"{type_repr(self.dtype._wp_scalar_type_)} has size "
+                    f"{type_size_in_bytes(self.dtype._wp_scalar_type_)} bytes, "
+                    f"but target dtype has size {type_size_in_bytes(dtype)} bytes"
+                )
         elif type_is_scalar(self.dtype) and hasattr(dtype, "_wp_scalar_type_"):
             # cast from scalar type to vec/mat type
             if type_size_in_bytes(self.dtype) == type_size_in_bytes(dtype._wp_scalar_type_):
@@ -4376,9 +4812,20 @@ class array(Array[DType, NDim]):
                 result_shape = self.shape[:-dtype_ndim] or (1,)
                 result_strides = self.strides[:-dtype_ndim] or (type_size_in_bytes(dtype),)
             else:
-                raise TypeError("Incompatible scalar type sizes")
+                raise TypeError(
+                    f"cannot create an array view with dtype {type_repr(dtype)} "
+                    f"from source dtype {type_repr(self.dtype)}: source dtype has size "
+                    f"{type_size_in_bytes(self.dtype)} bytes, but target scalar dtype "
+                    f"{type_repr(dtype._wp_scalar_type_)} has size "
+                    f"{type_size_in_bytes(dtype._wp_scalar_type_)} bytes"
+                )
         else:
-            raise TypeError("Incompatible data type sizes")
+            raise TypeError(
+                f"cannot create an array view with dtype {type_repr(dtype)} "
+                f"from source dtype {type_repr(self.dtype)}: source dtype has size "
+                f"{type_size_in_bytes(self.dtype)} bytes, but target dtype has size "
+                f"{type_size_in_bytes(dtype)} bytes"
+            )
 
         a = array(
             ptr=self.ptr,
@@ -4479,18 +4926,31 @@ class array(Array[DType, NDim]):
             RuntimeError: The array is not associated with a CUDA device.
             RuntimeError: The CUDA device does not appear to support IPC.
             RuntimeError: The array was allocated using the :ref:`mempool memory allocator <mempool_allocators>`.
+            RuntimeError: The array was allocated using the managed-memory allocator.
+            RuntimeError: The array wraps external CUDA memory.
+            RuntimeError: The array is a view into another allocation.
         """
 
         if self.device is None or not self.device.is_cuda:
             raise RuntimeError("IPC requires a CUDA device")
+
+        memory_kind = warp._src.context._get_array_memory_kind(self)
+        if memory_kind == warp._src.context.MemoryKind.CUDA_MANAGED:
+            raise RuntimeError("IPC is not supported for managed-memory arrays")
         elif self.device.is_ipc_supported is False:
             raise RuntimeError("IPC does not appear to be supported on this CUDA device")
-        elif isinstance(self._allocator, warp._src.context.CudaMempoolAllocator):
+
+        if memory_kind == warp._src.context.MemoryKind.CUDA_MEMPOOL:
             raise RuntimeError(
                 "Currently, IPC is only supported for arrays using the default memory allocator.\n"
-                "See https://nvidia.github.io/warp/deep_dive/allocators.html for instructions on how to disable\n"
+                "See https://nvidia.github.io/warp/stable/user_guide/execution_and_performance/"
+                "memory_management.html#configuration for instructions on how to disable\n"
                 f"the mempool allocator on device {self.device}."
             )
+        elif getattr(self, "_ref", None) is not None:
+            raise RuntimeError("IPC is not supported for array views")
+        elif not isinstance(getattr(self, "_allocator", None), warp._src.context.CudaDefaultAllocator):
+            raise RuntimeError("IPC is not supported for externally wrapped arrays")
 
         # Allocate a buffer for the data (64-element char array)
         ipc_handle_buffer = (ctypes.c_char * 64)()
@@ -4583,7 +5043,7 @@ def from_ptr(ptr, length, dtype=None, shape=None, device=None):
     See Also:
         :class:`array`, :func:`from_ipc_handle`
     """
-    warp._src.utils.warn(
+    log_warning(
         """This version of wp.from_ptr() is deprecated. OmniGraph
     applications should use from_omni_graph_ptr() instead. To create an array
     from a C pointer, use the array constructor and pass the ptr argument as a
@@ -4592,6 +5052,7 @@ def from_ptr(ptr, length, dtype=None, shape=None, device=None):
     ptr=ctypes.cast(pointer, ctypes.POINTER(ctypes.c_size_t)).contents.value.
     Be sure to also specify the dtype and shape parameters.""",
         category=DeprecationWarning,
+        stacklevel=2,
     )
 
     return array(
@@ -4770,6 +5231,17 @@ class noncontiguous_array_base(Array[DType, NDim]):
                     cvalue = self.dtype._type_(value)
         except Exception as e:
             raise ValueError(f"Failed to convert the value to the array data type: {e}") from e
+
+        # The indexed/fabric fill path (wp_array_fill_host / wp_array_fill_device)
+        # does not record into the APIC byte stream yet, so it would silently
+        # execute once at capture time and never replay. Surface the limitation
+        # now instead of producing wrong output at replay.
+        apic_capture = warp._src.context._get_apic_capture_for_device(self.device)
+        if apic_capture is not None:
+            raise NotImplementedError(
+                "APIC capture does not yet support fill_() on wp.indexedarray / wp.fabricarray; "
+                "fill the underlying contiguous array first or move the fill outside the capture."
+            )
 
         cvalue_ptr = ctypes.pointer(cvalue)
         cvalue_size = ctypes.sizeof(cvalue)
@@ -4959,25 +5431,49 @@ class _ArrayAnnotationBase:
         self.dtype = dtype if dtype is Any else type_to_warp(dtype)
         self.ndim = ndim
 
+    def _dtype_repr(self):
+        """Render ``self.dtype`` for the annotation subscript, preferring a ``wp.`` alias when one exists."""
+        dtype = self.dtype
+        if dtype is Any:
+            return "Any"
+        if hasattr(dtype, "key"):
+            # Struct instances carry a .key rather than a __name__
+            return dtype.key
+        name = getattr(dtype, "__name__", None)
+        if name and getattr(warp, name, None) is dtype:
+            # Type with a matching public alias (e.g. wp.float32, wp.vec3f)
+            return f"wp.{name}"
+        repr_name = type_repr(dtype)
+        if getattr(warp, repr_name, None) is not None:
+            # Canonical alias for an equivalent dynamic type (e.g. a freshly
+            # built vector(3, float64) whose type_repr is the cached "vec3d")
+            return f"wp.{repr_name}"
+        if type_is_vector(dtype) or type_is_quaternion(dtype) or type_is_matrix(dtype) or type_is_transformation(dtype):
+            # Warp generic vector/matrix/quaternion/transformation without an
+            # alias: type_repr already gives a descriptive, unambiguous form
+            # (e.g. "matrix(shape=(7, 7), dtype=float32)") rather than the
+            # internal generic class name (vec_t, mat_t, quat_t, transform_t).
+            return repr_name
+        # User-defined type with a meaningful name
+        return name or repr_name
+
     def __repr__(self):
-        if self.dtype is Any:
-            dtype_str = "Any"
-        elif hasattr(self.dtype, "key"):
-            # Struct instances use .key instead of __name__
-            dtype_str = self.dtype.key
-        else:
-            name = getattr(self.dtype, "__name__", None)
-            if name and getattr(warp, name, None) is self.dtype:
-                dtype_str = f"wp.{name}"
-            else:
-                # Custom vector/matrix/quaternion/transformation types
-                repr_name = type_repr(self.dtype)
-                if getattr(warp, repr_name, None) is not None:
-                    dtype_str = f"wp.{repr_name}"
-                else:
-                    dtype_str = repr_name
-        ndim_str = "Any" if self.ndim is Any else self.ndim
-        return f"wp.{self._concrete_cls.__name__}(dtype={dtype_str}, ndim={ndim_str})"
+        dtype_str = self._dtype_repr()
+        cls_name = self._concrete_cls.__name__
+        ndim = self.ndim
+        # Every case renders as a subscript annotation so that repr() matches
+        # the source syntax and round-trips through eval().
+        if ndim is Any:
+            # Two-argument form: wp.array[dtype, Any] parses back to ndim=Any.
+            return f"wp.{cls_name}[{dtype_str}, Any]"
+        if cls_name == "array":
+            # array1d..4d are subscriptable aliases mirroring idiomatic source.
+            return f"wp.array{ndim}d[{dtype_str}]" if ndim >= 2 else f"wp.array[{dtype_str}]"
+        if ndim == 1:
+            return f"wp.{cls_name}[{dtype_str}]"
+        # indexedarray/fabricarray have no Nd subscript classes; use the
+        # explicit dimension form instead.
+        return f"wp.{cls_name}[{dtype_str}, Literal[{ndim}]]"
 
     def __eq__(self, other):
         if isinstance(other, _ArrayAnnotationBase):
@@ -4986,6 +5482,12 @@ class _ArrayAnnotationBase:
 
     def __hash__(self):
         return hash((self._concrete_cls, self.dtype, self.ndim))
+
+    def __or__(self, other):
+        return Union[self, other]  # noqa: UP007
+
+    def __ror__(self, other):
+        return Union[other, self]  # noqa: UP007
 
 
 class _ArrayAnnotation(_ArrayAnnotationBase):
@@ -5299,7 +5801,7 @@ class BvhConstructor(enum.IntEnum):
     LBVH = 2
     """GPU-based bottom-up constructor maximizing parallelism."""
     CUBQL = -1
-    """cuBQL library constructor (Mesh only)."""
+    """cuBQL library constructor."""
 
     @classmethod
     def from_str(cls, value: str) -> BvhConstructor:
@@ -5340,7 +5842,7 @@ class Bvh:
             uppers: Array of upper bounds of data type :class:`warp.vec3`.
               ``lowers`` and ``uppers`` must live on the same device.
             constructor: The construction algorithm used to build the tree.
-              Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, or ``None``.
+              Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, ``"cubql"``, or ``None``.
               When ``None``, the default constructor will be used (see the note).
             groups: Optional array of group indices of data type :class:`warp.int32`.
             leaf_size: The number of primitives (AABBs) stored in each leaf node. The optimal value depends on the primary
@@ -5359,16 +5861,20 @@ class Bvh:
               inferior query performance.
             - ``"lbvh"``: A GPU-based bottom-up constructor which maximizes parallelism. Construction is very
               fast, especially for large models. Query performance is slightly slower than ``"sah"``.
+            - ``"cubql"``: An experimental cuBQL constructor. It builds a temporary cuBQL BVH and converts
+              it into Warp's native BVH layout for traversal. Grouped BVHs are not supported with this
+              constructor.
             - ``None``: The constructor will be automatically chosen based on the device where the tree
               lives. For a GPU tree, the ``"lbvh"`` constructor will be selected; for a CPU tree, the ``"sah"``
               constructor will be selected.
 
-            All three constructors are supported for GPU trees. When a CPU-based constructor is selected
-            for a GPU tree, bounds will be copied back to the CPU to run the CPU-based constructor. After
-            construction, the CPU tree will be copied to the GPU.
+            All constructors are supported for GPU trees when Warp is compiled with cuBQL support. When a
+            CPU-based constructor is selected for a GPU tree, bounds will be copied back to the CPU to run
+            the CPU-based constructor. After construction, the CPU tree will be copied to the GPU.
 
-            Only ``"sah"`` and ``"median"`` are supported for CPU trees. If ``"lbvh"`` is selected for a CPU tree, a
-            warning message will be issued, and the constructor will automatically fall back to ``"sah"``.
+            ``"sah"``, ``"median"``, and ``"cubql"`` are supported for CPU trees when Warp is compiled with cuBQL
+            support. If ``"lbvh"`` is selected for a CPU tree, a warning message will be issued, and the constructor
+            will automatically fall back to ``"sah"``.
 
             The ``leaf_size`` parameter controls the number of primitives (AABBs) stored in each leaf node of the BVH.
             This parameter can have a considerable impact on query performance, and the optimal value depends on the
@@ -5445,14 +5951,15 @@ class Bvh:
             constructor = BvhConstructor.from_str(constructor)
 
         if constructor == BvhConstructor.CUBQL:
-            raise ValueError("CUBQL constructor is not available for wp.Bvh")
+            if groups is not None:
+                raise RuntimeError("Grouped BVHs are not supported with constructor='cubql'")
 
         if leaf_size < 1:
             raise ValueError(f"leaf_size must be greater than or equal to 1, current value: {leaf_size}")
 
         if self.device.is_cpu:
             if constructor == BvhConstructor.LBVH:
-                warp._src.utils.warn(
+                log_warning(
                     "LBVH constructor is not available for a CPU tree. Falling back to SAH constructor.", stacklevel=2
                 )
                 constructor = BvhConstructor.SAH
@@ -5476,6 +5983,10 @@ class Bvh:
                 leaf_size,
             )
 
+        self._constructor = constructor
+        if not self.id:
+            raise RuntimeError(f"Failed to create BVH: {self.runtime.get_error_string()}")
+
     def __del__(self):
         if not self.id:
             return
@@ -5495,6 +6006,11 @@ class Bvh:
         """Refit the BVH.
 
         This should be called after users modify the ``lowers`` or ``uppers`` arrays.
+
+        Note:
+            Under a CPU graph capture the refit is recorded and re-run on replay against the
+            current ``lowers``/``uppers``. Such a graph is replay-only and cannot be serialized
+            with :func:`warp.capture_save`.
         """
 
         if self.device.is_cpu:
@@ -5516,23 +6032,31 @@ class Bvh:
 
         Args:
             constructor (str | None): Construction algorithm to use. One of ``"sah"``,
-                ``"median"``, ``"lbvh"``, or ``None``. If ``None``, the default is chosen
-                based on the device (CPU → ``"sah"``, CUDA → ``"lbvh"``). On CPU,
-                ``"sah"`` and ``"median"`` are supported; requesting ``"lbvh"`` falls back
-                to ``"sah"`` with a warning. On CUDA, in-place rebuild supports ``"lbvh"``
-                only; other values fall back to ``"lbvh"`` with a warning.
+                ``"median"``, ``"lbvh"``, ``"cubql"``, or ``None``. If ``None``, the default is
+                chosen based on the device (CPU → ``"sah"``, CUDA → ``"lbvh"``), except for
+                cuBQL-constructed BVHs, which rebuild with cuBQL. On CPU, ``"sah"`` and
+                ``"median"`` are supported; requesting ``"lbvh"`` falls back to ``"sah"`` with a
+                warning. On CUDA, in-place rebuild supports ``"lbvh"`` only; other values fall
+                back to ``"lbvh"`` with a warning. In-place rebuild does not support switching to
+                or from ``"cubql"``; create a new BVH instead.
 
         Notes:
-            - This method is CUDA graph-capture safe: previously captured graphs that include
-              queries on this BVH remain valid after ``rebuild`` because buffers are reused.
+            - The native CUDA LBVH rebuild path is CUDA graph-capture safe: previously captured graphs
+              that include queries on this BVH remain valid after ``rebuild`` because buffers are reused.
+              This guarantee does not apply to cuBQL rebuilds.
             - If you need a CPU top-down constructor (``"sah"``/``"median"``) for a GPU tree,
               create a new BVH via the class constructor instead.
+            - Under a CPU graph capture the rebuild is recorded and re-run on replay against the
+              current ``lowers``/``uppers``. Such a graph is replay-only and cannot be serialized
+              with :func:`warp.capture_save`.
 
         Raises:
             ValueError: If an unknown constructor is provided.
         """
 
-        if constructor is None:
+        if constructor is None and self._constructor == BvhConstructor.CUBQL:
+            constructor = BvhConstructor.CUBQL
+        elif constructor is None:
             if self.device.is_cpu:
                 constructor = BvhConstructor.SAH
             else:
@@ -5542,23 +6066,36 @@ class Bvh:
             constructor = BvhConstructor.from_str(constructor)
 
         if constructor == BvhConstructor.CUBQL:
-            raise ValueError("CUBQL constructor is not available for wp.Bvh")
+            if self._constructor != BvhConstructor.CUBQL:
+                raise ValueError("Cannot rebuild a non-cuBQL BVH with constructor='cubql'; create a new BVH instead")
+
+            if self.device.is_cpu:
+                self.runtime.core.wp_bvh_rebuild_host(self.id, constructor)
+            else:
+                self.runtime.core.wp_bvh_rebuild_device(self.id)
+                self.runtime.verify_cuda_device(self.device)
+            return
+
+        if self._constructor == BvhConstructor.CUBQL:
+            raise ValueError("Cannot rebuild a cuBQL BVH with a different constructor; create a new BVH instead")
 
         if self.device.is_cpu:
             if constructor == BvhConstructor.LBVH:
-                warp._src.utils.warn(
+                log_warning(
                     "LBVH constructor is not available for a CPU tree. Falling back to SAH constructor.", stacklevel=2
                 )
                 constructor = BvhConstructor.SAH
             self.runtime.core.wp_bvh_rebuild_host(self.id, constructor)
+            self._constructor = constructor
         else:
             if constructor != BvhConstructor.LBVH:
-                warp._src.utils.warn(
+                log_warning(
                     "In-place rebuild method on the CUDA device only supports LBVH constructor. Falling back to LBVH constructor.",
                     stacklevel=2,
                 )
             self.runtime.core.wp_bvh_rebuild_device(self.id)
             self.runtime.verify_cuda_device(self.device)
+            self._constructor = BvhConstructor.LBVH
 
 
 class Mesh:
@@ -5603,8 +6140,9 @@ class Mesh:
             bvh_constructor: The construction algorithm for the underlying BVH
               (see the docstring of :class:`Bvh` for explanation).
               Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, ``"cubql"``, or ``None``.
-              When ``"cubql"`` is selected (**experimental**), only ray query APIs are supported.
-              All other queries will silently return no results.
+              When ``"cubql"`` is selected (**experimental**), cuBQL is used to
+              build the underlying BVH in Warp's native layout. Grouped meshes and
+              ``support_winding_number=True`` are not supported with this constructor.
             bvh_leaf_size: The number of primitives (AABBs) stored in each leaf node
               (see the docstring of :class:`Bvh` for more details). If ``None`` the default
               value based on the ``bvh_constructor`` will be used.
@@ -5678,7 +6216,7 @@ class Mesh:
 
         if self.device.is_cpu:
             if bvh_constructor == BvhConstructor.LBVH:
-                warp._src.utils.warn(
+                log_warning(
                     "LBVH constructor is not available for a CPU tree. Falling back to SAH constructor.", stacklevel=2
                 )
                 bvh_constructor = BvhConstructor.SAH
@@ -5714,10 +6252,8 @@ class Mesh:
             # into a Python exception so callers don't end up launching kernels
             # with mesh_id=0 and dereferencing NULL on the device.
             raise RuntimeError(
-                "Failed to create wp.Mesh on device "
-                f"'{self.device}' with bvh_constructor='{bvh_constructor.name.lower()}'. "
-                "The native mesh builder returned a null handle; check the "
-                "stderr output for the underlying error."
+                f"Failed to create mesh: {self.runtime.get_error_string()} "
+                f"(device '{self.device}', bvh_constructor='{bvh_constructor.name.lower()}')"
             )
 
     def __del__(self):
@@ -5744,7 +6280,8 @@ class Mesh:
         if self.device.is_cpu:
             self.runtime.core.wp_mesh_refit_host(self.id)
         else:
-            self.runtime.core.wp_mesh_refit_device(self.id)
+            if not self.runtime.core.wp_mesh_refit_device(self.id):
+                raise RuntimeError(f"Failed to refit mesh: {self.runtime.get_error_string()}")
             self.runtime.verify_cuda_device(self.device)
 
     @property
@@ -5776,7 +6313,8 @@ class Mesh:
         if self.device.is_cpu:
             self.runtime.core.wp_mesh_set_points_host(self.id, points_new.__ctype__())
         else:
-            self.runtime.core.wp_mesh_set_points_device(self.id, points_new.__ctype__())
+            if not self.runtime.core.wp_mesh_set_points_device(self.id, points_new.__ctype__()):
+                raise RuntimeError(f"Failed to set mesh points: {self.runtime.get_error_string()}")
             self.runtime.verify_cuda_device(self.device)
 
     @property
@@ -5817,6 +6355,38 @@ class Volume:
     """Enum value to specify nearest-neighbor interpolation during sampling"""
     LINEAR = constant(1)
     """Enum value to specify trilinear interpolation during sampling"""
+    _NANOVDB_LEAF_TABLE_COUNT: ClassVar[int] = 512
+    _NANOVDB_NAME_SIZE: ClassVar[int] = 256
+
+    class RebuildInfo(NamedTuple):
+        """Capacity metadata for a :class:`Volume` allocated with rebuild support.
+
+        The counts describe reserved storage, not the currently active topology.
+        Use :meth:`Volume.get_active_stats` to query the current grid metadata.
+        """
+
+        kind: str | None
+        """Input kind used for rebuilds. One of ``"tiles"``, ``"voxels"``, or ``None`` when the volume is not rebuildable."""
+        max_voxel_count: int
+        """Maximum active voxel or index count reserved for rebuilds."""
+        max_leaf_node_count: int
+        """Maximum NanoVDB leaf node count reserved for rebuilds."""
+        max_lower_node_count: int
+        """Maximum NanoVDB lower internal node count reserved for rebuilds."""
+        max_upper_node_count: int
+        """Maximum NanoVDB upper internal node count reserved for rebuilds."""
+
+    class ActiveStats(NamedTuple):
+        """Active topology statistics from the current :class:`Volume` grid metadata."""
+
+        voxel_count: int
+        """Current active voxel or index count."""
+        leaf_node_count: int
+        """Current NanoVDB leaf node count."""
+        lower_node_count: int
+        """Current NanoVDB lower internal node count."""
+        upper_node_count: int
+        """Current NanoVDB upper internal node count."""
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -5833,6 +6403,9 @@ class Volume:
 
         # keep a runtime reference for orderly destruction
         self.runtime = warp._src.context.runtime
+        self._rebuild_info = Volume.RebuildInfo(None, 0, 0, 0, 0)
+        self._rebuild_bg_value = None
+        self._rebuild_bg_type = None
 
         if data is None:
             return
@@ -5928,6 +6501,31 @@ class Volume:
         )
         return voxel_count.value
 
+    def get_active_stats(self) -> Volume.ActiveStats:
+        """Return actual topology statistics from the current grid metadata.
+
+        For rebuildable volumes, this reports the current active topology rather
+        than the reserved capacity returned by :meth:`get_rebuild_info`. For
+        non-rebuildable volumes, these counts match the allocated grid topology.
+
+        Returns:
+            A :class:`Volume.ActiveStats` tuple containing the active voxel,
+            leaf, lower, and upper node counts.
+        """
+
+        voxel_count = ctypes.c_uint64(0)
+        leaf_count = ctypes.c_uint32(0)
+        lower_count = ctypes.c_uint32(0)
+        upper_count = ctypes.c_uint32(0)
+        self.runtime.core.wp_volume_get_active_stats(
+            self.id,
+            ctypes.byref(voxel_count),
+            ctypes.byref(leaf_count),
+            ctypes.byref(lower_count),
+            ctypes.byref(upper_count),
+        )
+        return Volume.ActiveStats(voxel_count.value, leaf_count.value, lower_count.value, upper_count.value)
+
     def get_voxels(self, out: array | None = None) -> array:
         """Return the integer coordinates of all allocated voxels for this volume.
 
@@ -5987,6 +6585,15 @@ class Volume:
         transform_matrix: mat33f
         """Linear part of the index-to-world transform"""
 
+    @staticmethod
+    def _decode_nvdb_name(name_ptr: int) -> str:
+        """Decode a fixed-size NanoVDB name field."""
+        name = ctypes.string_at(name_ptr, Volume._NANOVDB_NAME_SIZE)
+        terminator = name.find(b"\0")
+        if terminator < 0:
+            raise RuntimeError("Invalid NanoVDB name")
+        return name[:terminator].decode("ascii")
+
     def get_grid_info(self) -> Volume.GridInfo:
         """Return the metadata associated with this Volume."""
 
@@ -6011,7 +6618,7 @@ class Volume:
             raise RuntimeError("Invalid volume")
 
         return Volume.GridInfo(
-            name.decode("ascii"),
+            Volume._decode_nvdb_name(name),
             grid_size.value,
             grid_index.value,
             grid_count.value,
@@ -6057,6 +6664,25 @@ class Volume:
 
         return self.get_grid_info().type_str in Volume._nvdb_index_types
 
+    @property
+    def is_rebuildable(self) -> bool:
+        """Whether this volume was allocated with persistent capacity for :meth:`rebuild`."""
+
+        return self._rebuild_info.kind is not None
+
+    def get_rebuild_info(self) -> Volume.RebuildInfo:
+        """Return rebuild input kind and reserved capacity metadata.
+
+        Returns:
+            A :class:`Volume.RebuildInfo` tuple. ``kind`` is ``"tiles"`` for
+            volumes created by :meth:`allocate_by_tiles`, ``"voxels"`` for
+            volumes created by :meth:`allocate_by_voxels`, and ``None`` for
+            volumes that cannot be rebuilt. Capacity fields are zero when
+            ``kind`` is ``None``.
+        """
+
+        return self._rebuild_info
+
     def get_feature_array_count(self) -> int:
         """Return the number of supplemental data arrays stored alongside the grid"""
 
@@ -6094,11 +6720,11 @@ class Volume:
             type_str_buffer,
         )
 
-        if buf.value is None:
+        if buf.value is None or name is None:
             raise RuntimeError("Invalid feature array")
 
         return Volume.FeatureArrayInfo(
-            name.decode("ascii"),
+            Volume._decode_nvdb_name(name),
             buf.value,
             value_size.value,
             value_count.value,
@@ -6605,9 +7231,31 @@ class Volume:
         translation_buf = (ctypes.c_float * 3)(translation[0], translation[1], translation[2])
         return transform_buf, translation_buf
 
+    def _grid_transform_buffers(self):
+        grid_info = self.get_grid_info()
+        return Volume._fill_transform_buffers(None, grid_info.translation, grid_info.transform_matrix)
+
     # nanovdb types for which we instantiate the grid builder
     # Should be in sync with WP_VOLUME_BUILDER_INSTANTIATE_TYPES in volume_builder.h
-    _supported_allocation_types = ("int32", "float", "Vec3f", "Vec4f")
+    _supported_allocation_types = ("int32", "uint32", "int64", "float", "double", "Vec3f", "Vec3d", "Vec4f")
+
+    REBUILD_SUCCESS: ClassVar[int] = 0
+    """Rebuild completed without setting a status flag."""
+
+    REBUILD_LEAF_CAPACITY_EXCEEDED: ClassVar[int] = 1 << 0
+    """Rebuild produced more leaf nodes than the volume capacity."""
+
+    REBUILD_LOWER_CAPACITY_EXCEEDED: ClassVar[int] = 1 << 1
+    """Rebuild produced more lower internal nodes than the volume capacity."""
+
+    REBUILD_UPPER_CAPACITY_EXCEEDED: ClassVar[int] = 1 << 2
+    """Rebuild produced more upper internal nodes than the volume capacity."""
+
+    REBUILD_VOXEL_CAPACITY_EXCEEDED: ClassVar[int] = 1 << 3
+    """Rebuild produced more active voxels than the volume capacity."""
+
+    REBUILD_INVALID_INPUT: ClassVar[int] = 1 << 4
+    """Rebuild was called with invalid arguments or on a non-rebuildable volume."""
 
     @classmethod
     def allocate_by_tiles(
@@ -6618,10 +7266,16 @@ class Volume:
         translation=(0.0, 0.0, 0.0),
         device: warp.DeviceLike = None,
         transform=None,
+        rebuildable: bool = False,
+        max_tiles: int | None = None,
+        max_lower_nodes: int | None = None,
+        max_upper_nodes: int | None = None,
+        status: array | None = None,
+        point_mask: array | None = None,
     ) -> Volume:
         """Allocate a new :class:`Volume` with active tiles for each point ``tile_points``.
 
-        This function is only supported for CUDA devices.
+        This function is supported on CPU and CUDA devices.
 
         The smallest unit of allocation is a dense tile of 8x8x8 voxels.
         This is the primary method for allocating sparse volumes.
@@ -6630,6 +7284,16 @@ class Volume:
         Example use cases:
             * ``tile_points`` can mark tiles directly in index space as in the case this method is called by :meth:`allocate`.
             * ``tile_points`` can be a list of points used in a simulation that needs to transfer data to a volume.
+
+        If ``rebuildable`` is ``True`` or any rebuild capacity argument is supplied, the returned volume reserves
+        persistent storage and can be updated in place with :meth:`rebuild`. The rebuild input kind is ``"tiles"``,
+        so later rebuilds must provide tile points rather than voxel points. Use :meth:`get_rebuild_info` to inspect
+        reserved capacities and :meth:`get_active_stats` to inspect the current active topology.
+
+        Rebuildable CUDA volumes can be allocated during CUDA graph capture when CUDA memory-pool allocation is
+        supported and enabled. Exact, non-rebuildable volume allocation is not graph-capture safe because determining
+        the exact topology size requires device synchronization. Active-topology queries such as
+        :meth:`get_active_stats` must also be performed outside graph capture.
 
         Args:
             tile_points (:class:`warp.array`): Array of positions that define the tiles to be allocated.
@@ -6643,18 +7307,34 @@ class Volume:
             translation: Translation between the index and world spaces.
             transform: Linear transform between the index and world spaces.
               If ``None``, deduced from ``voxel_size``.
-            device: The CUDA device to create the volume on, e.g. ``"cuda"`` or ``"cuda:0"``.
+            rebuildable: Whether to allocate persistent capacity for rebuilds.
+            max_tiles: Maximum number of NanoVDB leaf nodes reserved for rebuilds. Supplying this makes the
+              volume rebuildable. Each tile can contain up to 512 voxels.
+            max_lower_nodes: Maximum number of lower internal nodes reserved for rebuilds. Supplying this makes
+              the volume rebuildable.
+            max_upper_nodes: Maximum number of upper internal nodes reserved for rebuilds. Supplying this makes
+              the volume rebuildable.
+            status: Optional one-element ``uint32`` array receiving ``Volume.REBUILD_*`` status flags from the
+              initial build. ``Volume.REBUILD_SUCCESS`` means the requested topology fit in the reserved capacity.
+            point_mask: Optional ``int32`` array with one entry per point. Points with a zero mask value are ignored.
+            device: The device to create the volume on, e.g. ``"cpu"``, ``"cuda"``, or ``"cuda:0"``.
+
+        Raises:
+            RuntimeError: If ``tile_points``, ``point_mask``, or ``status`` is not a contiguous array of the
+                required type and shape.
+            RuntimeError: If :class:`Volume` creation fails.
+            ValueError: If neither ``voxel_size`` nor ``transform`` is provided.
+            ValueError: If both ``voxel_size`` and ``transform`` are provided.
+            ValueError: If a rebuild capacity is not positive or does not fit in ``uint32``.
 
         """
         device = warp.get_device(device)
 
-        if not device.is_cuda:
-            raise RuntimeError("Only CUDA devices are supported for allocate_by_tiles")
         if not _is_contiguous_vec_like_array(tile_points, vec_length=3, scalar_types=(float32, int32)):
             raise RuntimeError(
-                "tile_points must be contiguous and either a 1D warp array of vec3f or vec3i or a 2D n-by-3 array of int32 or float32."
+                "tile_points must be contiguous and either a 1D Warp array of vec3f or vec3i or a 2D n-by-3 array of int32 or float32."
             )
-        if not tile_points.device.is_cuda:
+        if tile_points.device != device:
             tile_points = tile_points.to(device)
 
         volume = cls(data=None)
@@ -6662,16 +7342,49 @@ class Volume:
         in_world_space = type_scalar_type(tile_points.dtype) is float32
 
         transform_buf, translation_buf = Volume._fill_transform_buffers(voxel_size, translation, transform)
+        rebuildable = rebuildable or max_tiles is not None or max_lower_nodes is not None or max_upper_nodes is not None
+        status = _volume_rebuild_status_array(status, device) if rebuildable and status is not None else None
+        max_tiles_c = _volume_rebuild_capacity(max_tiles, tile_points.shape[0], "max_tiles") if rebuildable else 0
+        max_lower_nodes_c = (
+            _volume_rebuild_capacity(max_lower_nodes, max_tiles_c, "max_lower_nodes") if rebuildable else 0
+        )
+        max_upper_nodes_c = (
+            _volume_rebuild_capacity(max_upper_nodes, max_lower_nodes_c, "max_upper_nodes") if rebuildable else 0
+        )
+        status_ptr = ctypes.c_void_p(status.ptr) if status is not None else ctypes.c_void_p(0)
+        point_mask = _volume_point_mask_array(point_mask, tile_points.shape[0], device)
+        point_mask_ptr = ctypes.c_void_p(0 if point_mask is None else point_mask.ptr)
 
         if bg_value is None:
-            volume.id = volume.runtime.core.wp_volume_index_from_tiles_device(
-                volume.device.context,
-                ctypes.c_void_p(tile_points.ptr),
-                tile_points.shape[0],
-                transform_buf,
-                translation_buf,
-                in_world_space,
-            )
+            if volume.device.is_cuda:
+                volume.id = volume.runtime.core.wp_volume_index_from_tiles_device(
+                    volume.device.context,
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    rebuildable,
+                    max_tiles_c,
+                    max_lower_nodes_c,
+                    max_upper_nodes_c,
+                    status_ptr,
+                )
+            else:
+                volume.id = volume.runtime.core.wp_volume_index_from_tiles_host(
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    rebuildable,
+                    max_tiles_c,
+                    max_lower_nodes_c,
+                    max_upper_nodes_c,
+                    status_ptr,
+                )
         else:
             # normalize background value type
             grid_type = type_to_warp(type(bg_value))
@@ -6703,20 +7416,56 @@ class Volume:
             cvalue_size = ctypes.sizeof(cvalue)
             cvalue_type = nvdb_type.encode("ascii")
 
-            volume.id = volume.runtime.core.wp_volume_from_tiles_device(
-                volume.device.context,
-                ctypes.c_void_p(tile_points.ptr),
-                tile_points.shape[0],
-                transform_buf,
-                translation_buf,
-                in_world_space,
-                cvalue_ptr,
-                cvalue_size,
-                cvalue_type,
-            )
+            if volume.device.is_cuda:
+                volume.id = volume.runtime.core.wp_volume_from_tiles_device(
+                    volume.device.context,
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    cvalue_ptr,
+                    cvalue_size,
+                    cvalue_type,
+                    rebuildable,
+                    max_tiles_c,
+                    max_lower_nodes_c,
+                    max_upper_nodes_c,
+                    status_ptr,
+                )
+            else:
+                volume.id = volume.runtime.core.wp_volume_from_tiles_host(
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    cvalue_ptr,
+                    cvalue_size,
+                    cvalue_type,
+                    rebuildable,
+                    max_tiles_c,
+                    max_lower_nodes_c,
+                    max_upper_nodes_c,
+                    status_ptr,
+                )
 
         if volume.id == 0:
             raise RuntimeError("Failed to create volume")
+
+        if rebuildable:
+            volume._rebuild_info = Volume.RebuildInfo(
+                "tiles",
+                max_tiles_c * Volume._NANOVDB_LEAF_TABLE_COUNT,
+                max_tiles_c,
+                max_lower_nodes_c,
+                max_upper_nodes_c,
+            )
+            if bg_value is not None:
+                volume._rebuild_bg_value = cvalue
+                volume._rebuild_bg_type = cvalue_type
 
         return volume
 
@@ -6728,42 +7477,73 @@ class Volume:
         translation=(0.0, 0.0, 0.0),
         device: warp.DeviceLike = None,
         transform=None,
+        rebuildable: bool = False,
+        max_active_voxels: int | None = None,
+        max_leaf_nodes: int | None = None,
+        max_lower_nodes: int | None = None,
+        max_upper_nodes: int | None = None,
+        status: array | None = None,
+        point_mask: array | None = None,
     ) -> Volume:
-        """Allocate a new :class:`Volume` with active voxel for each point ``voxel_points``.
+        """Allocate a new :class:`Volume` with an active voxel for each point in ``voxel_points``.
 
-        This function creates an *index* volume, a special kind of volume that does not any store any
+        This function creates an *index* volume, a special kind of volume that does not store any
         explicit payload but encodes a linearized index for each active voxel, allowing to lookup and
         sample data from arbitrary external arrays.
 
-        This function is only supported for CUDA devices.
+        If ``rebuildable`` is ``True`` or any rebuild capacity argument is supplied, the returned volume reserves
+        persistent storage and can be updated in place with :meth:`rebuild`. The rebuild input kind is ``"voxels"``,
+        so later rebuilds must provide voxel points rather than tile points. Use :meth:`get_rebuild_info` to inspect
+        reserved capacities and :meth:`get_active_stats` to inspect the current active topology.
+
+        Rebuildable CUDA volumes can be allocated during CUDA graph capture when CUDA memory-pool allocation is
+        supported and enabled. Exact, non-rebuildable volume allocation is not graph-capture safe because determining
+        the exact topology size requires device synchronization. Active-topology queries such as
+        :meth:`get_active_stats` must also be performed outside graph capture.
+
+        Unspecified node capacities use conservative sparse-grid defaults. In particular, ``max_leaf_nodes`` defaults
+        to ``max_active_voxels`` because arbitrary voxel points can place one active voxel in each leaf node. For dense
+        voxel sets, pass tighter node capacities explicitly to reduce memory use. Non-index volumes are allocated and
+        rebuilt by tiles with :meth:`allocate_by_tiles`, where ``max_tiles`` directly controls leaf capacity.
 
         Args:
             voxel_points (:class:`warp.array`): Array of positions that define the voxels to be allocated.
                 The array may use an integer scalar type (2D N-by-3 array of :class:`warp.int32` or 1D array of :class:`warp.vec3i` values), indicating index space positions,
                 or a floating point scalar type (2D N-by-3 array of :class:`warp.float32` or 1D array of :class:`warp.vec3f` values), indicating world space positions.
-                Repeated points per tile are allowed and will be efficiently deduplicated.
+                Repeated points per voxel are allowed and will be efficiently deduplicated.
             voxel_size: Voxel size(s) of the new volume. Ignored if ``transform`` is given.
             translation: Translation between the index and world spaces.
             transform: Linear transform between the index and world spaces.
               If ``None``, deduced from ``voxel_size``.
-            device: The CUDA device to create the volume on, e.g. ``"cuda"`` or ``"cuda:0"``.
+            rebuildable: Whether to allocate persistent capacity for rebuilds.
+            max_active_voxels: Maximum number of active voxels reserved for rebuilds. Supplying this makes the
+                volume rebuildable.
+            max_leaf_nodes: Maximum number of NanoVDB leaf nodes reserved for rebuilds. Supplying this makes the
+                volume rebuildable.
+            max_lower_nodes: Maximum number of lower internal nodes reserved for rebuilds. Supplying this makes
+                the volume rebuildable.
+            max_upper_nodes: Maximum number of upper internal nodes reserved for rebuilds. Supplying this makes
+                the volume rebuildable.
+            status: Optional one-element ``uint32`` array receiving ``Volume.REBUILD_*`` status flags from the
+                initial build. ``Volume.REBUILD_SUCCESS`` means the requested topology fit in the reserved capacity.
+            point_mask: Optional ``int32`` array with one entry per point. Points with a zero mask value are ignored.
+            device: The device to create the volume on, e.g. ``"cpu"``, ``"cuda"``, or ``"cuda:0"``.
 
         Raises:
-            RuntimeError: If the ``device`` is not a CUDA device.
-            RuntimeError: If ``voxel_points`` is not a contiguous array of the correct type and shape.
+            RuntimeError: If ``voxel_points``, ``point_mask``, or ``status`` is not a contiguous array of the
+                required type and shape.
             RuntimeError: If :class:`Volume` creation fails.
             ValueError: If neither ``voxel_size`` nor ``transform`` is provided.
             ValueError: If both ``voxel_size`` and ``transform`` are provided.
+            ValueError: If a rebuild capacity is not positive or does not fit in ``uint32``.
         """
         device = warp.get_device(device)
 
-        if not device.is_cuda:
-            raise RuntimeError("Only CUDA devices are supported for allocate_by_tiles")
         if not _is_contiguous_vec_like_array(voxel_points, vec_length=3, scalar_types=(float32, int32)):
             raise RuntimeError(
                 "voxel_points must be contiguous and either a 1D Warp array of vec3f or vec3i or a 2D n-by-3 array of int32 or float32."
             )
-        if not voxel_points.device.is_cuda:
+        if voxel_points.device != device:
             voxel_points = voxel_points.to(device)
 
         volume = cls(data=None)
@@ -6771,20 +7551,235 @@ class Volume:
         in_world_space = type_scalar_type(voxel_points.dtype) is float32
 
         transform_buf, translation_buf = Volume._fill_transform_buffers(voxel_size, translation, transform)
-
-        volume.id = volume.runtime.core.wp_volume_from_active_voxels_device(
-            volume.device.context,
-            ctypes.c_void_p(voxel_points.ptr),
-            voxel_points.shape[0],
-            transform_buf,
-            translation_buf,
-            in_world_space,
+        rebuildable = (
+            rebuildable
+            or max_active_voxels is not None
+            or max_leaf_nodes is not None
+            or max_lower_nodes is not None
+            or max_upper_nodes is not None
         )
+
+        status = _volume_rebuild_status_array(status, device) if rebuildable and status is not None else None
+        max_active_voxels_c = (
+            _volume_rebuild_capacity(max_active_voxels, voxel_points.shape[0], "max_active_voxels")
+            if rebuildable
+            else 0
+        )
+        max_leaf_nodes_c = (
+            _volume_rebuild_capacity(max_leaf_nodes, max_active_voxels_c, "max_leaf_nodes") if rebuildable else 0
+        )
+        max_lower_nodes_c = (
+            _volume_rebuild_capacity(max_lower_nodes, max_leaf_nodes_c, "max_lower_nodes") if rebuildable else 0
+        )
+        max_upper_nodes_c = (
+            _volume_rebuild_capacity(max_upper_nodes, max_lower_nodes_c, "max_upper_nodes") if rebuildable else 0
+        )
+        status_ptr = ctypes.c_void_p(status.ptr) if status is not None else ctypes.c_void_p(0)
+        point_mask = _volume_point_mask_array(point_mask, voxel_points.shape[0], device)
+        point_mask_ptr = ctypes.c_void_p(0 if point_mask is None else point_mask.ptr)
+
+        if volume.device.is_cuda:
+            volume.id = volume.runtime.core.wp_volume_from_active_voxels_device(
+                volume.device.context,
+                ctypes.c_void_p(voxel_points.ptr),
+                voxel_points.shape[0],
+                point_mask_ptr,
+                transform_buf,
+                translation_buf,
+                in_world_space,
+                rebuildable,
+                max_active_voxels_c,
+                max_leaf_nodes_c,
+                max_lower_nodes_c,
+                max_upper_nodes_c,
+                status_ptr,
+            )
+        else:
+            volume.id = volume.runtime.core.wp_volume_from_active_voxels_host(
+                ctypes.c_void_p(voxel_points.ptr),
+                voxel_points.shape[0],
+                point_mask_ptr,
+                transform_buf,
+                translation_buf,
+                in_world_space,
+                rebuildable,
+                max_active_voxels_c,
+                max_leaf_nodes_c,
+                max_lower_nodes_c,
+                max_upper_nodes_c,
+                status_ptr,
+            )
 
         if volume.id == 0:
             raise RuntimeError("Failed to create volume")
 
+        if rebuildable:
+            volume._rebuild_info = Volume.RebuildInfo(
+                "voxels",
+                max_active_voxels_c,
+                max_leaf_nodes_c,
+                max_lower_nodes_c,
+                max_upper_nodes_c,
+            )
         return volume
+
+    def rebuild(self, points: array, status: array | None = None, point_mask: array | None = None) -> array | None:
+        """Rebuild this volume's topology in place from ``points``.
+
+        The volume must have been created with ``rebuildable=True`` or explicit capacity arguments. The input kind
+        must match the allocation method: volumes created by :meth:`allocate_by_tiles` rebuild from tile points, and
+        volumes created by :meth:`allocate_by_voxels` rebuild from voxel points.
+
+        Rebuilds preserve the volume's transform, background value, grid type, and reserved capacity. Capacity does
+        not grow automatically; pass ``status`` to detect whether the requested topology fit in the reserved storage.
+
+        Args:
+            points: Contiguous array of tile or voxel positions. The array may be a 1D array of ``vec3i`` or
+                ``vec3f`` values, or a 2D ``N x 3`` array of ``int32`` or ``float32`` values. Integer points are
+                interpreted in index space, and floating-point points are interpreted in world space.
+            status: Optional one-element ``uint32`` array receiving ``Volume.REBUILD_*`` status flags.
+                ``Volume.REBUILD_SUCCESS`` means the requested topology fit in the reserved capacity.
+            point_mask: Optional ``int32`` array with one entry per point. Points with a zero mask value are ignored.
+
+        Returns:
+            The ``status`` array if one was provided, otherwise ``None``.
+
+        Raises:
+            RuntimeError: If the volume is not rebuildable.
+            RuntimeError: If ``points``, ``point_mask``, or ``status`` is not a contiguous array of the required
+                type and shape.
+        """
+
+        if self._rebuild_info.kind == "tiles":
+            return self._rebuild_tiles(points, status=status, point_mask=point_mask)
+        if self._rebuild_info.kind == "voxels":
+            return self._rebuild_voxels(points, status=status, point_mask=point_mask)
+
+        raise RuntimeError("Volume is not rebuildable")
+
+    def _rebuild_tiles(
+        self, tile_points: array, status: array | None = None, point_mask: array | None = None
+    ) -> array | None:
+        """Rebuild this volume's tile topology from ``tile_points``."""
+
+        if self._rebuild_info.kind != "tiles":
+            raise RuntimeError("Volume was not allocated as a rebuildable tile volume")
+
+        if not _is_contiguous_vec_like_array(tile_points, vec_length=3, scalar_types=(float32, int32)):
+            raise RuntimeError(
+                "tile_points must be contiguous and either a 1D Warp array of vec3f or vec3i or a 2D n-by-3 array of int32 or float32."
+            )
+        if tile_points.device != self.device:
+            tile_points = tile_points.to(self.device)
+        status = _volume_rebuild_status_array(status, self.device) if status is not None else None
+        status_ptr = ctypes.c_void_p(status.ptr) if status is not None else ctypes.c_void_p(0)
+        point_mask = _volume_point_mask_array(point_mask, tile_points.shape[0], self.device)
+        point_mask_ptr = ctypes.c_void_p(0 if point_mask is None else point_mask.ptr)
+        in_world_space = type_scalar_type(tile_points.dtype) is float32
+        transform_buf, translation_buf = self._grid_transform_buffers()
+
+        if self.is_index:
+            if self.device.is_cuda:
+                self.runtime.core.wp_volume_index_rebuild_from_tiles_device(
+                    self.id,
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    status_ptr,
+                )
+            else:
+                self.runtime.core.wp_volume_index_rebuild_from_tiles_host(
+                    self.id,
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    status_ptr,
+                )
+        else:
+            cvalue = self._rebuild_bg_value
+            cvalue_ptr = ctypes.pointer(cvalue)
+            if self.device.is_cuda:
+                self.runtime.core.wp_volume_rebuild_from_tiles_device(
+                    self.id,
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    cvalue_ptr,
+                    ctypes.sizeof(cvalue),
+                    self._rebuild_bg_type,
+                    status_ptr,
+                )
+            else:
+                self.runtime.core.wp_volume_rebuild_from_tiles_host(
+                    self.id,
+                    ctypes.c_void_p(tile_points.ptr),
+                    tile_points.shape[0],
+                    point_mask_ptr,
+                    transform_buf,
+                    translation_buf,
+                    in_world_space,
+                    cvalue_ptr,
+                    ctypes.sizeof(cvalue),
+                    self._rebuild_bg_type,
+                    status_ptr,
+                )
+
+        return status
+
+    def _rebuild_voxels(
+        self, voxel_points: array, status: array | None = None, point_mask: array | None = None
+    ) -> array | None:
+        """Rebuild this volume's active-voxel topology from ``voxel_points``."""
+
+        if self._rebuild_info.kind != "voxels":
+            raise RuntimeError("Volume was not allocated as a rebuildable active-voxel volume")
+
+        if not _is_contiguous_vec_like_array(voxel_points, vec_length=3, scalar_types=(float32, int32)):
+            raise RuntimeError(
+                "voxel_points must be contiguous and either a 1D Warp array of vec3f or vec3i or a 2D n-by-3 array of int32 or float32."
+            )
+        if voxel_points.device != self.device:
+            voxel_points = voxel_points.to(self.device)
+        status = _volume_rebuild_status_array(status, self.device) if status is not None else None
+        status_ptr = ctypes.c_void_p(status.ptr) if status is not None else ctypes.c_void_p(0)
+        point_mask = _volume_point_mask_array(point_mask, voxel_points.shape[0], self.device)
+        point_mask_ptr = ctypes.c_void_p(0 if point_mask is None else point_mask.ptr)
+        in_world_space = type_scalar_type(voxel_points.dtype) is float32
+        transform_buf, translation_buf = self._grid_transform_buffers()
+
+        if self.device.is_cuda:
+            self.runtime.core.wp_volume_rebuild_from_active_voxels_device(
+                self.id,
+                ctypes.c_void_p(voxel_points.ptr),
+                voxel_points.shape[0],
+                point_mask_ptr,
+                transform_buf,
+                translation_buf,
+                in_world_space,
+                status_ptr,
+            )
+        else:
+            self.runtime.core.wp_volume_rebuild_from_active_voxels_host(
+                self.id,
+                ctypes.c_void_p(voxel_points.ptr),
+                voxel_points.shape[0],
+                point_mask_ptr,
+                transform_buf,
+                translation_buf,
+                in_world_space,
+                status_ptr,
+            )
+
+        return status
 
 
 def _is_contiguous_vec_like_array(array, vec_length: int, scalar_types: tuple[type]) -> builtins.bool:
@@ -6795,6 +7790,42 @@ def _is_contiguous_vec_like_array(array, vec_length: int, scalar_types: tuple[ty
     return (array.ndim == 1 and type_size(array.dtype) == vec_length) or (
         array.ndim == 2 and array.shape[1] == vec_length and type_size(array.dtype) == 1
     )
+
+
+def _volume_rebuild_capacity(value: int | None, default: int, name: str) -> int:
+    capacity = default if value is None else value
+    try:
+        capacity = int(capacity)
+    except (TypeError, ValueError) as err:
+        raise TypeError(f"{name} must be an integer") from err
+
+    if capacity <= 0:
+        raise ValueError(f"{name} must be positive, got {capacity}")
+    if capacity >= 2**32:
+        raise ValueError(f"{name} must fit in uint32, got {capacity}")
+    return capacity
+
+
+def _volume_rebuild_status_array(status: array, device) -> array:
+    if not is_array(status) or status.dtype != uint32 or status.size < 1:
+        raise RuntimeError("status must be a Warp array with dtype uint32 and at least one element")
+    if status.device != device:
+        raise RuntimeError(f"status must be on device {device}")
+    return status
+
+
+def _volume_point_mask_array(point_mask: array | None, point_count: int, device) -> array | None:
+    if point_mask is None:
+        return None
+
+    if not is_array(point_mask) or point_mask.dtype != int32 or point_mask.ndim != 1 or not point_mask.is_contiguous:
+        raise RuntimeError("point_mask must be a contiguous 1D Warp array with dtype int32")
+    if point_mask.shape[0] < point_count:
+        raise RuntimeError(f"point_mask must have at least {point_count} entries")
+    if point_mask.device != device:
+        point_mask = point_mask.to(device)
+
+    return point_mask
 
 
 # definition just for kernel type (cannot be a parameter), see mesh.h
@@ -6869,12 +7900,28 @@ class HashGrid:
     """Hash-based spatial grid for accelerated neighbor queries on point data.
 
     Supports float16, float32, and float64 precision via the ``dtype`` parameter.
+
+    **Concept of Grouped HashGrid:**
+
+    A grouped hash grid partitions point buckets by a user-provided integer group id. This is useful for storing
+    particles from many independent environments in a single grid while keeping neighbor queries local to one
+    environment.
+
+    In a standard hash grid, all points sharing a spatial cell are stored together, so kernels that need environment
+    isolation must query all candidates and filter out points from other environments. Grouped hash grids keep each
+    cell's points sorted by group id, and :func:`warp.hash_grid_query` accepts an optional group id that restricts
+    traversal to that group's points only. This avoids cross-group candidate iteration while preserving the ungrouped
+    query path when no group is passed.
+
+    Unlike grouped BVH queries, grouped hash-grid queries do not require a separate root lookup. Pass the same group id
+    used at build time directly to :func:`warp.hash_grid_query`.
     """
 
     # Native type IDs (must match HashGridTypeId enum in hashgrid.cpp)
     _TYPE_FLOAT16 = 0
     _TYPE_FLOAT32 = 1
     _TYPE_FLOAT64 = 2
+    _MAX_CELL_COUNT = (1 << 31) - 1
 
     _dtype_map: ClassVar = {
         float16: (vec3h, _TYPE_FLOAT16),
@@ -6886,6 +7933,20 @@ class HashGrid:
         """Get the appropriate native function for the given action."""
         location = "host" if self.device.is_cpu else "device"
         return getattr(self.runtime.core, f"wp_hash_grid_{action}_{location}")
+
+    @classmethod
+    def _validate_cell_count(cls, dim_x, dim_y, dim_z):
+        cell_count = dim_x * dim_y * dim_z
+
+        if dim_x <= 0 or dim_y <= 0 or dim_z <= 0:
+            raise RuntimeError("Hash grid dimensions must be positive")
+        if cell_count > cls._MAX_CELL_COUNT:
+            raise RuntimeError(
+                "Hash grid cell count exceeds supported limit: "
+                f"{dim_x} * {dim_y} * {dim_z} = {cell_count} > {cls._MAX_CELL_COUNT}"
+            )
+
+        return cell_count
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -6924,16 +7985,29 @@ class HashGrid:
 
         self.runtime = warp._src.context.runtime
         self.device = self.runtime.get_device(device)
+        try:
+            self._dim_x = operator.index(dim_x)
+            self._dim_y = operator.index(dim_y)
+            self._dim_z = operator.index(dim_z)
+        except TypeError as e:
+            raise TypeError("HashGrid dimensions must be integers") from e
+
+        self._validate_cell_count(self._dim_x, self._dim_y, self._dim_z)
 
         if self.device.is_cpu:
-            self.id = self._native_func("create")(self._type_id, dim_x, dim_y, dim_z)
+            self.id = self._native_func("create")(self._type_id, self._dim_x, self._dim_y, self._dim_z)
         else:
-            self.id = self._native_func("create")(self.device.context, self._type_id, dim_x, dim_y, dim_z)
+            self.id = self._native_func("create")(
+                self.device.context, self._type_id, self._dim_x, self._dim_y, self._dim_z
+            )
+        if not self.id:
+            raise RuntimeError("Failed to create HashGrid")
 
         # indicates whether the grid data has been reserved for use by a kernel
         self.reserved = False
+        self.groups = None
 
-    def build(self, points, radius):
+    def build(self, points, radius, groups=None):
         """Update the hash grid data structure.
 
         This method rebuilds the underlying datastructure and should be called any time the set
@@ -6945,21 +8019,78 @@ class HashGrid:
             radius (float): The cell size to use for bucketing points, cells are cubes with edges of this width.
                             For best performance the radius used to construct the grid should match closely to
                             the radius used when performing queries.
+            groups: Optional array of point group indices of data type :class:`warp.int32`.
+                When provided, the grid is partitioned by group so grouped queries only visit points with the
+                requested group id. This is intended for independent environments or worlds whose particles should not
+                interact, even when their coordinates overlap. Omitting the group argument in
+                :func:`warp.hash_grid_query` preserves the all-points traversal behavior.
+                Group ids may be arbitrary ``int32`` values and are consumed on-device, so group assignments may
+                change between rebuilds, including during CPU and CUDA graph replay.
+
+        Raises:
+            NotImplementedError: If called during a saveable graph capture
+                (``apic=True``), because HashGrid serialization is not yet
+                supported.
         """
         if not types_equal(points.dtype, self._vec_type):
             raise TypeError(f"Hash grid points should have type {self._vec_type.__name__}, got {points.dtype}")
-
         if radius <= 0.0:
             raise ValueError(f"Hash grid cell width must be positive, got {radius}")
+        if points.device != self.device:
+            raise RuntimeError("points must live on the same device as this HashGrid")
+
+        if groups is not None:
+            if groups.dtype != int32:
+                raise RuntimeError("groups should be an array of type wp.int32")
+            if groups.device != self.device:
+                raise RuntimeError("groups must live on the same device as this HashGrid")
+            if groups.size != points.size:
+                raise RuntimeError("groups must have the same length as points")
+
+        apic_capture = warp._src.context._get_apic_capture_for_device(self.device)
+        if apic_capture is not None and apic_capture.apic_savable:
+            raise NotImplementedError(
+                "HashGrid.build() cannot be used in a saveable APIC capture because "
+                "HashGrid serialization is not yet supported; use apic=False or build outside capture"
+            )
 
         if points.ndim > 1:
             points = points.contiguous().flatten()
 
-        self._native_func("update")(self.id, self._type_id, radius, ctypes.byref(points.__ctype__()))
+        groups_arg = None
+        if groups is not None:
+            if groups.ndim > 1:
+                groups = groups.contiguous().flatten()
+            elif not groups.is_contiguous:
+                groups = groups.contiguous()
+            groups_arg = ctypes.byref(groups.__ctype__())
+
+        if apic_capture is not None:
+            apic_capture.track_array(points)
+            apic_capture.track_array(groups)
+
+        self.groups = groups
+        self._native_func("update")(self.id, self._type_id, radius, ctypes.byref(points.__ctype__()), groups_arg)
         self.reserved = True
 
-    def reserve(self, num_points):
-        self._native_func("reserve")(self.id, self._type_id, num_points)
+    def reserve(self, num_points, with_groups=False):
+        """Reserve enough memory to build the grid for the given number of points.
+
+        Reserving ahead of graph capture lets subsequent :meth:`build` calls of up to ``num_points`` points reuse the
+        grid's buffers without reallocating them, avoiding a warm-up build before capture. Sort scratch memory is
+        managed safely during CUDA graph capture regardless of reserving. CPU live replay can allocate on the first
+        replayed build, so pre-reserving is optional. :meth:`reserve` cannot be called during CPU graph capture.
+
+        Args:
+            num_points (int): Number of points the grid should accommodate.
+            with_groups (bool): Also reserve the buffers used by grouped builds (with ``groups``).
+        """
+        if self.device.is_cpu and warp._src.context._get_apic_capture_for_device(self.device) is not None:
+            raise NotImplementedError(
+                "HashGrid.reserve() cannot be called during CPU graph capture; reserve before capture"
+            )
+
+        self._native_func("reserve")(self.id, self._type_id, num_points, with_groups)
         self.reserved = True
 
     def __del__(self):
@@ -7121,6 +8252,8 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
         elif issubclass(arg_type, warp._src.codegen.StructInstance):
             # a struct
             arg_types.append(arg._cls)
+        elif is_native_type(arg_type):
+            arg_types.append(arg_type)
         elif arg is None:
             # allow passing None for arrays
             t = template_types[i]
@@ -7156,16 +8289,40 @@ simple_type_codes = {
     float64: "f8",
     shape_t: "sh",
     range_t: "rg",
-    launch_bounds_t: "lb",
-    HashGridQuery: "hgq",
-    HashGridQueryH: "hgqh",
-    HashGridQueryD: "hgqd",
-    MeshQueryAABB: "mqa",
+    **{cls: f"lb{n}" for n, cls in _launch_bounds_classes.items()},
+    hash_grid_query_type(float16): "hgqh",
+    hash_grid_query_type(float32): "hgq",
+    hash_grid_query_type(float64): "hgqd",
+    MeshQuery: "mqa",
+    MeshQueryAABB: "mqab",
+    _MeshQuerySphere: "mqs",
     MeshQueryPoint: "mqp",
     MeshQueryRay: "mqr",
     BvhQuery: "bvhq",
+    _BvhQueryAabb: "bvhqa",
+    _BvhQueryRay: "bvhqr",
+    _BvhQueryCapsule: "bvhqc",
+    _BvhQuerySphere: "bvhqs",
     # Textures are added at the end of the file to avoid circular imports
 }
+
+
+def is_warp_function_annotation(annotation) -> bool:
+    """Return whether an annotation denotes a type-erased Warp function."""
+
+    function_type = getattr(warp, "Function", None)
+    if function_type is not None and annotation is function_type:
+        return True
+
+    context = getattr(getattr(warp, "_src", None), "context", None)
+    context_function_type = getattr(context, "Function", None)
+    return context_function_type is not None and annotation is context_function_type
+
+
+def is_builtin_callable_annotation(annotation) -> bool:
+    """Return whether a built-in signature uses ``Callable`` for a function slot."""
+
+    return annotation is Callable or get_origin(annotation) is Callable
 
 
 def get_type_code(arg_type) -> str:
@@ -7173,6 +8330,8 @@ def get_type_code(arg_type) -> str:
         # special case for generics
         # note: since Python 3.11 Any is a type, so we check for it first
         return "?"
+    elif is_warp_function_annotation(arg_type):
+        return "c"
     elif (
         sys.version_info < (3, 11)
         and hasattr(types, "GenericAlias")
@@ -7183,8 +8342,14 @@ def get_type_code(arg_type) -> str:
         # This must come before isinstance(arg_type, type) check
         arg_types = arg_type.__args__
         return f"tpl{len(arg_types)}{''.join(get_type_code(x) for x in arg_types)}"
+    elif get_origin(arg_type) is Union or isinstance(arg_type, types.UnionType):
+        raise TypeError(
+            "Union type annotations are only supported at Python scope and are invalid in Warp kernels/functions"
+        )
     elif isinstance(arg_type, type):
-        if hasattr(arg_type, "_wp_scalar_type_"):
+        if is_native_type(arg_type):
+            return f"nt{arg_type._wp_native_type_.type_code}"
+        elif hasattr(arg_type, "_wp_scalar_type_"):
             # vector/matrix type
             dtype_code = get_type_code(arg_type._wp_scalar_type_)
             # check for "special" vector/matrix subtypes
@@ -7252,11 +8417,10 @@ def get_type_code(arg_type) -> str:
     elif arg_type == Int:
         # generic int
         return "i?"
-    elif isinstance(arg_type, Callable):
-        # TODO: elaborate on Callable type?
-        return "c"
     elif arg_type is Ellipsis:
         return "?"
+    elif isinstance(arg_type, Reference):
+        return f"ref{get_type_code(arg_type.dtype)}"
     else:
         raise TypeError(f"Unrecognized type '{arg_type}'")
 

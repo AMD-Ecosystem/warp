@@ -33,36 +33,56 @@ template <typename T> CUDA_CALLABLE int argmin_tracker(T champion_value, T curre
 
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
+// half / float16 uses a dedicated overload to shuffle its 16-bit payload directly.
+inline CUDA_CALLABLE half warp_shuffle_down(half val, int offset, tile_mask_t mask)
+{
+    unsigned int bits = static_cast<unsigned int>(val.u);
+    bits = __shfl_down_sync(mask, bits, offset, WP_TILE_WARP_SIZE);
+
+    half result;
+    result.u = static_cast<unsigned short>(bits);
+    return result;
+}
+
+#ifndef WP_NO_BFLOAT16
+inline CUDA_CALLABLE bfloat16 warp_shuffle_down(bfloat16 val, int offset, tile_mask_t mask)
+{
+    unsigned int bits = static_cast<unsigned int>(val.u);
+    bits = __shfl_down_sync(mask, bits, offset, WP_TILE_WARP_SIZE);
+
+    bfloat16 result;
+    result.u = static_cast<unsigned short>(bits);
+    return result;
+}
+#endif  // WP_NO_BFLOAT16
+
 template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset, tile_mask_t mask)
 {
+    // Shuffle word-by-word over the raw bytes so any trivially-copyable value type is
+    // supported. A plain word buffer (rather than a union over T) avoids the deleted
+    // default constructor that a union acquires when T has a non-trivial default
+    // constructor (e.g. quaternions and transforms), and is padded up to a word
+    // multiple so partial-word types stay in bounds. The buffers are over-aligned to
+    // max(alignof(T), alignof(Word)) so reinterpreting them as a T* is well-defined for
+    // over-aligned types such as wp::float64 (alignas cannot request less than the
+    // array's natural Word alignment, so the Word floor is required).
     typedef unsigned int Word;
-
-    union {
-        T output;
-        Word output_storage;
-    };
-
-    union {
-        T input;
-        Word input_storage;
-    };
-
-    input = val;
-
-    Word* dest = reinterpret_cast<Word*>(&output);
-    Word* src = reinterpret_cast<Word*>(&input);
-
-    unsigned int shuffle_word;
 
     constexpr int word_count = (sizeof(T) + sizeof(Word) - 1) / sizeof(Word);
 
+    constexpr size_t buffer_align = alignof(T) > alignof(Word) ? alignof(T) : alignof(Word);
+
+    alignas(buffer_align) Word input[word_count] = {};
+    alignas(buffer_align) Word output[word_count] = {};
+
+    *reinterpret_cast<T*>(input) = val;
+
     WP_PRAGMA_UNROLL
     for (int i = 0; i < word_count; ++i) {
-        shuffle_word = __shfl_down_sync(mask, src[i], offset, WP_TILE_WARP_SIZE);
-        dest[i] = shuffle_word;
+        output[i] = __shfl_down_sync(mask, input[i], offset, WP_TILE_WARP_SIZE);
     }
 
-    return output;
+    return *reinterpret_cast<T*>(output);
 }
 
 // vector overload
@@ -77,6 +97,31 @@ inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T>
     return result;
 }
 
+template <unsigned Length>
+inline CUDA_CALLABLE wp::vec_t<Length, half> warp_shuffle_down(wp::vec_t<Length, half> val, int offset, tile_mask_t mask)
+{
+    wp::vec_t<Length, half> result;
+
+    for (unsigned i = 0; i < Length; ++i)
+        result[i] = warp_shuffle_down(val[i], offset, mask);
+
+    return result;
+}
+
+#ifndef WP_NO_BFLOAT16
+template <unsigned Length>
+inline CUDA_CALLABLE wp::vec_t<Length, bfloat16>
+warp_shuffle_down(wp::vec_t<Length, bfloat16> val, int offset, tile_mask_t mask)
+{
+    wp::vec_t<Length, bfloat16> result;
+
+    for (unsigned i = 0; i < Length; ++i)
+        result[i] = warp_shuffle_down(val[i], offset, mask);
+
+    return result;
+}
+#endif  // WP_NO_BFLOAT16
+
 // matrix overload
 template <unsigned Rows, unsigned Cols, typename T>
 inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, tile_mask_t mask)
@@ -86,6 +131,87 @@ inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, 
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
             result.data[i][j] = __shfl_down_sync(mask, val.data[i][j], offset, WP_TILE_WARP_SIZE);
+
+    return result;
+}
+
+template <unsigned Rows, unsigned Cols>
+inline CUDA_CALLABLE wp::mat_t<Rows, Cols, half>
+warp_shuffle_down(wp::mat_t<Rows, Cols, half> val, int offset, tile_mask_t mask)
+{
+    wp::mat_t<Rows, Cols, half> result;
+
+    for (unsigned i = 0; i < Rows; ++i)
+        for (unsigned j = 0; j < Cols; ++j)
+            result.data[i][j] = warp_shuffle_down(val.data[i][j], offset, mask);
+
+    return result;
+}
+
+#ifndef WP_NO_BFLOAT16
+template <unsigned Rows, unsigned Cols>
+inline CUDA_CALLABLE wp::mat_t<Rows, Cols, bfloat16>
+warp_shuffle_down(wp::mat_t<Rows, Cols, bfloat16> val, int offset, tile_mask_t mask)
+{
+    wp::mat_t<Rows, Cols, bfloat16> result;
+
+    for (unsigned i = 0; i < Rows; ++i)
+        for (unsigned j = 0; j < Cols; ++j)
+            result.data[i][j] = warp_shuffle_down(val.data[i][j], offset, mask);
+
+    return result;
+}
+#endif  // WP_NO_BFLOAT16
+
+
+template <typename T> inline CUDA_CALLABLE T* warp_shuffle_down(T* val, int offset, tile_mask_t mask)
+{
+    unsigned long long ptr = reinterpret_cast<unsigned long long>(val);
+    unsigned int ptr_lo = static_cast<unsigned int>(ptr);
+    unsigned int ptr_hi = static_cast<unsigned int>(ptr >> 32);
+    ptr_lo = __shfl_down_sync(mask, ptr_lo, offset, WP_TILE_WARP_SIZE);
+    ptr_hi = __shfl_down_sync(mask, ptr_hi, offset, WP_TILE_WARP_SIZE);
+    ptr = (static_cast<unsigned long long>(ptr_hi) << 32) | static_cast<unsigned long long>(ptr_lo);
+    return reinterpret_cast<T*>(ptr);
+}
+
+inline CUDA_CALLABLE wp::shape_t warp_shuffle_down(wp::shape_t val, int offset, tile_mask_t mask)
+{
+    wp::shape_t result;
+
+    for (int i = 0; i < wp::ARRAY_MAX_DIMS; ++i)
+        result.dims[i] = __shfl_down_sync(mask, val.dims[i], offset, WP_TILE_WARP_SIZE);
+
+    return result;
+}
+
+template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::array_t<T> val, int offset, tile_mask_t mask)
+{
+    wp::array_t<T> result;
+
+    result.data = wp::warp_shuffle_down(val.data, offset, mask);
+    result.grad = wp::warp_shuffle_down(val.grad, offset, mask);
+    result.shape = wp::warp_shuffle_down(val.shape, offset, mask);
+    for (int i = 0; i < wp::ARRAY_MAX_DIMS; ++i)
+        result.strides[i] = __shfl_down_sync(mask, val.strides[i], offset, WP_TILE_WARP_SIZE);
+    result.ndim
+        = static_cast<uint16_t>(__shfl_down_sync(mask, static_cast<unsigned int>(val.ndim), offset, WP_TILE_WARP_SIZE));
+    result.flags = static_cast<uint16_t>(
+        __shfl_down_sync(mask, static_cast<unsigned int>(val.flags), offset, WP_TILE_WARP_SIZE)
+    );
+
+    return result;
+}
+
+template <typename T>
+inline CUDA_CALLABLE wp::indexedarray_t<T> warp_shuffle_down(wp::indexedarray_t<T> val, int offset, tile_mask_t mask)
+{
+    wp::indexedarray_t<T> result;
+
+    result.arr = wp::warp_shuffle_down(val.arr, offset, mask);
+    for (int i = 0; i < wp::ARRAY_MAX_DIMS; ++i)
+        result.indices[i] = wp::warp_shuffle_down(val.indices[i], offset, mask);
+    result.shape = wp::warp_shuffle_down(val.shape, offset, mask);
 
     return result;
 }
@@ -408,10 +534,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
     WP_PRAGMA_UNROLL
     for (int i = 0; i < OutputRegLayout::NumRegs; ++i) {
         int linear = OutputRegLayout::linear_from_register(i);
-        if (!OutputRegLayout::valid(linear))
-            break;
-
-        output.data[i] = output_buffer[linear];
+        output.data[i] = OutputRegLayout::valid(linear) ? output_buffer[linear] : T {};
     }
 
     return output;
@@ -610,26 +733,27 @@ template <typename Tile, typename Op, typename OpTrack> auto tile_arg_reduce_imp
 
 #endif  // !defined(__CUDA_ARCH__)
 
-inline CUDA_CALLABLE void adj_tile_reduce_impl()
-{
-    // todo: general purpose reduction gradients not implemented
-}
-
-inline CUDA_CALLABLE void adj_tile_reduce_axis_impl()
-{
-    // todo: axis-specific reduction gradients not implemented
-}
-
 // entry point for Python code-gen, wraps op in a lambda to perform overload resolution
 #define tile_reduce(op, t) tile_reduce_impl([](auto x, auto y) { return op(x, y);}, t)
-#define adj_tile_reduce(op, t, adj_op, adj_t, adj_ret) adj_tile_reduce_impl()
+
+template <typename Op, typename Tile, typename AdjOp, typename AdjTile, typename AdjRet>
+CUDA_CALLABLE void adj_tile_reduce(Op op, Tile& t, AdjOp& adj_op, AdjTile& adj_t, AdjRet& adj_ret)
+{
+    // MISSINGADJOINT: for differentiable ops, distribute adj_ret to all input elements via
+    // op's adjoint
+}
 
 #define tile_arg_reduce(op, opTrack, t) tile_arg_reduce_impl([](auto x, auto y) { return op(x, y);}, [](auto a, auto b, auto c, auto d) { return opTrack(a, b, c, d); }, t)
-#define adj_tile_arg_reduce(op, t, adj_op, adj_t, adj_ret) adj_tile_arg_reduce_impl()
 
 // axis-specific reduction entry points
 #define tile_reduce_axis(op, t, axis) tile_reduce_axis_impl<axis>([](auto x, auto y) { return op(x, y);}, t)
-#define adj_tile_reduce_axis(op, t, axis, adj_op, adj_t, adj_axis, adj_ret) adj_tile_reduce_axis_impl()
+
+template <typename Op, typename Tile, typename AdjOp, typename AdjTile, typename AdjRet>
+CUDA_CALLABLE void adj_tile_reduce_axis(Op op, Tile& t, int axis, AdjOp& adj_op, AdjTile& adj_t, int& adj_axis, AdjRet& adj_ret)
+{
+    // MISSINGADJOINT: for differentiable ops, distribute adj_ret along the reduction axis
+    // via op's adjoint
+}
 
 // convenience methods for specific reductions
 
@@ -888,30 +1012,20 @@ template <typename Tile> inline CUDA_CALLABLE auto tile_max(Tile& t) { return ti
 
 template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_max(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
-    // todo: not implemented
+    // MISSINGADJOINT: subgradient: route adj_ret to the index of the maximum element
 }
 
 template <typename Tile> inline CUDA_CALLABLE auto tile_min(Tile& t) { return tile_reduce(min, t); }
 
 template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_min(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
-    // todo: not implemented
+    // MISSINGADJOINT: subgradient: route adj_ret to the index of the minimum element
 }
 
 
 template <typename Tile> inline CUDA_CALLABLE auto tile_argmax(Tile& t) { return tile_arg_reduce(max, argmax_tracker, t); }
 
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_argmax(Tile& t, Tile& adj_t, AdjTile& adj_ret)
-{
-    // todo: not implemented
-}
-
 template <typename Tile> inline CUDA_CALLABLE auto tile_argmin(Tile& t) { return tile_arg_reduce(min, argmin_tracker, t); }
-
-template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_argmin(Tile& t, Tile& adj_t, AdjTile& adj_ret)
-{
-    // todo: not implemented
-}
 
 
 }  // namespace wp

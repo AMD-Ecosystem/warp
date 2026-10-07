@@ -38,7 +38,7 @@ def static_global_variable_func():
 
 
 @wp.kernel
-def static_global_variable_kernel(results: wp.array(dtype=int)):
+def static_global_variable_kernel(results: wp.array[int]):
     # evaluate a constant expression at codegen time
     static_var = static_global_variable_func()
     const_var = 3
@@ -81,7 +81,7 @@ def construct_nested_struct(mat: wp.mat33, vec: wp.vec3, i: int, tf: wp.transfor
 
 
 @wp.kernel
-def construct_static_struct_kernel(results: wp.array(dtype=StaticallyConstructableStruct)):
+def construct_static_struct_kernel(results: wp.array[StaticallyConstructableStruct]):
     static_struct = wp.static(
         construct_struct(
             wp.mat33(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0),
@@ -93,7 +93,7 @@ def construct_static_struct_kernel(results: wp.array(dtype=StaticallyConstructab
 
 
 @wp.kernel
-def construct_static_nested_struct_kernel(results: wp.array(dtype=StaticallyConstructableNestedStruct)):
+def construct_static_nested_struct_kernel(results: wp.array[StaticallyConstructableNestedStruct]):
     static_struct = wp.static(
         construct_nested_struct(
             wp.mat33(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0),
@@ -137,16 +137,14 @@ def test_construct_static_nested_struct(test, device):
 
 
 def test_invalid_static_expression(test, device):
-    @wp.kernel
     def invalid_kernel():
         wp.static(1.0 / 0.0)
 
     with test.assertRaisesRegex(
         wp.WarpCodegenError, r"Error evaluating static expression\: (?:float )?division by zero"
     ):
-        wp.launch(invalid_kernel, 1, device=device)
+        wp.launch(make_isolated_kernel(invalid_kernel), 1, device=device)
 
-    @wp.kernel
     def invalid_kernel(i: int):
         wp.static(i * 2)
 
@@ -154,11 +152,10 @@ def test_invalid_static_expression(test, device):
         wp.WarpCodegenError,
         r"Error evaluating static expression\: name 'i' is not defined\. Make sure all variables used in the static expression are constant\.",
     ):
-        wp.launch(invalid_kernel, 1, device=device, inputs=[3])
+        wp.launch(make_isolated_kernel(invalid_kernel), 1, device=device, inputs=[3])
 
 
 def test_static_expression_return_types(test, device):
-    @wp.kernel
     def invalid_kernel():
         wp.static(wp.zeros(3, device=device))
 
@@ -166,11 +163,11 @@ def test_static_expression_return_types(test, device):
         wp.WarpCodegenError,
         r"Static expression returns an unsupported value\: a Warp array cannot be created inside Warp kernels",
     ):
-        wp.launch(invalid_kernel, 1, device=device)
+        wp.launch(make_isolated_kernel(invalid_kernel), 1, device=device)
 
     @wp.struct
     class Baz:
-        data: wp.array(dtype=int)
+        data: wp.array[int]
         z: wp.vec3
 
     @wp.struct
@@ -193,7 +190,6 @@ def test_static_expression_return_types(test, device):
         foo.x = 123
         return foo
 
-    @wp.kernel
     def invalid_kernel():
         wp.static(create_struct())
 
@@ -201,12 +197,11 @@ def test_static_expression_return_types(test, device):
         wp.WarpCodegenError,
         r"Static expression returns an unsupported value: the returned Warp struct contains a data type that cannot be constructed inside Warp kernels\: a Warp array cannot be created inside Warp kernels at .*?Foo\.bar\.baz",
     ):
-        wp.launch(invalid_kernel, 1, device=device)
+        wp.launch(make_isolated_kernel(invalid_kernel), 1, device=device)
 
     def function_with_no_return_value():
         pass
 
-    @wp.kernel
     def invalid_kernel():
         wp.static(function_with_no_return_value())
 
@@ -214,12 +209,11 @@ def test_static_expression_return_types(test, device):
         wp.WarpCodegenError,
         r"Static expression returns an unsupported value\: None is returned",
     ):
-        wp.launch(invalid_kernel, 1, device=device)
+        wp.launch(make_isolated_kernel(invalid_kernel), 1, device=device)
 
     class MyClass:
         pass
 
-    @wp.kernel
     def invalid_kernel():
         wp.static(MyClass())
 
@@ -227,7 +221,7 @@ def test_static_expression_return_types(test, device):
         wp.WarpCodegenError,
         r"Static expression returns an unsupported value\: value of type .*?MyClass",
     ):
-        wp.launch(invalid_kernel, 1, device=device)
+        wp.launch(make_isolated_kernel(invalid_kernel), 1, device=device)
 
 
 def test_function_variable(test, device):
@@ -244,7 +238,7 @@ def test_function_variable(test, device):
         # note that this example also works without using wp.static()
 
         @wp.kernel
-        def function_variable_kernel(results: wp.array(dtype=int)):
+        def function_variable_kernel(results: wp.array[int]):
             results[0] = wp.static(func)(3, 2)  # noqa: B023
 
         results = wp.zeros(1, dtype=int, device=device)
@@ -279,7 +273,7 @@ def test_function_lookup(test, device):
     for _op, op_func in op_handlers.items():
 
         @wp.kernel
-        def operate(input: wp.array(dtype=inputs.dtype, ndim=2), output: wp.array(dtype=wp.float32)):
+        def operate(input: wp.array2d[inputs.dtype], output: wp.array[wp.float32]):
             tid = wp.tid()
             a, b = input[tid, 0], input[tid, 1]
             # retrieve the right function to use for the captured dtype variable
@@ -304,7 +298,7 @@ def count_ssa_occurrences(kernel: wp.Kernel, ssas: list[str]) -> dict[str, int]:
 
 def test_static_for_loop(test, device):
     @wp.kernel
-    def static_loop_variable(results: wp.array(dtype=int)):
+    def static_loop_variable(results: wp.array[int]):
         s = 0
         for i in range(wp.static(static_global_variable_func())):
             s += wp.static(i)
@@ -335,7 +329,7 @@ def test_static_for_loop(test, device):
 
 def test_static_for_loop_force_unroll(test, device):
     @wp.kernel
-    def static_loop_force_unroll(results: wp.array(dtype=int)):
+    def static_loop_force_unroll(results: wp.array[int]):
         s = 0
         for i in range(0, 8):
             s += wp.static(i)
@@ -362,7 +356,7 @@ def test_static_for_loop_force_unroll(test, device):
 
 def test_static_for_loop_no_force_unroll(test, device):
     @wp.kernel
-    def static_loop_no_force(results: wp.array(dtype=int)):
+    def static_loop_no_force(results: wp.array[int]):
         s = int(0)
         for _i in range(0, 8):
             s = s + wp.static(global_variable)
@@ -388,7 +382,7 @@ def test_static_for_loop_no_force_unroll(test, device):
 
 def test_static_if_else_elif(test, device):
     @wp.kernel
-    def static_condition1(results: wp.array(dtype=int)):
+    def static_condition1(results: wp.array[int]):
         if wp.static(static_global_variable_func() in {2, 3, 5}):
             results[0] = 1
         elif wp.static(static_global_variable_func() in {0, 1}):
@@ -412,7 +406,7 @@ def test_static_if_else_elif(test, device):
     captured_var = "hello"
 
     @wp.kernel
-    def static_condition2(results: wp.array(dtype=int)):
+    def static_condition2(results: wp.array[int]):
         if wp.static(captured_var == "world"):
             results[0] = 1
         else:
@@ -430,7 +424,7 @@ def test_static_if_else_elif(test, device):
     my_list = [1, 2, 3]
 
     @wp.kernel
-    def static_condition3(results: wp.array(dtype=int)):
+    def static_condition3(results: wp.array[int]):
         if wp.static(len(my_list) == 0):
             results[0] = 0
         elif wp.static(len(my_list) == 1):
@@ -616,7 +610,7 @@ def unresolved_builder(funcids):
     _funcs = [funcs[id] for id in funcids]
 
     @wp.kernel
-    def eval(input: wp.array(dtype=int), output: wp.array(dtype=int)):
+    def eval(input: wp.array[int], output: wp.array[int]):
         for i in range(wp.static(len(_funcs))):
             output[0] = wp.static(_funcs[i])()
 
@@ -653,14 +647,14 @@ _global_test_j = 888
 
 
 @wp.kernel
-def static_loop_var_kernel(results: wp.array(dtype=int)):
+def static_loop_var_kernel(results: wp.array[int]):
     """Kernel where wp.static() should capture the loop variable, not the global."""
     for _global_test_idx in range(3):
         results[_global_test_idx] = wp.static(_global_test_idx)
 
 
 @wp.kernel
-def static_loop_var_in_expr_kernel(results: wp.array(dtype=int)):
+def static_loop_var_in_expr_kernel(results: wp.array[int]):
     """Kernel where loop variable is used in an arithmetic expression."""
     for _global_test_idx in range(3):
         # Even in complex expressions, the loop variable should be used
@@ -668,7 +662,7 @@ def static_loop_var_in_expr_kernel(results: wp.array(dtype=int)):
 
 
 @wp.kernel
-def static_nested_loop_kernel(results: wp.array(dtype=int)):
+def static_nested_loop_kernel(results: wp.array[int]):
     """Kernel with nested loops - both loop variables should be protected."""
     for _global_test_idx in range(2):
         for _global_test_j in range(2):
@@ -677,7 +671,7 @@ def static_nested_loop_kernel(results: wp.array(dtype=int)):
 
 
 @wp.kernel
-def static_nested_loop_same_var_kernel(results: wp.array(dtype=int)):
+def static_nested_loop_same_var_kernel(results: wp.array[int]):
     """Kernel with nested loops reusing the same variable name.
 
     Tests counter-based loop variable tracking: when inner and outer loops

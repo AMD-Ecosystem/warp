@@ -6,13 +6,13 @@ import gc
 import os
 import sys
 import time
+import warnings
 from typing import Any
 
 import numpy as np
 
 import warp as wp
 import warp.fem as fem
-from warp._src.utils import warn
 from warp.optim.linear import LinearOperator, aslinearoperator, bicgstab, cg, cr, gmres, preconditioner
 from warp.render import UsdRenderer
 from warp.sparse import BsrMatrix, bsr_get_diag, bsr_mv, bsr_transposed
@@ -716,7 +716,7 @@ class Plot:
             try:
                 return self._plot_matplotlib(options, save=save)
             except ModuleNotFoundError:
-                warn("pyvista or matplotlib must be installed to visualize solution results")
+                warnings.warn("pyvista or matplotlib must be installed to visualize solution results", stacklevel=2)
 
     def _plot_pyvista(self, options: dict[str, Any], save: str | None = None):
         import pyvista  # noqa: PLC0415
@@ -1023,7 +1023,7 @@ class Plot:
             plot_fn = None
             plot_3d = False
             cmap_name = args.get("cmap", None)
-            plot_opts = {"cmap": cm.colormaps.get_cmap(cmap_name) if cmap_name else cm.viridis}
+            plot_opts = {"cmap": plt.get_cmap(cmap_name) if cmap_name else cm.viridis}
 
             if color_values_list is not None:
                 plot_opts["clim"] = self._get_field_value_range(color_values_list, options.get(color_field_name, {}))

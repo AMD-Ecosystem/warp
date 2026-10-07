@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import ctypes
 import errno
 import hashlib
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -13,15 +15,50 @@ import time
 from pathlib import Path
 
 import warp.config
+from warp._src.logger import LOG_DEBUG
 from warp._src.thirdparty import appdirs
 from warp._src.types import *
-
-_wp_module_name_ = "warp.build"
 
 # From nvJitLink.h
 nvJitLink_input_type = {"cubin": 1, "ptx": 2, "ltoir": 3, "fatbin": 4, "object": 5, "library": 6}
 
 warp_home = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+
+# LTO cache files use a truncated SHA-256 prefix. Sixteen hex characters give a
+# 64-bit key space, moving the birthday-bound 50% collision point to about
+# 5.1 billion unique symbols while keeping filenames compact.
+LTO_CACHE_KEY_LENGTH = 16
+
+# Remember the cache directory produced by the most recent initialization so
+# Warp can feed it back into this function without treating arbitrary
+# version-named base directories as already resolved.
+_resolved_kernel_cache_dir: str | None = None
+
+
+def _get_extra_include_dirs(extra_include_dirs) -> list[str]:
+    include_dirs: list[str] = []
+    invalid_dirs: list[str] = []
+
+    for entry in extra_include_dirs:
+        path = os.fspath(entry)
+        if not os.path.isabs(path):
+            invalid_dirs.append(f"{path!r} (not absolute)")
+            continue
+
+        normalized_path = os.path.realpath(path)
+        if not os.path.isdir(normalized_path):
+            invalid_dirs.append(f"{path!r} (not a directory)")
+            continue
+
+        include_dirs.append(normalized_path)
+
+    if invalid_dirs:
+        raise ValueError("extra_include_dirs entries must be absolute existing directories: " + ", ".join(invalid_dirs))
+    return include_dirs
+
+
+def _get_extra_include_dir_bytes(extra_include_dirs) -> list[bytes]:
+    return [path.encode("utf-8") for path in _get_extra_include_dirs(extra_include_dirs)]
 
 
 _HIP_EXTRA_INCLUDE_DIRS_CACHE: "list[str] | None" = None
@@ -97,17 +134,24 @@ def build_cuda(
     arch_suffix="",
     llvm_cuda=False,
     use_precompiled_headers=True,
+    extra_include_dirs=(),
 ) -> None:
     with open(cu_path, "rb") as src_file:
         src = src_file.read()
     cu_path_bytes = cu_path.encode("utf-8")
     program_name_bytes = os.path.basename(cu_path).encode("utf-8")
     inc_path = os.path.join(warp_home, "native").encode("utf-8")
+    extra_cuda_include_dirs = _get_extra_include_dir_bytes(extra_include_dirs)
+    num_cuda_include_dirs = len(extra_cuda_include_dirs)
+    cuda_include_dirs = (
+        (ctypes.c_char_p * num_cuda_include_dirs)(*extra_cuda_include_dirs) if num_cuda_include_dirs else None
+    )
     output_path = output_path.encode("utf-8")
 
     if llvm_cuda:
-        warp._src.context.runtime.llvm.wp_compile_cuda(src, cu_path_bytes, inc_path, output_path, False)
-
+        err = warp._src.context.runtime.llvm.wp_compile_cuda(
+            src, cu_path_bytes, inc_path, num_cuda_include_dirs, cuda_include_dirs, output_path, False
+        )
     else:
         if ltoirs is None:
             ltoirs = []
@@ -138,12 +182,15 @@ def build_cuda(
             arch_int = arch if arch is not None else 0
             arch_suffix_bytes = arch_suffix.encode("utf-8")
 
-        extra_include_dirs: "list[bytes]" = []
+        # User-provided extra include dirs plus, on HIP, the ROCm clang/HIP runtime headers.
+        combined_include_dirs = list(extra_cuda_include_dirs)
         runtime = getattr(warp._src.context, "runtime", None)
         if runtime is not None and getattr(runtime, "is_hip", False):
-            extra_include_dirs = [d.encode("utf-8") for d in _hip_extra_include_dirs()]
-        num_extra = len(extra_include_dirs)
-        extra_arr = (ctypes.c_char_p * num_extra)(*extra_include_dirs) if num_extra else None
+            combined_include_dirs += [d.encode("utf-8") for d in _hip_extra_include_dirs()]
+        num_combined_include_dirs = len(combined_include_dirs)
+        combined_include_dirs_arr = (
+            (ctypes.c_char_p * num_combined_include_dirs)(*combined_include_dirs) if num_combined_include_dirs else None
+        )
 
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
@@ -151,11 +198,11 @@ def build_cuda(
             arch_int,
             arch_suffix_bytes,
             inc_path,
-            num_extra,
-            extra_arr,
+            num_combined_include_dirs,
+            combined_include_dirs_arr,
             config == "debug",
             optimization_level,
-            warp.config.verbose,
+            warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
             verify_fp,
             fast_math,
             fuse_fp,
@@ -169,8 +216,8 @@ def build_cuda(
             arr_link_sizes,
             arr_link_input_types,
         )
-        if err != 0:
-            raise Exception(f"CUDA kernel build failed with error code {err}")
+    if err != 0:
+        raise Exception(f"CUDA kernel build failed with error code {err}")
 
 
 # load PTX or CUBIN as a CUDA runtime module (input type determined by input_path extension)
@@ -195,6 +242,7 @@ def build_cpu(
     pch_dir=None,
     block_dim=256,
     enable_tiles_in_stack_memory=True,
+    extra_include_dirs=(),
 ):
     with open(cpp_path, "rb") as cpp:
         src = cpp.read()
@@ -203,6 +251,8 @@ def build_cpu(
     obj_path = obj_path.encode("utf-8")
 
     flags_list = extra_flags.split()
+    for include_dir in _get_extra_include_dirs(extra_include_dirs):
+        flags_list.extend(("-I", include_dir))
     flags_array = (ctypes.c_char_p * (len(flags_list) + 1))(*[f.encode("utf-8") for f in flags_list], None)
 
     pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
@@ -227,6 +277,22 @@ def build_cpu(
         raise Exception(f"CPU kernel build failed with error code {err}")
 
 
+def _add_long_path_prefix(path):
+    """Add the Windows long-path prefix to an absolute path, accounting for UNC shares.
+
+    Prefixed paths bypass the legacy 260-character MAX_PATH limit without requiring
+    system-wide long-path support. Relative paths and paths that already carry the
+    prefix are returned unchanged.
+    """
+    if not ntpath.isabs(path) or path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        # UNC path  \\server\share\…  →  \\?\UNC\server\share\…
+        return "\\\\?\\UNC\\" + path.removeprefix("\\\\")
+    # Drive-letter path  C:\…  →  \\?\C:\…
+    return "\\\\?\\" + path
+
+
 def init_kernel_cache(path=None):
     """Initialize kernel cache directory.
 
@@ -236,28 +302,37 @@ def init_kernel_cache(path=None):
     To change the default cache location, set warp.config.kernel_cache_dir before calling warp.init().
     """
 
+    global _resolved_kernel_cache_dir
+
     if path is not None:
         base_dir = os.path.realpath(path)
-        cache_root_dir = os.path.join(base_dir, warp.config.version)
     elif "WARP_CACHE_PATH" in os.environ:
         base_dir = os.path.realpath(os.environ.get("WARP_CACHE_PATH"))
-        cache_root_dir = os.path.join(base_dir, warp.config.version)
     else:
         base_dir = None
         cache_root_dir = appdirs.user_cache_dir(appname="warp", appauthor="NVIDIA", version=warp.config.version)
 
-        if os.name == "nt" and os.path.isabs(cache_root_dir) and not cache_root_dir.startswith("\\\\?\\"):
-            # Add Windows long-path prefix, accounting for UNC shares.
-            if cache_root_dir.startswith("\\\\"):
-                # UNC path  \\server\share\…  →  \\?\UNC\server\share\…
-                cache_root_dir = "\\\\?\\UNC\\" + cache_root_dir.removeprefix("\\\\")
-            else:
-                # Drive-letter path  C:\…  →  \\?\C:\…
-                cache_root_dir = "\\\\?\\" + cache_root_dir
+    if base_dir is not None:
+        # The remembered path carries the Windows long-path prefix, so compare against the
+        # prefixed spelling. os.path.realpath() keeps a prefix that is already there but never
+        # adds one, so an unprefixed path naming the same directory would otherwise miss.
+        resolved_candidate = _add_long_path_prefix(base_dir) if os.name == "nt" else base_dir
+
+        if resolved_candidate == _resolved_kernel_cache_dir:
+            cache_root_dir = resolved_candidate
+            base_dir = os.path.dirname(base_dir)
+        else:
+            cache_root_dir = os.path.join(base_dir, warp.config.version)
+
+    if os.name == "nt":
+        # Module paths under the cache can exceed MAX_PATH on systems without
+        # long-path support enabled, so custom locations need the prefix too.
+        cache_root_dir = _add_long_path_prefix(cache_root_dir)
 
     warp.config.kernel_cache_dir = cache_root_dir
 
     os.makedirs(warp.config.kernel_cache_dir, exist_ok=True)
+    _resolved_kernel_cache_dir = cache_root_dir
 
     # Warn about stale kernel artifacts in the unversioned base directory.
     # Prior to Warp 1.13, custom cache paths were used without a version
@@ -269,9 +344,9 @@ def init_kernel_cache(path=None):
         except OSError:
             has_stale = False
         if has_stale:
-            from warp._src.utils import warn  # noqa: PLC0415
+            from warp._src.logger import log_warning  # noqa: PLC0415
 
-            warn(
+            log_warning(
                 f"Kernel cache artifacts from a previous Warp version were found in '{base_dir}'. "
                 f"These will be ignored. You can safely delete them.",
             )
@@ -339,7 +414,9 @@ def safe_rename(src, dst, attempts=5, delay=0.1):
                 if i < attempts - 1:
                     time.sleep(delay)
                 else:
-                    print(
+                    from warp._src.logger import log_error  # noqa: PLC0415
+
+                    log_error(
                         f"Could not update Warp cache with compiled binaries, trying to rename {src} to {dst}, error {e}"
                     )
                     raise e
@@ -366,13 +443,23 @@ def get_cached_lto(path):
 
 
 def get_cached_lto_meta(path, symbol):
-    if os.path.exists(path):
+    if not os.path.exists(path):
+        return None
+
+    try:
         with open(path) as f:
             keys = json.load(f)
-        value = keys[symbol]
-        return value
-    else:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
+
+    if not isinstance(keys, dict):
+        return None
+
+    value = keys.get(symbol)
+    if type(value) is not builtins.int or value < 0:
+        return None
+
+    return value
 
 
 def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
@@ -399,9 +486,9 @@ def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
         extra_files = {}
 
     # Hash symbol and set up paths
-    h = hash_symbol(lto_symbol)
+    h = hash_symbol(lto_symbol)[:LTO_CACHE_KEY_LENGTH]
     lto_dir = get_lto_cache_dir()
-    lto_name = f"{h[:7]}.lto"
+    lto_name = f"{h}.lto"
     lto_path = os.path.join(lto_dir, lto_name)
 
     # Set up paths for extra files
@@ -409,11 +496,13 @@ def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
     temp_file_paths = {}
 
     for ext, _ in extra_files.items():
-        name = f"{h[:7]}{ext}"
+        name = f"{h}{ext}"
         file_paths[ext] = os.path.join(lto_dir, name)
 
-    # Check if already built but not cached
+    # Check the persistent LTO cache before compiling.
     lto_code_data = get_cached_lto(lto_path)
+    cached_extra_files = {}
+    invalid_extra_files = set()
     if lto_code_data is not None:
         # Get the cached data for the extra files and early return
         all_files_cached = True
@@ -421,9 +510,10 @@ def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
             if getter and os.path.exists(file_paths[ext]):
                 cached_data = getter(file_paths[ext])
                 if cached_data is None:
+                    invalid_extra_files.add(ext)
                     all_files_cached = False
                     break
-                extra_files[ext] = cached_data
+                cached_extra_files[ext] = cached_data
             elif getter:  # If there's a getter but file doesn't exist
                 all_files_cached = False
                 break
@@ -432,7 +522,11 @@ def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
             if not extra_files:
                 return (True, lto_code_data)
             else:
-                return (True, lto_code_data, *[extra_files[ext] for ext in extra_files.keys()])
+                return (
+                    True,
+                    lto_code_data,
+                    *[cached_extra_files.get(ext) for ext in extra_files.keys()],
+                )
 
     # Create process-dependent temporary build directory
     build_dir = f"{lto_dir}_p{os.getpid()}_t{threading.get_ident()}"
@@ -460,8 +554,15 @@ def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
 
         # If build_dir couldn't be moved by a rename, move the outputs one-by-one to lto_dir
         if os.path.exists(lto_dir):
+            replace_lto = len(invalid_extra_files) > 0
             for ext, path in file_paths.items():
-                if not os.path.exists(path):
+                if (replace_lto and ext == ".lto") or ext in invalid_extra_files:
+                    try:
+                        # Replace inconsistent cache outputs so future processes hit a coherent entry.
+                        os.replace(temp_file_paths[ext], path)
+                    except OSError:
+                        pass
+                elif not os.path.exists(path):
                     try:
                         # copy output file to the destination lto dir
                         os.rename(temp_file_paths[ext], path)
@@ -479,7 +580,9 @@ def _build_lto_base(lto_symbol, compile_func, builder, extra_files=None):
         return (result, outputs[".lto"], *[outputs[ext] for ext in extra_files.keys()])
 
 
-def build_lto_dot(M, N, K, adtype, bdtype, cdtype, alayout, blayout, clayout, arch, num_threads, builder):
+def build_lto_dot(
+    M, N, K, adtype, bdtype, cdtype, alayout, blayout, clayout, arch, num_threads, builder, lda=None, ldb=None, ldc=None
+):
     arch = 120 if arch > 121 else arch
 
     # Maps Python/Warp types to C++ types and enums
@@ -519,7 +622,28 @@ def build_lto_dot(M, N, K, adtype, bdtype, cdtype, alayout, blayout, clayout, ar
 
     element_type = a_type
 
+    # A leading dimension is the element stride between rows of a row-major operand,
+    # or between columns of a col-major one. None means dense.
+    def dense_ld(layout, rows, cols):
+        return cols if layout == "rowmajor" else rows
+
+    dense_lds = (dense_ld(alayout, M, K), dense_ld(blayout, K, N), dense_ld(clayout, M, N))
+    if lda is None:
+        lda = dense_lds[0]
+    if ldb is None:
+        ldb = dense_lds[1]
+    if ldc is None:
+        ldc = dense_lds[2]
+
+    # Pass zeros for dense strides, leaving the LeadingDimension operator unset.
+    # cuBLASDx validates an explicit LeadingDimension more strictly than the default;
+    # see the fallback in the tile_matmul dispatch.
+    native_lds = (0, 0, 0) if (lda, ldb, ldc) == dense_lds else (lda, ldb, ldc)
+
     lto_symbol = f"dot_{M}_{N}_{K}_{arch}_{num_threads}_{a_arrangement}_{b_arrangement}_{c_arrangement}_{a_prec}_{b_prec}_{c_prec}_{element_type}"
+    # dense GEMMs keep the pre-existing symbol, so their cached LTOs stay valid
+    if (lda, ldb, ldc) != dense_lds:
+        lto_symbol += f"_{lda}_{ldb}_{ldc}"
 
     def compile_lto_dot(temp_paths):
         result = warp._src.context.runtime.core.wp_cuda_compile_dot(
@@ -540,6 +664,9 @@ def build_lto_dot(M, N, K, adtype, bdtype, cdtype, alayout, blayout, clayout, ar
             b_arrangement,
             c_arrangement,
             num_threads,
+            native_lds[0],
+            native_lds[1],
+            native_lds[2],
         )
 
         if result:
@@ -668,7 +795,8 @@ def build_lto_solver(
                     source = "estimated limit" if max_smem_is_estimate else "device-reported limit"
                     hint = (
                         f"Estimated shared memory requirement is {smem_estimate_bytes}B, "
-                        f"but the {source} is {max_smem_bytes}B. "
+                        f"but the {source} is {max_smem_bytes}B, and a kernel's usable budget is lower "
+                        "still because Warp reserves static shared memory per block. "
                         "The tile size(s) may be too large for this device."
                     )
 
@@ -699,6 +827,7 @@ def build_lto_fft(arch, size, ept, direction, dir, precision, builder):
     arch = 120 if arch > 121 else arch
 
     lto_symbol = f"fft_{size}_{ept}_{arch}_{direction}_{precision}"
+    dtype_ctype = "wp::vec2f" if precision == 5 else "wp::vec2d"
 
     def compile_lto_fft(temp_paths):
         shared_memory_size = ctypes.c_int(0)
@@ -728,7 +857,7 @@ def build_lto_fft(arch, size, ept, direction, dir, precision, builder):
             meta[lto_symbol] = shared_memory_bytes
 
             with open(temp_paths[".meta"], "w") as meta_file:
-                json.dump(meta, meta_file)
+                json.dump(meta, meta_file, sort_keys=True)
 
             return True, {".lto": lto_code_data, ".meta": shared_memory_bytes}
 
@@ -751,6 +880,7 @@ def build_lto_fft(arch, size, ept, direction, dir, precision, builder):
 
         # Update builder
         builder.ltoirs[lto_symbol] = lto_code_data
+        builder.ltoirs_decl[lto_symbol] = f"void {lto_symbol}({dtype_ctype}*, char*);"
         builder.shared_memory_bytes[lto_symbol] = shared_memory_bytes
 
     return lto_symbol, lto_code_data, shared_memory_bytes

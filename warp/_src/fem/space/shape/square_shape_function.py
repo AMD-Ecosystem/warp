@@ -15,8 +15,6 @@ from .cube_shape_function import CubeBSplineShapeFunctions
 from .shape_function import ShapeFunction
 from .triangle_shape_function import TrianglePolynomialShapeFunctions
 
-_wp_module_name_ = "warp.fem.space.shape.square_shape_function"
-
 
 class SquareShapeFunction(ShapeFunction):
     """Base class for shape functions defined on quadrilateral (square) elements."""
@@ -825,6 +823,7 @@ class SquareNedelecFirstKindShapeFunctions(SquareShapeFunction):
             coords = CoordsType()
             coords[axis] = scalar(0.5)
             coords[1 - axis] = scalar(type_instance)
+            return coords
 
         return node_coords_in_element
 
@@ -943,6 +942,7 @@ class SquareRaviartThomasShapeFunctions(SquareShapeFunction):
             coords = CoordsType()
             coords[axis] = scalar(0.5)
             coords[1 - axis] = scalar(type_instance)
+            return coords
 
         return node_coords_in_element
 

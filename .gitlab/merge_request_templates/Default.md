@@ -19,22 +19,26 @@ This section helps reviewers navigate the diff efficiently. -->
 ## Checklist
 
 <!-- See the Contributing Guidelines for general guidance:
-     https://nvidia.github.io/warp/user_guide/contribution_guide.html -->
+     https://nvidia.github.io/warp/latest/project/contribution_guide.html -->
 
 - [ ] New or existing tests cover these changes.
 - [ ] The documentation is up to date with these changes.
-- [ ] [CHANGELOG.md](CHANGELOG.md) is updated for any user-facing changes under the `Unreleased` section.
+- [ ] I added a changelog fragment if this change affects users.
 
-## Test plan
+## Validation summary
 
-<!-- How were these changes verified? Include specific commands, test names,
-     or manual steps so a reviewer can reproduce.
+<!--
+Explain what was verified and why it is sufficient for review. Write a short
+step-by-step validation narrative, not a command dump. Prefer test names plus
+behavior summaries.
 
-     Example:
-     ```bash
-     uv run warp/tests/test_codegen.py
-     uv run build_docs.py
-     ``` -->
+For test-driven changes, include red/green evidence when applicable, e.g.:
+- Verified the new test fails on the target branch without this change.
+- Verified the new test passes on this branch with the fix.
+
+If testing was not run, say so and explain the risk or blocker. Include
+commands only when they help reproduce the validation.
+-->
 
 ## Bug fix
 

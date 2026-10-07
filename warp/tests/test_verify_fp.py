@@ -22,7 +22,7 @@ class TestStruct:
 
 
 @wp.kernel
-def finite_kernel(foos: wp.array(dtype=TestStruct)):
+def finite_kernel(foos: wp.array[TestStruct]):
     i = wp.tid()
     foos[i].field += wp.float32(1.0)
 
@@ -46,12 +46,15 @@ def test_finite(test, device):
 
 
 @wp.kernel
-def nan_kernel(foos: wp.array(dtype=TestStruct)):
+def nan_kernel(foos: wp.array[TestStruct]):
     i = wp.tid()
     foos[i].field /= wp.float32(0.0)  # Division by zero produces Not-a-Number (NaN)
 
 
 def test_nan(test, device):
+    if wp.config.mode == "debug":
+        test.skipTest("verify_fp asserts before NaN warning checks in debug mode")
+
     if sys.platform == "win32":
         test.skipTest("Skipping test on Windows due to unreliable stdout capture")
 

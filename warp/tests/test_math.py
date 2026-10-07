@@ -27,13 +27,21 @@ class ScalarFloatValues(NamedTuple):
 @wp.kernel
 def scalar_float_kernel(
     i: int,
-    x: wp.array(dtype=wp.float32),
-    out: wp.array(dtype=wp.float32),
+    x: wp.array[wp.float32],
+    out: wp.array[wp.float32],
 ):
     if i == 0:
         out[0] = wp.degrees(x[0])
     elif i == 1:
         out[0] = wp.radians(x[0])
+
+
+@wp.kernel
+def power_of_two_pow_kernel(exponent: int, out_f32: wp.array[wp.float32], out_f64: wp.array[wp.float64]):
+    out_f32[0] = wp.float32(0.5) ** wp.float32(exponent)
+    out_f32[1] = wp.float32(2.0) ** wp.float32(exponent)
+    out_f64[0] = wp.float64(0.5) ** wp.float64(exponent)
+    out_f64[1] = wp.float64(2.0) ** wp.float64(exponent)
 
 
 def test_scalar_math(test, device):
@@ -56,7 +64,7 @@ def test_scalar_math(test, device):
 
 
 @wp.kernel
-def erf_kernel(x: wp.array(dtype=Any), out: wp.array(dtype=Any)):
+def erf_kernel(x: wp.array[Any], out: wp.array[Any]):
     i = wp.tid()
 
     if i == 0:
@@ -89,7 +97,7 @@ def test_erf_math(test, device):
 
 
 @wp.kernel
-def test_vec_norm_kernel(vs: wp.array(dtype=Any), out: wp.array(dtype=float, ndim=2)):
+def test_vec_norm_kernel(vs: wp.array[Any], out: wp.array2d[float]):
     tid = wp.tid()
     out[tid, 0] = wp.norm_l1(vs[tid])
     out[tid, 1] = wp.norm_l2(vs[tid])
@@ -134,7 +142,7 @@ def test_vec_norm(test, device):
 
 
 @wp.kernel
-def smooth_normalize_kernel(out: wp.array(dtype=float)):
+def smooth_normalize_kernel(out: wp.array[float]):
     zero = wp.vec3(0.0, 0.0, 0.0)
     zero_n = wp.smooth_normalize(zero)
 
@@ -153,7 +161,7 @@ def test_smooth_normalize(test, device):
 
 
 @wp.kernel
-def quat_helpers_kernel(out: wp.array(dtype=float, ndim=2)):
+def quat_helpers_kernel(out: wp.array2d[float]):
     tid = wp.tid()
 
     rpy = wp.vec3(0.3, -0.25, 0.7)
@@ -216,6 +224,8 @@ def quat_helpers_kernel(out: wp.array(dtype=float, ndim=2)):
     out[tid, 10] = quat_sign_invariant_error(q_dec_compound_zyx, q_compound_zyx)
     out[tid, 11] = wp.max(0.0, 1.0e-2 - wp.length(e_dec_compound_xyz - e_compound))
     out[tid, 12] = quat_sign_invariant_error(q_dec_gimbal, q_gimbal)
+    out[tid, 13] = wp.abs(wp.quat_twist_angle_signed(axis, q_mix) - angle_in)
+    out[tid, 14] = wp.abs(wp.quat_twist_angle_signed(axis, q_tw_neg) + angle_in)
 
 
 @wp.func
@@ -234,7 +244,7 @@ def euler_roundtrip_error(e: wp.vec3, i: int, j: int, k: int) -> float:
 
 
 @wp.kernel
-def quat_euler_roundtrip_kernel(out: wp.array(dtype=float, ndim=2)):
+def quat_euler_roundtrip_kernel(out: wp.array2d[float]):
     tid = wp.tid()
 
     i = 0
@@ -263,11 +273,58 @@ def quat_euler_roundtrip_kernel(out: wp.array(dtype=float, ndim=2)):
 
 
 def quat_helpers(test, device):
-    out = wp.empty((1, 13), dtype=wp.float32, device=device)
+    out = wp.empty((1, 15), dtype=wp.float32, device=device)
     wp.launch(quat_helpers_kernel, dim=1, outputs=[out], device=device)
 
     out_np = out.numpy()[0]
-    assert_np_equal(out_np, np.zeros(13, dtype=np.float32), tol=1e-5)
+    assert_np_equal(out_np, np.zeros(15, dtype=np.float32), tol=1e-5)
+
+
+@wp.kernel
+def test_quat_twist_angles_kernel(
+    angles: wp.array[float],
+    unsigned_angles: wp.array[float],
+    signed_angles: wp.array[float],
+):
+    tid = wp.tid()
+    axis = wp.vec3(0.0, 0.0, 1.0)
+    q = wp.quat_from_axis_angle(axis, angles[tid])
+    unsigned_angles[tid] = wp.quat_twist_angle(axis, q)
+    signed_angles[tid] = wp.quat_twist_angle_signed(axis, q)
+
+
+@wp.kernel
+def test_quat_twist_angle_signed_branches_kernel(out: wp.array[float]):
+    axis = wp.vec3(0.0, 0.0, 1.0)
+    q = wp.quat_from_axis_angle(axis, 4.0)
+    out[0] = wp.quat_twist_angle_signed(axis, q)
+    out[1] = wp.quat_twist_angle_signed(axis, -q)
+
+
+def test_quat_twist_angles(test, device):
+    angles_np = np.array([-4.0, -0.0006, -0.0005, -0.0001, 0.0001, 0.0005, 0.0006, 4.0], dtype=np.float32)
+    angles = wp.array(angles_np, dtype=wp.float32, device=device)
+    unsigned_angles = wp.empty_like(angles)
+    signed_angles = wp.empty_like(angles)
+
+    wp.launch(
+        test_quat_twist_angles_kernel,
+        dim=len(angles),
+        inputs=[angles],
+        outputs=[unsigned_angles, signed_angles],
+        device=device,
+    )
+
+    np.testing.assert_allclose(unsigned_angles.numpy(), np.abs(angles_np), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(signed_angles.numpy(), angles_np, rtol=1e-6, atol=1e-7)
+
+
+def test_quat_twist_angle_signed_branches(test, device):
+    out = wp.empty(2, dtype=wp.float32, device=device)
+    wp.launch(test_quat_twist_angle_signed_branches_kernel, dim=1, outputs=[out], device=device)
+
+    expected = np.array([4.0, 4.0 - 2.0 * np.pi], dtype=np.float32)
+    np.testing.assert_allclose(out.numpy(), expected, rtol=1e-6, atol=1e-7)
 
 
 def quat_euler_roundtrip(test, device):
@@ -279,7 +336,7 @@ def quat_euler_roundtrip(test, device):
 
 
 @wp.kernel
-def spatial_helpers_kernel(out: wp.array(dtype=float, ndim=2)):
+def spatial_helpers_kernel(out: wp.array2d[float]):
     tid = wp.tid()
 
     q = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi * 0.5)
@@ -328,6 +385,21 @@ devices = get_test_devices()
 
 
 class TestMath(unittest.TestCase):
+    def test_power_of_two_pow_cpu(self):
+        """Verify CPU kernels can resolve power-of-two ``pow`` calls after LLVM optimization.
+
+        A reciprocal power-of-two base may lower to ``exp2``. A base of two with an integer-derived exponent may
+        lower to ``ldexp``. The CPU JIT must resolve both the float and double variants of these functions.
+        """
+        out_f32 = wp.empty(2, dtype=wp.float32, device="cpu")
+        out_f64 = wp.empty(2, dtype=wp.float64, device="cpu")
+
+        wp.launch(power_of_two_pow_kernel, dim=1, inputs=[4], outputs=[out_f32, out_f64], device="cpu")
+
+        expected = np.array([0.0625, 16.0])
+        np.testing.assert_allclose(out_f32.numpy(), expected)
+        np.testing.assert_allclose(out_f64.numpy(), expected)
+
     def test_vec_type(self):
         vec5 = wp.types.vector(length=5, dtype=float)
         v = vec5()
@@ -426,6 +498,13 @@ add_function_test(TestMath, "test_erf_math", test_erf_math, devices=devices)
 add_function_test(TestMath, "test_vec_norm", test_vec_norm, devices=devices)
 add_function_test(TestMath, "test_smooth_normalize", test_smooth_normalize, devices=devices)
 add_function_test(TestMath, "test_quat_helpers", quat_helpers, devices=devices)
+add_function_test(TestMath, "test_quat_twist_angles", test_quat_twist_angles, devices=devices)
+add_function_test(
+    TestMath,
+    "test_quat_twist_angle_signed_branches",
+    test_quat_twist_angle_signed_branches,
+    devices=devices,
+)
 add_function_test(TestMath, "test_quat_euler_roundtrip", quat_euler_roundtrip, devices=devices)
 add_function_test(TestMath, "test_spatial_helpers", spatial_helpers, devices=devices)
 

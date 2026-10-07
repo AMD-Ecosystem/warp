@@ -6,7 +6,7 @@ Basics
 Tutorial Notebooks
 ------------------
 
-The `NVIDIA Accelerated Computing Hub <https://github.com/NVIDIA/accelerated-computing-hub>`_ contains the current,
+The `NVIDIA Accelerated Computing Hub <https://github.com/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/README.md>`_ contains the current,
 actively maintained set of Warp tutorials:
 
 .. list-table::
@@ -14,50 +14,21 @@ actively maintained set of Warp tutorials:
 
    * - Notebook
      - Colab Link
-   * - `Introduction to NVIDIA Warp <https://github.com/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12_Intro_to_NVIDIA_Warp.ipynb>`_
+   * - `01. Introduction to NVIDIA Warp <https://github.com/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/01__intro_to_warp.ipynb>`_
      - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12_Intro_to_NVIDIA_Warp.ipynb
+          :target: https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/01__intro_to_warp.ipynb
           :alt: Open In Colab
-   * - `GPU-Accelerated Ising Model Simulation in NVIDIA Warp <https://github.com/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12.1_IsingModel_In_Warp.ipynb>`_
+   * - `02. Ising Model <https://github.com/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/02__ising_model.ipynb>`_
      - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12.1_IsingModel_In_Warp.ipynb
+          :target: https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/02__ising_model.ipynb
           :alt: Open In Colab
-
-Additionally, several notebooks in the `notebooks <https://github.com/NVIDIA/warp/tree/main/notebooks>`_ directory
-provide additional examples and cover key Warp features:
-
-.. list-table::
-   :header-rows: 1
-
-   * - Notebook
-     - Colab Link
-   * - `Warp Core Tutorial: Basics <https://github.com/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb>`_
+   * - `03. 2D Navier-Stokes Solver <https://github.com/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/03__navier_stokes_solver.ipynb>`_
      - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb
+          :target: https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/03__navier_stokes_solver.ipynb
           :alt: Open In Colab
-   * - `Warp Core Tutorial: Generics <https://github.com/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb>`_
+   * - `04. Differentiable Simulations in Warp <https://github.com/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/04__differentiable_navier_stokes_solver.ipynb>`_
      - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb
-          :alt: Open In Colab
-   * - `Warp Core Tutorial: Points <https://github.com/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb>`_
-     - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb
-          :alt: Open In Colab
-   * - `Warp Core Tutorial: Meshes <https://github.com/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb>`_
-     - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb
-          :alt: Open In Colab
-   * - `Warp Core Tutorial: Volumes <https://github.com/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb>`_
-     - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb
-          :alt: Open In Colab
-   * - `Warp PyTorch Tutorial: Basics <https://github.com/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb>`_
-     - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb
-          :alt: Open In Colab
-   * - `Warp PyTorch Tutorial: Custom Operators <https://github.com/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb>`_
-     - .. image:: https://colab.research.google.com/assets/colab-badge.svg
-          :target: https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb
+          :target: https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/main/tutorials/warp/notebooks/04__differentiable_navier_stokes_solver.ipynb
           :alt: Open In Colab
 
 .. _warp-initialization:
@@ -116,6 +87,11 @@ In Warp, compute kernels are defined as Python functions and annotated with the 
         # write result back to memory
         c[tid] = r
 
+Warp kernels do not return values directly. Write results through array arguments
+or other explicit output parameters, and either omit the kernel return annotation
+or use ``-> None``. Non-``None`` return annotations and ``return <value>``
+statements are invalid for kernels.
+
 Conceptually, Warp kernels are similar to CUDA kernels. When a kernel is *launched* on a GPU,
 the body of the kernel is executed a certain number of times in parallel.
 
@@ -153,6 +129,48 @@ We retrieve a 2D thread index inside the kernel by using multiple assignment whe
     def compute_image(pixel_data: wp.array2d[wp.vec3]):
         # get thread index
         i, j = wp.tid()
+
+.. _large_launch_indexing:
+
+Large array indexing
+^^^^^^^^^^^^^^^^^^^^
+
+For multi-dimensional launches, Warp derives the coordinates from a linear
+thread order in row-major form, with the last dimension varying fastest. This
+matches the default contiguous Warp array layout, so adjacent threads that
+differ only in the last index access adjacent array elements. On CUDA devices,
+this is the preferred pattern for coalesced global memory access.
+
+This is also useful when a logical data set has more than :math:`2^{31}-1`
+elements. Because each array dimension must fit in a signed 32-bit integer,
+store the data across multiple dimensions, launch over the array shape, and
+construct a 64-bit linear index when the algorithm is naturally expressed in
+1D:
+
+.. code-block:: python
+
+    @wp.kernel
+    def process_large_array(values: wp.array2d[wp.float32], logical_size: wp.int64):
+        i, j = wp.tid()
+
+        linear = wp.int64(i) * wp.int64(values.shape[1]) + wp.int64(j)
+        if linear < logical_size:
+            values[i, j] = float(linear % wp.int64(1024))
+
+    rows = 1 << 20
+    cols = 1 << 12
+    logical_size = (1 << 32) - 123
+    values = wp.empty((rows, cols), dtype=wp.float32, device="cuda")
+    wp.launch(
+        process_large_array,
+        dim=values.shape,
+        inputs=[values, wp.int64(logical_size)],
+        device=values.device,
+    )
+
+Here, the array shape pads the allocation beyond ``logical_size``. The bounds
+check skips those padded elements while preserving coalesced access for the
+contiguous region.
 
 Arrays
 ------
@@ -208,6 +226,43 @@ copy the array back to CPU memory where it is passed to NumPy.
 Calling :func:`array.numpy` on a CPU array will return a zero-copy NumPy view
 onto the Warp data.
 
+At Python scope, slicing a Warp array returns a zero-copy view into the same
+allocation. Views can be non-contiguous when the slice changes the memory
+stride:
+
+.. testcode::
+
+    a = wp.array(np.arange(12, dtype=np.float32).reshape(3, 4), dtype=wp.float32, device="cpu")
+
+    view = a[:, ::2]
+    print(view)
+    print(view.is_contiguous)
+
+    view.fill_(-1.0)
+    print(a)
+
+.. testoutput::
+
+    [[ 0.  2.]
+     [ 4.  6.]
+     [ 8. 10.]]
+    False
+    [[-1.  1. -1.  3.]
+     [-1.  5. -1.  7.]
+     [-1.  9. -1. 11.]]
+
+As with Python slices, a slice step of zero raises
+``ValueError("slice step cannot be zero")``.
+
+Scalar item indexing is intentionally not supported on ``wp.array`` objects at
+Python scope, so ``a[0, 0]`` raises an error. Use slicing to create array views,
+or convert to NumPy with :meth:`array.numpy <warp.array.numpy>` when reading
+individual values on the host. Inside kernels, arrays still support element-wise
+indexing.
+
+This keeps host-side behavior consistent across CPU and GPU arrays and avoids
+encouraging per-element device synchronization or copies.
+
 Common operators such as ``+``, ``-``, ``*``, and ``/`` are overloaded for Warp arrays.
 For example, we can add two arrays together using the ``+`` operator:
 
@@ -259,6 +314,31 @@ Functions can accept arrays and structs as inputs:
     def lookup(foos: wp.array[wp.uint32], index: int):
         return foos[index]
 
+Pass-by-reference parameters can be declared on user functions with
+:class:`wp.ref[T] <warp.ref>`. Assigning to a ``wp.ref`` parameter mutates the
+caller's storage instead of rebinding a local variable. Calls must pass an
+addressable expression, such as a local variable, function parameter, array
+element, or struct field:
+
+.. code-block:: python
+
+    @wp.func
+    def increment(x: wp.ref[wp.int32]):
+        x += 1
+
+
+    @wp.kernel(enable_backward=False)
+    def increment_kernel(values: wp.array[wp.int32]):
+        i = wp.tid()
+        increment(values[i])
+
+``wp.ref`` parameters are supported on :func:`@wp.func <warp.func>` and
+:func:`@wp.func_native <warp.func_native>` functions, but not on
+:func:`@wp.kernel <warp.kernel>` signatures. User functions with ``wp.ref``
+parameters are not automatically differentiable; use ``enable_backward=False``
+on the calling kernel or provide a manually differentiated native function when
+the function participates in a tape-recorded computation.
+
 Functions may also return multiple values:
 
 .. code-block:: python
@@ -291,6 +371,67 @@ User functions may also be overloaded by defining multiple function signatures w
     def custom(x: wp.vec3):
         return x + wp.vec3(1.0, 0.0, 0.0)
 
+.. _callable-parameters:
+
+Function Parameters
+^^^^^^^^^^^^^^^^^^^
+
+User functions can accept another user-defined Warp function or simple built-in
+Warp function by annotating the parameter as :class:`warp.Function`.
+Function targets are chosen when Warp generates code, not while the kernel is
+running. Warp compiles a separate version of the user function for each distinct
+set of target functions used at a call site. This is similar to generic
+specialization: many target combinations mean more specialized versions to
+compile, including for ``wp.grad()`` calls. The function target is chosen where
+the user function is called and can be invoked directly inside the user function
+body:
+
+.. code-block:: python
+
+    import warp as wp
+
+    @wp.func
+    def square(x: float):
+        return x * x
+
+
+    @wp.func
+    def cube(x: float):
+        return x * x * x
+
+
+    @wp.func
+    def apply(f: wp.Function, x: float):
+        return f(x)
+
+
+    @wp.kernel
+    def apply_kernel(
+        values: wp.array[float],
+        square_out: wp.array[float],
+        cube_out: wp.array[float],
+    ):
+        i = wp.tid()
+        square_out[i] = apply(square, values[i])
+        cube_out[i] = apply(cube, values[i])
+
+The :class:`warp.Function` annotation is type-erased. It does not encode or
+validate the target function signature. The target is checked only through the
+actual calls made in the function body during code generation.
+
+Function parameters may also use defaults and keyword arguments:
+
+.. code-block:: python
+
+    @wp.func
+    def apply_default(f: wp.Function = square, x: float = 0.0):
+        return f(x)
+
+Pass only user-defined :func:`@wp.func <warp.func>` functions or simple built-in
+functions such as ``wp.sin``, ``wp.cos``, ``wp.sqrt``, ``wp.add``, and ``wp.min``
+as function targets. See :doc:`limitations` for unsupported function targets and
+other restrictions.
+
 Tiles may also be passed to user functions. The function signature tile argument should include
 dtype and shape parameters to match the tile type intended to be used in the function. For example:
 
@@ -311,8 +452,9 @@ determine the tile argument type:
 
 See :ref:`Generic Functions` for details on using ``typing.Any`` in user function signatures.
 
-See :doc:`differentiability` for details on how to define custom gradient functions,
-custom replay functions, and custom native functions.
+See :doc:`differentiability` for details on custom gradient and replay
+functions. See :doc:`programming_model/cpp_cuda_workflows` for native C++/CUDA snippets and
+other non-Python integration workflows.
 
 User Structs
 --------------
@@ -332,76 +474,9 @@ As with kernel parameters, all attributes of a struct must have valid type hints
 Structs may be used as a ``dtype`` for :class:`wp.array <warp.array>` and may be passed to kernels directly as arguments.
 See :ref:`Structs Reference <Structs>` for more details on structs.
 
-.. _python-scope-vs-kernel-scope-api:
-
-Python Scope vs. Kernel Scope API
----------------------------------
-
-Some of the Warp API can only be called from the Python scope (i.e. outside of Warp user functions and kernels),
-while others can only be called from the kernel scope.
-
-The Python-scope API is documented in the :doc:`/api_reference/warp`,
-while the kernel-scope API is documented in the :doc:`/language_reference/builtins`.
-Generally, the kernel-scope API can also be used in the Python scope.
-
-Not all of the Python language is supported inside the kernel scope. Some features haven't been implemented yet, while
-other features do not map well to the GPU from a performance perspective.
-
-See the :doc:`Limitations <limitations>` documentation for more details.
-
-.. _Compilation Model:
-
-Compilation Model
------------------
-
-Warp uses a Python->C++/CUDA compilation model that generates kernel code from Python function definitions.
-All kernels belonging to a Python module are runtime compiled into dynamic libraries and PTX.
-The result is then cached between application restarts for fast startup times.
-
-Note that compilation is triggered on the first kernel launch for that module.
-Any kernels registered in the module with :func:`@wp.kernel <warp.kernel>` will be included in the shared library.
-
-.. image:: ../img/compiler_pipeline.svg
-
-By default, status messages will be printed out after each module has been loaded indicating basic information:
-
-* The name of the module that was just loaded
-* The first seven characters of the module hash
-* The device on which the module is being loaded for
-* How long it took to load the module in milliseconds
-* Whether the module was compiled ``(compiled)``, loaded from the cache ``(cached)``, or was unable to be loaded ``(error)``.
-
-For debugging purposes, ``wp.config.verbose = True`` can be set to also get a printout when each module load begins.
-
-Here is an example illustrating the functionality of the kernel cache by running ``python -m warp.examples.tile.example_tile_cholesky``
-twice. The first time, we see:
-
-.. code:: bat
-
-    Warp 1.10.0.dev0 initialized:
-    CUDA Toolkit 13.0, Driver 13.0
-    Devices:
-        "cpu"      : "x86_64"
-        "cuda:0"   : "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition" (95 GiB, sm_120, mempool enabled)
-    Kernel cache:
-        /home/nvidia/.cache/warp/1.10.0.dev0
-    Module __main__ 0b0ecab load on device 'cuda:0' took 4136.19 ms  (compiled)
-
-The second time we run this example, we see that the module-loading message now says ``(cached)`` and that it takes
-much less time to load the module since code compilation is skipped:
-
-.. code:: bat
-
-    Warp 1.10.0.dev0 initialized:
-    CUDA Toolkit 13.0, Driver 13.0
-    Devices:
-        "cpu"      : "x86_64"
-        "cuda:0"   : "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition" (95 GiB, sm_120, mempool enabled)
-    Kernel cache:
-        /home/nvidia/.cache/warp/1.10.0.dev0
-    Module __main__ 0b0ecab load on device 'cuda:0' took 30.98 ms  (cached)
-
-For more information, see the :doc:`../deep_dive/codegen` section.
+For the boundary between Python and kernel execution, Warp's compilation
+pipeline, and the relationship between SIMT kernels and tile programming, see
+:doc:`programming_model`.
 
 Language Details
 ----------------
@@ -429,7 +504,7 @@ All kernel parameters must be annotated with the appropriate type, for example::
                       c: float):
 
 For convenience, ``typing.Any`` may be used in place of concrete types
-appearing in function signatures. See the :doc:`/user_guide/generics` documentation
+appearing in function signatures. See the :doc:`/user_guide/programming_model/generics` documentation
 for more information. A generic version of the above kernel could look like::
 
     from typing import Any

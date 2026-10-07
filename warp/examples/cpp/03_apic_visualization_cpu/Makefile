@@ -15,7 +15,7 @@
 
 # Makefile for APIC Wave Visualization Example (CPU)
 #
-# This builds a C++ program that loads a pre-captured APIC graph
+# This builds a C++ program that loads a saved APIC graph representation
 # and replays it on the CPU using GLFW/OpenGL for visualization.
 # No CUDA toolchain is required to build or run the example itself.
 
@@ -183,7 +183,7 @@ help:
 	@echo "Targets:"
 	@echo "  all (default)   - Build everything (auto-captures graph if needed)"
 	@echo "  cpp             - Build only C++ program (for iterating on C++ code)"
-	@echo "  capture         - Capture the APIC graph only (no C++ build)"
+	@echo "  capture         - Generate the APIC graph artifacts only (no C++ build)"
 	@echo "  clean           - Remove build artifacts"
 	@echo "  distclean       - Remove build artifacts and generated/ directory"
 	@echo "  help            - Show this help message"
@@ -194,8 +194,8 @@ help:
 	@echo "  CXX             - C++ compiler (default: g++)"
 	@echo ""
 	@echo "Notes:"
-	@echo "  - Loading .wrp files currently requires a CUDA-enabled Warp library."
-	@echo "  - Graph replay itself is CPU-only with no GPU/CUDA runtime dependency."
+	@echo "  - CPU .wrp loading and replay have no GPU/CUDA runtime dependency."
+	@echo "  - CPU replay requires warp-clang and the generated *_modules directory."
 	@echo ""
 	@echo "Usage:"
 	@echo "  1. Run: make"

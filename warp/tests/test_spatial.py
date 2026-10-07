@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 import unittest
 
 import numpy as np
@@ -22,9 +23,9 @@ def getkernel(func, suffix=""):
 
 def get_select_kernel(dtype):
     def output_select_kernel_fn(
-        input: wp.array(dtype=dtype),
+        input: wp.array[dtype],
         index: int,
-        out: wp.array(dtype=dtype),
+        out: wp.array[dtype],
     ):
         out[0] = input[index]
 
@@ -35,8 +36,6 @@ def get_select_kernel(dtype):
 
 
 def test_spatial_vector_constructors(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -48,8 +47,8 @@ def test_spatial_vector_constructors(test, device, dtype, register_kernels=False
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_vector_component_constructor(
-        input: wp.array(dtype=wptype),
-        out: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        out: wp.array[wptype],
     ):
         result = spatial_vector(input[0], input[1], input[2], input[3], input[4], input[5])
 
@@ -62,8 +61,8 @@ def test_spatial_vector_constructors(test, device, dtype, register_kernels=False
         out[5] = wptype(2) * result[5]
 
     def check_spatial_vector_vector_constructor(
-        input: wp.array(dtype=wptype),
-        out: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        out: wp.array[wptype],
     ):
         result = spatial_vector(vec3(input[0], input[1], input[2]), vec3(input[3], input[4], input[5]))
 
@@ -81,6 +80,8 @@ def test_spatial_vector_constructors(test, device, dtype, register_kernels=False
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(rng.standard_normal(size=6).astype(dtype), requires_grad=True, device=device)
     output = wp.zeros_like(input)
@@ -120,8 +121,6 @@ def test_spatial_vector_constructors(test, device, dtype, register_kernels=False
 
 
 def test_spatial_vector_indexing(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -132,8 +131,8 @@ def test_spatial_vector_indexing(test, device, dtype, register_kernels=False):
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_vector_indexing(
-        input: wp.array(dtype=spatial_vector),
-        out: wp.array(dtype=wptype),
+        input: wp.array[spatial_vector],
+        out: wp.array[wptype],
     ):
         elem = input[0]
 
@@ -148,6 +147,8 @@ def test_spatial_vector_indexing(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(
         rng.standard_normal(size=(1, 6)).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device
@@ -172,8 +173,6 @@ def test_spatial_vector_indexing(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_vector_scalar_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -184,10 +183,10 @@ def test_spatial_vector_scalar_multiplication(test, device, dtype, register_kern
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_vector_scalar_mul(
-        s: wp.array(dtype=wptype),
-        q: wp.array(dtype=spatial_vector),
-        outcmps_l: wp.array(dtype=wptype),
-        outcmps_r: wp.array(dtype=wptype),
+        s: wp.array[wptype],
+        q: wp.array[spatial_vector],
+        outcmps_l: wp.array[wptype],
+        outcmps_r: wp.array[wptype],
     ):
         lresult = s[0] * q[0]
         rresult = q[0] * s[0]
@@ -202,6 +201,8 @@ def test_spatial_vector_scalar_multiplication(test, device, dtype, register_kern
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=1).astype(dtype), requires_grad=True, device=device)
     q = wp.array(
@@ -242,8 +243,6 @@ def test_spatial_vector_scalar_multiplication(test, device, dtype, register_kern
 
 
 def test_spatial_vector_add_sub(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -254,10 +253,10 @@ def test_spatial_vector_add_sub(test, device, dtype, register_kernels=False):
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_vector_add_sub(
-        q: wp.array(dtype=spatial_vector),
-        v: wp.array(dtype=spatial_vector),
-        outputs_add: wp.array(dtype=wptype),
-        outputs_sub: wp.array(dtype=wptype),
+        q: wp.array[spatial_vector],
+        v: wp.array[spatial_vector],
+        outputs_add: wp.array[wptype],
+        outputs_sub: wp.array[wptype],
     ):
         addresult = q[0] + v[0]
         subresult = q[0] - v[0]
@@ -269,6 +268,8 @@ def test_spatial_vector_add_sub(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(wptype)
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
@@ -318,8 +319,6 @@ def test_spatial_vector_add_sub(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_dot(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -330,15 +329,17 @@ def test_spatial_dot(test, device, dtype, register_kernels=False):
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_dot(
-        s: wp.array(dtype=spatial_vector),
-        v: wp.array(dtype=spatial_vector),
-        dot: wp.array(dtype=wptype),
+        s: wp.array[spatial_vector],
+        v: wp.array[spatial_vector],
+        dot: wp.array[wptype],
     ):
         dot[0] = wptype(2) * wp.spatial_dot(v[0], s[0])
 
     kernel = getkernel(check_spatial_dot, suffix=dtype.__name__)
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
@@ -370,8 +371,6 @@ def test_spatial_dot(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_cross(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -382,14 +381,14 @@ def test_spatial_cross(test, device, dtype, register_kernels=False):
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_cross(
-        s: wp.array(dtype=spatial_vector),
-        v: wp.array(dtype=spatial_vector),
-        outputs: wp.array(dtype=wptype),
-        outputs_dual: wp.array(dtype=wptype),
-        outputs_wcrossw: wp.array(dtype=wptype),
-        outputs_vcrossw: wp.array(dtype=wptype),
-        outputs_wcrossv: wp.array(dtype=wptype),
-        outputs_vcrossv: wp.array(dtype=wptype),
+        s: wp.array[spatial_vector],
+        v: wp.array[spatial_vector],
+        outputs: wp.array[wptype],
+        outputs_dual: wp.array[wptype],
+        outputs_wcrossw: wp.array[wptype],
+        outputs_vcrossw: wp.array[wptype],
+        outputs_wcrossv: wp.array[wptype],
+        outputs_vcrossv: wp.array[wptype],
     ):
         c = wp.spatial_cross(s[0], v[0])
         d = wp.spatial_cross_dual(s[0], v[0])
@@ -420,6 +419,8 @@ def test_spatial_cross(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
@@ -524,8 +525,6 @@ def test_spatial_cross(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_top_bottom(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -536,8 +535,8 @@ def test_spatial_top_bottom(test, device, dtype, register_kernels=False):
     spatial_vector = wp.types.vector(length=6, dtype=wptype)
 
     def check_spatial_top_bottom(
-        s: wp.array(dtype=spatial_vector),
-        outputs: wp.array(dtype=wptype),
+        s: wp.array[spatial_vector],
+        outputs: wp.array[wptype],
     ):
         top = wp.spatial_top(s[0])
         bottom = wp.spatial_bottom(s[0])
@@ -555,6 +554,8 @@ def test_spatial_top_bottom(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=6).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device)
     outputs = wp.zeros(6, dtype=wptype, requires_grad=True, device=device)
@@ -593,8 +594,6 @@ def test_spatial_top_bottom(test, device, dtype, register_kernels=False):
 
 
 def test_transform_constructors(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -607,8 +606,8 @@ def test_transform_constructors(test, device, dtype, register_kernels=False):
     quat = wp.types.quaternion(dtype=wptype)
 
     def check_transform_constructor(
-        input: wp.array(dtype=wptype),
-        out: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        out: wp.array[wptype],
     ):
         a = transform(vec3(input[0], input[1], input[2]), quat(input[3], input[4], input[5], input[6]))
         b = transform(input[0], input[1], input[2], input[3], input[4], input[5], input[6])
@@ -626,6 +625,8 @@ def test_transform_constructors(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     p = rng.standard_normal(size=3).astype(dtype)
     q = rng.standard_normal(size=4).astype(dtype)
@@ -652,8 +653,6 @@ def test_transform_constructors(test, device, dtype, register_kernels=False):
 
 
 def test_transform_indexing(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -664,8 +663,8 @@ def test_transform_indexing(test, device, dtype, register_kernels=False):
     transform = wp.types.transformation(dtype=wptype)
 
     def check_transform_indexing(
-        input: wp.array(dtype=transform),
-        out: wp.array(dtype=wptype),
+        input: wp.array[transform],
+        out: wp.array[wptype],
     ):
         elem = input[0]
 
@@ -680,6 +679,8 @@ def test_transform_indexing(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(rng.standard_normal(size=(1, 7)).astype(dtype), dtype=transform, requires_grad=True, device=device)
     outcmps = wp.zeros(7, dtype=wptype, requires_grad=True, device=device)
@@ -701,8 +702,6 @@ def test_transform_indexing(test, device, dtype, register_kernels=False):
 
 
 def test_transform_scalar_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -713,10 +712,10 @@ def test_transform_scalar_multiplication(test, device, dtype, register_kernels=F
     transform = wp.types.transformation(dtype=wptype)
 
     def check_transform_scalar_mul(
-        s: wp.array(dtype=wptype),
-        q: wp.array(dtype=transform),
-        outcmps_l: wp.array(dtype=wptype),
-        outcmps_r: wp.array(dtype=wptype),
+        s: wp.array[wptype],
+        q: wp.array[transform],
+        outcmps_l: wp.array[wptype],
+        outcmps_r: wp.array[wptype],
     ):
         lresult = s[0] * q[0]
         rresult = q[0] * s[0]
@@ -731,6 +730,8 @@ def test_transform_scalar_multiplication(test, device, dtype, register_kernels=F
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=1).astype(dtype), requires_grad=True, device=device)
     q = wp.array(rng.standard_normal(size=(1, 7)).astype(dtype), dtype=transform, requires_grad=True, device=device)
@@ -769,8 +770,6 @@ def test_transform_scalar_multiplication(test, device, dtype, register_kernels=F
 
 
 def test_transform_add_sub(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -781,10 +780,10 @@ def test_transform_add_sub(test, device, dtype, register_kernels=False):
     transform = wp.types.transformation(dtype=wptype)
 
     def check_transform_add_sub(
-        q: wp.array(dtype=transform),
-        v: wp.array(dtype=transform),
-        outputs_add: wp.array(dtype=wptype),
-        outputs_sub: wp.array(dtype=wptype),
+        q: wp.array[transform],
+        v: wp.array[transform],
+        outputs_add: wp.array[wptype],
+        outputs_sub: wp.array[wptype],
     ):
         addresult = q[0] + v[0]
         subresult = q[0] - v[0]
@@ -797,6 +796,8 @@ def test_transform_add_sub(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(rng.standard_normal(size=7).astype(dtype), dtype=transform, requires_grad=True, device=device)
     v = wp.array(rng.standard_normal(size=7).astype(dtype), dtype=transform, requires_grad=True, device=device)
@@ -846,8 +847,6 @@ def test_transform_add_sub(test, device, dtype, register_kernels=False):
 
 
 def test_transform_get_trans_rot(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -858,8 +857,8 @@ def test_transform_get_trans_rot(test, device, dtype, register_kernels=False):
     transform = wp.types.transformation(dtype=wptype)
 
     def check_transform_get_trans_rot(
-        s: wp.array(dtype=transform),
-        outputs: wp.array(dtype=wptype),
+        s: wp.array[transform],
+        outputs: wp.array[wptype],
     ):
         trans = wp.transform_get_translation(s[0])
         q = wp.transform_get_rotation(s[0])
@@ -878,6 +877,8 @@ def test_transform_get_trans_rot(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=7).astype(dtype), dtype=transform, requires_grad=True, device=device)
     outputs = wp.zeros(7, dtype=wptype, requires_grad=True, device=device)
@@ -916,8 +917,6 @@ def test_transform_get_trans_rot(test, device, dtype, register_kernels=False):
 
 
 def test_transform_multiply(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -928,11 +927,11 @@ def test_transform_multiply(test, device, dtype, register_kernels=False):
     transform = wp.types.transformation(dtype=wptype)
 
     def check_transform_multiply(
-        a: wp.array(dtype=transform),
-        b: wp.array(dtype=transform),
-        outputs: wp.array(dtype=wptype),
-        outputs_fn: wp.array(dtype=wptype),
-        outputs_manual: wp.array(dtype=wptype),
+        a: wp.array[transform],
+        b: wp.array[transform],
+        outputs: wp.array[wptype],
+        outputs_fn: wp.array[wptype],
+        outputs_manual: wp.array[wptype],
     ):
         result = a[0] * b[0]
         result_fn = wp.transform_multiply(a[0], b[0])
@@ -959,6 +958,8 @@ def test_transform_multiply(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = rng.standard_normal(size=7)
     s = rng.standard_normal(size=7)
@@ -1025,8 +1026,6 @@ def test_transform_multiply(test, device, dtype, register_kernels=False):
 
 
 def test_transform_inverse(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -1037,10 +1036,10 @@ def test_transform_inverse(test, device, dtype, register_kernels=False):
     transform = wp.types.transformation(dtype=wptype)
 
     def check_transform_inverse(
-        a: wp.array(dtype=transform),
-        outputs: wp.array(dtype=wptype),
-        outputs_shouldbeidentity: wp.array(dtype=wptype),
-        outputs_manual: wp.array(dtype=wptype),
+        a: wp.array[transform],
+        outputs: wp.array[wptype],
+        outputs_shouldbeidentity: wp.array[wptype],
+        outputs_manual: wp.array[wptype],
     ):
         result = wp.transform_inverse(a[0])
         idt = result * a[0]
@@ -1063,6 +1062,8 @@ def test_transform_inverse(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = rng.standard_normal(size=7)
     s = rng.standard_normal(size=7)
@@ -1118,8 +1119,6 @@ def test_transform_inverse(test, device, dtype, register_kernels=False):
 
 
 def test_transform_point_vector(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -1131,12 +1130,12 @@ def test_transform_point_vector(test, device, dtype, register_kernels=False):
     vec3 = wp.types.vector(length=3, dtype=wptype)
 
     def check_transform_point_vector(
-        t: wp.array(dtype=transform),
-        v: wp.array(dtype=vec3),
-        outputs_pt: wp.array(dtype=wptype),
-        outputs_pt_manual: wp.array(dtype=wptype),
-        outputs_vec: wp.array(dtype=wptype),
-        outputs_vec_manual: wp.array(dtype=wptype),
+        t: wp.array[transform],
+        v: wp.array[vec3],
+        outputs_pt: wp.array[wptype],
+        outputs_pt_manual: wp.array[wptype],
+        outputs_vec: wp.array[wptype],
+        outputs_vec_manual: wp.array[wptype],
     ):
         result_pt = wp.transform_point(t[0], v[0])
         result_pt_manual = wp.transform_get_translation(t[0]) + wp.quat_rotate(wp.transform_get_rotation(t[0]), v[0])
@@ -1155,6 +1154,8 @@ def test_transform_point_vector(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = rng.standard_normal(size=7)
     q[3:] /= np.linalg.norm(q[3:])
@@ -1226,8 +1227,6 @@ def test_transform_point_vector(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_matrix_constructors(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -1238,8 +1237,8 @@ def test_spatial_matrix_constructors(test, device, dtype, register_kernels=False
     spatial_matrix = wp.types.matrix(shape=(6, 6), dtype=wptype)
 
     def check_spatial_matrix_constructor(
-        input: wp.array(dtype=wptype),
-        out: wp.array(dtype=wptype),
+        input: wp.array[wptype],
+        out: wp.array[wptype],
     ):
         # multiply the output by 2 so we've got something to backpropagate:
         result0 = spatial_matrix(
@@ -1299,6 +1298,8 @@ def test_spatial_matrix_constructors(test, device, dtype, register_kernels=False
     if register_kernels:
         return
 
+    rng = np.random.default_rng(123)
+
     input = wp.array(rng.standard_normal(size=6 * 6).astype(dtype), requires_grad=True, device=device)
     output = wp.zeros(2 * 6 * 6, dtype=wptype, requires_grad=True, device=device)
 
@@ -1322,8 +1323,6 @@ def test_spatial_matrix_constructors(test, device, dtype, register_kernels=False
 
 
 def test_spatial_matrix_indexing(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -1334,8 +1333,8 @@ def test_spatial_matrix_indexing(test, device, dtype, register_kernels=False):
     spatial_matrix = wp.types.matrix(shape=(6, 6), dtype=wptype)
 
     def check_spatial_matrix_indexing(
-        input: wp.array(dtype=spatial_matrix),
-        out: wp.array(dtype=wptype),
+        input: wp.array[spatial_matrix],
+        out: wp.array[wptype],
     ):
         elem = input[0]
 
@@ -1351,6 +1350,8 @@ def test_spatial_matrix_indexing(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(
         rng.standard_normal(size=(1, 6, 6)).astype(dtype), dtype=spatial_matrix, requires_grad=True, device=device
@@ -1377,8 +1378,6 @@ def test_spatial_matrix_indexing(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_matrix_scalar_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -1389,10 +1388,10 @@ def test_spatial_matrix_scalar_multiplication(test, device, dtype, register_kern
     spatial_matrix = wp.types.matrix(shape=(6, 6), dtype=wptype)
 
     def check_spatial_matrix_scalar_mul(
-        s: wp.array(dtype=wptype),
-        q: wp.array(dtype=spatial_matrix),
-        outcmps_l: wp.array(dtype=wptype),
-        outcmps_r: wp.array(dtype=wptype),
+        s: wp.array[wptype],
+        q: wp.array[spatial_matrix],
+        outcmps_l: wp.array[wptype],
+        outcmps_r: wp.array[wptype],
     ):
         lresult = s[0] * q[0]
         rresult = q[0] * s[0]
@@ -1410,6 +1409,8 @@ def test_spatial_matrix_scalar_multiplication(test, device, dtype, register_kern
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(rng.standard_normal(size=1).astype(dtype), requires_grad=True, device=device)
     q = wp.array(
@@ -1453,8 +1454,6 @@ def test_spatial_matrix_scalar_multiplication(test, device, dtype, register_kern
 
 
 def test_spatial_matrix_add_sub(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -1465,10 +1464,10 @@ def test_spatial_matrix_add_sub(test, device, dtype, register_kernels=False):
     spatial_matrix = wp.types.matrix(shape=(6, 6), dtype=wptype)
 
     def check_spatial_matrix_add_sub(
-        q: wp.array(dtype=spatial_matrix),
-        v: wp.array(dtype=spatial_matrix),
-        outputs_add: wp.array(dtype=wptype),
-        outputs_sub: wp.array(dtype=wptype),
+        q: wp.array[spatial_matrix],
+        v: wp.array[spatial_matrix],
+        outputs_add: wp.array[wptype],
+        outputs_sub: wp.array[wptype],
     ):
         addresult = q[0] + v[0]
         subresult = q[0] - v[0]
@@ -1484,6 +1483,8 @@ def test_spatial_matrix_add_sub(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     q = wp.array(
         rng.standard_normal(size=(1, 6, 6)).astype(dtype), dtype=spatial_matrix, requires_grad=True, device=device
@@ -1541,8 +1542,6 @@ def test_spatial_matrix_add_sub(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_matvec_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 2.0e-2,
         np.float32: 5.0e-6,
@@ -1556,9 +1555,9 @@ def test_spatial_matvec_multiplication(test, device, dtype, register_kernels=Fal
     output_select_kernel = get_select_kernel(wptype)
 
     def check_spatial_mat_vec_mul(
-        v: wp.array(dtype=spatial_vector),
-        m: wp.array(dtype=spatial_matrix),
-        outcomponents: wp.array(dtype=wptype),
+        v: wp.array[spatial_vector],
+        m: wp.array[spatial_matrix],
+        outcomponents: wp.array[wptype],
     ):
         result = m[0] * v[0]
 
@@ -1572,6 +1571,8 @@ def test_spatial_matvec_multiplication(test, device, dtype, register_kernels=Fal
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     v = wp.array(
         rng.standard_normal(size=(1, 6)).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device
@@ -1602,8 +1603,6 @@ def test_spatial_matvec_multiplication(test, device, dtype, register_kernels=Fal
 
 
 def test_spatial_matmat_multiplication(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 2.0e-2,
         np.float32: 5.0e-6,
@@ -1616,9 +1615,9 @@ def test_spatial_matmat_multiplication(test, device, dtype, register_kernels=Fal
     output_select_kernel = get_select_kernel(wptype)
 
     def check_mat_mat_mul(
-        v: wp.array(dtype=spatial_matrix),
-        m: wp.array(dtype=spatial_matrix),
-        outcomponents: wp.array(dtype=wptype),
+        v: wp.array[spatial_matrix],
+        m: wp.array[spatial_matrix],
+        outcomponents: wp.array[wptype],
     ):
         result = m[0] * v[0]
 
@@ -1633,6 +1632,8 @@ def test_spatial_matmat_multiplication(test, device, dtype, register_kernels=Fal
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     v = wp.array(
         rng.standard_normal(size=(1, 6, 6)).astype(dtype), dtype=spatial_matrix, requires_grad=True, device=device
@@ -1669,8 +1670,6 @@ def test_spatial_matmat_multiplication(test, device, dtype, register_kernels=Fal
 
 
 def test_spatial_mat_transpose(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 1.0e-2,
         np.float32: 1.0e-6,
@@ -1683,8 +1682,8 @@ def test_spatial_mat_transpose(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(wptype)
 
     def check_spatial_mat_transpose(
-        m: wp.array(dtype=spatial_matrix),
-        outcomponents: wp.array(dtype=wptype),
+        m: wp.array[spatial_matrix],
+        outcomponents: wp.array[wptype],
     ):
         # multiply outputs by 2 so we've got something to backpropagate:
         mat = wptype(2) * wp.transpose(m[0])
@@ -1699,6 +1698,8 @@ def test_spatial_mat_transpose(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     m = wp.array(
         rng.standard_normal(size=(1, 6, 6)).astype(dtype), dtype=spatial_matrix, requires_grad=True, device=device
@@ -1726,8 +1727,6 @@ def test_spatial_mat_transpose(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_outer_product(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -1740,9 +1739,9 @@ def test_spatial_outer_product(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(wptype)
 
     def check_spatial_outer_product(
-        s: wp.array(dtype=spatial_vector),
-        v: wp.array(dtype=spatial_vector),
-        outcomponents: wp.array(dtype=wptype),
+        s: wp.array[spatial_vector],
+        v: wp.array[spatial_vector],
+        outcomponents: wp.array[wptype],
     ):
         mresult = wptype(2) * wp.outer(s[0], v[0])
 
@@ -1757,6 +1756,8 @@ def test_spatial_outer_product(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     s = wp.array(
         rng.standard_normal(size=(1, 6)).astype(dtype), dtype=spatial_vector, requires_grad=True, device=device
@@ -1806,8 +1807,6 @@ def test_spatial_outer_product(test, device, dtype, register_kernels=False):
 
 
 def test_spatial_adjoint(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     tol = {
         np.float16: 5.0e-3,
         np.float32: 1.0e-6,
@@ -1820,9 +1819,9 @@ def test_spatial_adjoint(test, device, dtype, register_kernels=False):
     output_select_kernel = get_select_kernel(wptype)
 
     def check_spatial_adjoint(
-        R: wp.array(dtype=mat3),
-        S: wp.array(dtype=mat3),
-        outcomponents: wp.array(dtype=wptype),
+        R: wp.array[mat3],
+        S: wp.array[mat3],
+        outcomponents: wp.array[wptype],
     ):
         mresult = wptype(2) * wp.spatial_adjoint(R[0], S[0])
 
@@ -1837,6 +1836,8 @@ def test_spatial_adjoint(test, device, dtype, register_kernels=False):
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     R = wp.array(rng.standard_normal(size=(1, 3, 3)).astype(dtype), dtype=mat3, requires_grad=True, device=device)
     S = wp.array(rng.standard_normal(size=(1, 3, 3)).astype(dtype), dtype=mat3, requires_grad=True, device=device)
@@ -1891,12 +1892,12 @@ def test_spatial_adjoint(test, device, dtype, register_kernels=False):
 def test_transform_identity(test, device, dtype, register_kernels=False):
     wptype = wp.dtype_from_numpy(np.dtype(dtype))
 
-    def transform_identity_test(output: wp.array(dtype=wptype)):
+    def transform_identity_test(output: wp.array[wptype]):
         t = wp.transform_identity(dtype=wptype)
         for i in range(7):
             output[i] = t[i]
 
-    def transform_identity_test_default(output: wp.array(dtype=wp.float32)):
+    def transform_identity_test_default(output: wp.array[wp.float32]):
         t = wp.transform_identity()
         for i in range(7):
             output[i] = t[i]
@@ -1922,11 +1923,9 @@ def test_transform_identity(test, device, dtype, register_kernels=False):
 
 
 def test_transform_anon_type_instance(test, device, dtype, register_kernels=False):
-    rng = np.random.default_rng(123)
-
     wptype = wp.dtype_from_numpy(np.dtype(dtype))
 
-    def transform_create_test(input: wp.array(dtype=wptype), output: wp.array(dtype=wptype)):
+    def transform_create_test(input: wp.array[wptype], output: wp.array[wptype]):
         t = wp.transformation(
             wp.types.vector(input[0], input[1], input[2]), wp.types.quaternion(input[3], input[4], input[5], input[6])
         )
@@ -1938,6 +1937,8 @@ def test_transform_anon_type_instance(test, device, dtype, register_kernels=Fals
 
     if register_kernels:
         return
+
+    rng = np.random.default_rng(123)
 
     input = wp.array(rng.standard_normal(size=7).astype(dtype), requires_grad=True, device=device)
     output = wp.zeros(7, dtype=wptype, requires_grad=True, device=device)
@@ -2095,7 +2096,7 @@ def test_transform_getter_setter(test, device):
 
 
 @wp.kernel
-def transform_extract_subscript(x: wp.array(dtype=wp.transform), y: wp.array(dtype=float)):
+def transform_extract_subscript(x: wp.array[wp.transform], y: wp.array[float]):
     tid = wp.tid()
 
     a = x[tid]
@@ -2104,9 +2105,7 @@ def transform_extract_subscript(x: wp.array(dtype=wp.transform), y: wp.array(dty
 
 
 @wp.kernel
-def transform_extract_attribute(
-    x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.vec3), z: wp.array(dtype=wp.quat)
-):
+def transform_extract_attribute(x: wp.array[wp.transform], y: wp.array[wp.vec3], z: wp.array[wp.quat]):
     tid = wp.tid()
 
     a = x[tid]
@@ -2151,7 +2150,7 @@ def test_transform_extract(test, device):
 
 
 @wp.kernel
-def transform_assign_subscript(x: wp.array(dtype=float), y: wp.array(dtype=wp.transform)):
+def transform_assign_subscript(x: wp.array[float], y: wp.array[wp.transform]):
     i = wp.tid()
 
     a = wp.transform()
@@ -2166,7 +2165,7 @@ def transform_assign_subscript(x: wp.array(dtype=float), y: wp.array(dtype=wp.tr
 
 
 @wp.kernel
-def transform_assign_attribute(x: wp.array(dtype=wp.vec3), y: wp.array(dtype=wp.quat), z: wp.array(dtype=wp.transform)):
+def transform_assign_attribute(x: wp.array[wp.vec3], y: wp.array[wp.quat], z: wp.array[wp.transform]):
     i = wp.tid()
 
     a = wp.transform()
@@ -2206,7 +2205,7 @@ def test_transform_assign(test, device):
 
 
 @wp.kernel
-def transform_array_extract_subscript(x: wp.array2d(dtype=wp.transform), y: wp.array2d(dtype=float)):
+def transform_array_extract_subscript(x: wp.array2d[wp.transform], y: wp.array2d[float]):
     i, j = wp.tid()
     a = x[i, j][0]
     b = x[i, j][1]
@@ -2219,9 +2218,7 @@ def transform_array_extract_subscript(x: wp.array2d(dtype=wp.transform), y: wp.a
 
 
 @wp.kernel
-def transform_array_extract_attribute(
-    x: wp.array2d(dtype=wp.transform), y: wp.array2d(dtype=wp.vec3), z: wp.array2d(dtype=wp.quat)
-):
+def transform_array_extract_attribute(x: wp.array2d[wp.transform], y: wp.array2d[wp.vec3], z: wp.array2d[wp.quat]):
     i, j = wp.tid()
     a = x[i, j].p
     b = x[i, j].q
@@ -2261,7 +2258,7 @@ def test_transform_array_extract(test, device):
 
 
 @wp.kernel
-def transform_array_assign_subscript(x: wp.array2d(dtype=float), y: wp.array2d(dtype=wp.transform)):
+def transform_array_assign_subscript(x: wp.array2d[float], y: wp.array2d[wp.transform]):
     i, j = wp.tid()
 
     y[i, j][0] = 1.0 * x[i, j]
@@ -2273,12 +2270,12 @@ def transform_array_assign_subscript(x: wp.array2d(dtype=float), y: wp.array2d(d
     y[i, j][6] = 7.0 * x[i, j]
 
 
-# @wp.kernel
-# def transform_array_assign_attribute(x: wp.array2d(dtype=wp.vec3), y: wp.array2d(dtype=wp.quat), z: wp.array2d(dtype=wp.transform)):
-#     i, j = wp.tid()
+@wp.kernel
+def transform_array_assign_attribute(x: wp.array2d[wp.vec3], y: wp.array2d[wp.quat], z: wp.array2d[wp.transform]):
+    i, j = wp.tid()
 
-#     z[i, j].p = x[i, j]
-#     z[i, j].q = y[i, j]
+    z[i, j].p = x[i, j]
+    z[i, j].q = y[i, j]
 
 
 def test_transform_array_assign(test, device):
@@ -2289,24 +2286,30 @@ def test_transform_array_assign(test, device):
     with tape:
         wp.launch(transform_array_assign_subscript, (1, 1), inputs=[x], outputs=[y], device=device)
 
+    y.grad = wp.ones_like(y)
+    tape.backward()
+
     assert_np_equal(y.numpy(), np.array([[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]]], dtype=float))
-    # TODO: gradient propagation for in-place array assignment
+    assert_np_equal(x.grad.numpy(), np.array([[28.0]], dtype=float))
 
     x = wp.ones((1, 1), dtype=wp.vec3, requires_grad=True, device=device)
     y = wp.ones((1, 1), dtype=wp.quat, requires_grad=True, device=device)
     z = wp.zeros((1, 1), dtype=wp.transform, requires_grad=True, device=device)
 
-    # TODO: transform_array_assign_attribute
-    # tape = wp.Tape()
-    # with tape:
-    #     wp.launch(transform_array_assign_attribute, (1, 1), inputs=[x, y], outputs=[z], device=device)
+    tape = wp.Tape()
+    with tape:
+        wp.launch(transform_array_assign_attribute, (1, 1), inputs=[x, y], outputs=[z], device=device)
 
-    # assert_np_equal(z.numpy(), np.array([[[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]]], dtype=float))
-    # TODO: gradient propagation for in-place array assignment
+    z.grad = wp.ones_like(z)
+    tape.backward()
+
+    assert_np_equal(z.numpy(), np.array([[[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]]], dtype=float))
+    assert_np_equal(x.grad.numpy(), np.array([[[1.0, 1.0, 1.0]]], dtype=float))
+    assert_np_equal(y.grad.numpy(), np.array([[[1.0, 1.0, 1.0, 1.0]]], dtype=float))
 
 
 @wp.kernel
-def transform_add_inplace_subscript(x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.transform)):
+def transform_add_inplace_subscript(x: wp.array[wp.transform], y: wp.array[wp.transform]):
     i = wp.tid()
 
     a = wp.transform()
@@ -2324,7 +2327,7 @@ def transform_add_inplace_subscript(x: wp.array(dtype=wp.transform), y: wp.array
 
 
 @wp.kernel
-def transform_add_inplace_attribute(x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.transform)):
+def transform_add_inplace_attribute(x: wp.array[wp.transform], y: wp.array[wp.transform]):
     i = wp.tid()
 
     a = wp.transform()
@@ -2364,7 +2367,7 @@ def test_transform_add_inplace(test, device):
 
 
 @wp.kernel
-def transform_sub_inplace_subscript(x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.transform)):
+def transform_sub_inplace_subscript(x: wp.array[wp.transform], y: wp.array[wp.transform]):
     i = wp.tid()
 
     a = wp.transform()
@@ -2382,7 +2385,7 @@ def transform_sub_inplace_subscript(x: wp.array(dtype=wp.transform), y: wp.array
 
 
 @wp.kernel
-def transform_sub_inplace_attribute(x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.transform)):
+def transform_sub_inplace_attribute(x: wp.array[wp.transform], y: wp.array[wp.transform]):
     i = wp.tid()
 
     a = wp.transform()
@@ -2422,7 +2425,7 @@ def test_transform_sub_inplace(test, device):
 
 
 @wp.kernel
-def transform_array_add_inplace(x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.transform)):
+def transform_array_add_inplace(x: wp.array[wp.transform], y: wp.array[wp.transform]):
     i = wp.tid()
 
     y[i] += x[i]
@@ -2444,7 +2447,7 @@ def test_transform_array_add_inplace(test, device):
 
 
 @wp.kernel
-def transform_array_sub_inplace(x: wp.array(dtype=wp.transform), y: wp.array(dtype=wp.transform)):
+def transform_array_sub_inplace(x: wp.array[wp.transform], y: wp.array[wp.transform]):
     i = wp.tid()
 
     y[i] -= x[i]
@@ -2465,132 +2468,138 @@ def test_transform_array_sub_inplace(test, device):
     assert_np_equal(x.grad.numpy(), np.array([[-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]], dtype=float))
 
 
+@wp.func
+def transform_indexing_assign_func():
+    t = wp.transform(p=wp.vec3(1.0, 2.0, 3.0), q=wp.quat(4.0, 5.0, 6.0, 7.0))
+
+    t[0] = 123.0
+    t[3] *= 2.0
+
+    wp.expect_eq(t[0], 123.0)
+    wp.expect_eq(t[1], 2.0)
+    wp.expect_eq(t[2], 3.0)
+    wp.expect_eq(t[3], 8.0)
+    wp.expect_eq(t[4], 5.0)
+    wp.expect_eq(t[5], 6.0)
+    wp.expect_eq(t[6], 7.0)
+
+    t[-1] = 123.0
+    t[-5] *= 2.0
+
+    wp.expect_eq(t[0], 123.0)
+    wp.expect_eq(t[1], 2.0)
+    wp.expect_eq(t[2], 6.0)
+    wp.expect_eq(t[3], 8.0)
+    wp.expect_eq(t[4], 5.0)
+    wp.expect_eq(t[5], 6.0)
+    wp.expect_eq(t[6], 123.0)
+
+
+@wp.kernel
+def transform_indexing_assign_kernel():
+    transform_indexing_assign_func()
+
+
 def test_transform_indexing_assign(test, device):
-    @wp.func
-    def fn():
-        t = wp.transform(p=wp.vec3(1.0, 2.0, 3.0), q=wp.quat(4.0, 5.0, 6.0, 7.0))
-
-        t[0] = 123.0
-        t[3] *= 2.0
-
-        wp.expect_eq(t[0], 123.0)
-        wp.expect_eq(t[1], 2.0)
-        wp.expect_eq(t[2], 3.0)
-        wp.expect_eq(t[3], 8.0)
-        wp.expect_eq(t[4], 5.0)
-        wp.expect_eq(t[5], 6.0)
-        wp.expect_eq(t[6], 7.0)
-
-        t[-1] = 123.0
-        t[-5] *= 2.0
-
-        wp.expect_eq(t[0], 123.0)
-        wp.expect_eq(t[1], 2.0)
-        wp.expect_eq(t[2], 6.0)
-        wp.expect_eq(t[3], 8.0)
-        wp.expect_eq(t[4], 5.0)
-        wp.expect_eq(t[5], 6.0)
-        wp.expect_eq(t[6], 123.0)
-
-    @wp.kernel(module="unique")
-    def kernel():
-        fn()
-
-    wp.launch(kernel, 1, device=device)
+    wp.launch(transform_indexing_assign_kernel, 1, device=device)
     wp.synchronize()
-    fn()
+    transform_indexing_assign_func()
+
+
+transform_slice_vec0 = wp.types.vector(0, float)
+transform_slice_vec1 = wp.types.vector(1, float)
+transform_slice_vec2 = wp.types.vector(2, float)
+transform_slice_vec3 = wp.types.vector(3, float)
+transform_slice_vec4 = wp.types.vector(4, float)
+transform_slice_vec6 = wp.types.vector(6, float)
+transform_slice_vec7 = wp.types.vector(7, float)
+
+
+@wp.func
+def transform_slicing_assign_func():
+    t = wp.transform(p=wp.vec3(1.0, 2.0, 3.0), q=wp.quat(4.0, 5.0, 6.0, 7.0))
+
+    wp.expect_eq(t[:] == transform_slice_vec7(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0), True)
+    wp.expect_eq(t[-123:123] == transform_slice_vec7(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0), True)
+    wp.expect_eq(t[123:] == transform_slice_vec0(), True)
+    wp.expect_eq(t[:-123] == transform_slice_vec0(), True)
+    wp.expect_eq(t[::123] == transform_slice_vec1(1.0), True)
+
+    wp.expect_eq(t[1:] == transform_slice_vec6(2.0, 3.0, 4.0, 5.0, 6.0, 7.0), True)
+    wp.expect_eq(t[-2:] == transform_slice_vec2(6.0, 7.0), True)
+    wp.expect_eq(t[:2] == transform_slice_vec2(1.0, 2.0), True)
+    wp.expect_eq(t[:-1] == transform_slice_vec6(1.0, 2.0, 3.0, 4.0, 5.0, 6.0), True)
+    wp.expect_eq(t[::2] == transform_slice_vec4(1.0, 3.0, 5.0, 7.0), True)
+    wp.expect_eq(t[1::2] == transform_slice_vec3(2.0, 4.0, 6.0), True)
+    wp.expect_eq(t[::-1] == transform_slice_vec7(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0), True)
+    wp.expect_eq(t[::-2] == transform_slice_vec4(7.0, 5.0, 3.0, 1.0), True)
+    wp.expect_eq(t[1::-2] == transform_slice_vec1(2.0), True)
+
+    t[1:] = transform_slice_vec6(8.0, 9.0, 10.0, 11.0, 12.0, 13.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(1.0, 8.0, 9.0), q=wp.quat(10.0, 11.0, 12.0, 13.0)), True)
+
+    t[-2:] = transform_slice_vec2(14.0, 15.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(1.0, 8.0, 9.0), q=wp.quat(10.0, 11.0, 14.0, 15.0)), True)
+
+    t[:2] = transform_slice_vec2(16.0, 17.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(16.0, 17.0, 9.0), q=wp.quat(10.0, 11.0, 14.0, 15.0)), True)
+
+    t[:-1] = transform_slice_vec6(18.0, 19.0, 20.0, 21.0, 22.0, 23.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(18.0, 19.0, 20.0), q=wp.quat(21.0, 22.0, 23.0, 15.0)), True)
+
+    t[::2] = transform_slice_vec4(24.0, 25.0, 26.0, 27.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(24.0, 19.0, 25.0), q=wp.quat(21.0, 26.0, 23.0, 27.0)), True)
+
+    t[1::2] = transform_slice_vec3(28.0, 29.0, 30.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(24.0, 28.0, 25.0), q=wp.quat(29.0, 26.0, 30.0, 27.0)), True)
+
+    t[::-1] = transform_slice_vec7(31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(37.0, 36.0, 35.0), q=wp.quat(34.0, 33.0, 32.0, 31.0)), True)
+
+    t[::-2] = transform_slice_vec4(38.0, 39.0, 40.0, 41.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(41.0, 36.0, 40.0), q=wp.quat(34.0, 39.0, 32.0, 38.0)), True)
+
+    t[1::-2] = transform_slice_vec1(42.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(41.0, 42.0, 40.0), q=wp.quat(34.0, 39.0, 32.0, 38.0)), True)
+
+    t[1:] += transform_slice_vec6(43.0, 44.0, 45.0, 46.0, 47.0, 48.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(41.0, 85.0, 84.0), q=wp.quat(79.0, 85.0, 79.0, 86.0)), True)
+
+    t[:-1] -= transform_slice_vec6(49.0, 50.0, 51.0, 52.0, 53.0, 54.0)
+    wp.expect_eq(t == wp.transform(p=wp.vec3(-8.0, 35.0, 33.0), q=wp.quat(27.0, 32.0, 25.0, 86.0)), True)
+
+
+@wp.kernel
+def transform_slicing_assign_kernel():
+    transform_slicing_assign_func()
 
 
 def test_transform_slicing_assign(test, device):
-    vec0 = wp.types.vector(0, float)
-    vec1 = wp.types.vector(1, float)
-    vec2 = wp.types.vector(2, float)
-    vec3 = wp.types.vector(3, float)
-    vec4 = wp.types.vector(4, float)
-    vec6 = wp.types.vector(6, float)
-    vec7 = wp.types.vector(7, float)
-
-    @wp.func
-    def fn():
-        t = wp.transform(p=wp.vec3(1.0, 2.0, 3.0), q=wp.quat(4.0, 5.0, 6.0, 7.0))
-
-        wp.expect_eq(t[:] == vec7(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0), True)
-        wp.expect_eq(t[-123:123] == vec7(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0), True)
-        wp.expect_eq(t[123:] == vec0(), True)
-        wp.expect_eq(t[:-123] == vec0(), True)
-        wp.expect_eq(t[::123] == vec1(1.0), True)
-
-        wp.expect_eq(t[1:] == vec6(2.0, 3.0, 4.0, 5.0, 6.0, 7.0), True)
-        wp.expect_eq(t[-2:] == vec2(6.0, 7.0), True)
-        wp.expect_eq(t[:2] == vec2(1.0, 2.0), True)
-        wp.expect_eq(t[:-1] == vec6(1.0, 2.0, 3.0, 4.0, 5.0, 6.0), True)
-        wp.expect_eq(t[::2] == vec4(1.0, 3.0, 5.0, 7.0), True)
-        wp.expect_eq(t[1::2] == vec3(2.0, 4.0, 6.0), True)
-        wp.expect_eq(t[::-1] == vec7(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0), True)
-        wp.expect_eq(t[::-2] == vec4(7.0, 5.0, 3.0, 1.0), True)
-        wp.expect_eq(t[1::-2] == vec1(2.0), True)
-
-        t[1:] = vec6(8.0, 9.0, 10.0, 11.0, 12.0, 13.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(1.0, 8.0, 9.0), q=wp.quat(10.0, 11.0, 12.0, 13.0)), True)
-
-        t[-2:] = vec2(14.0, 15.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(1.0, 8.0, 9.0), q=wp.quat(10.0, 11.0, 14.0, 15.0)), True)
-
-        t[:2] = vec2(16.0, 17.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(16.0, 17.0, 9.0), q=wp.quat(10.0, 11.0, 14.0, 15.0)), True)
-
-        t[:-1] = vec6(18.0, 19.0, 20.0, 21.0, 22.0, 23.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(18.0, 19.0, 20.0), q=wp.quat(21.0, 22.0, 23.0, 15.0)), True)
-
-        t[::2] = vec4(24.0, 25.0, 26.0, 27.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(24.0, 19.0, 25.0), q=wp.quat(21.0, 26.0, 23.0, 27.0)), True)
-
-        t[1::2] = vec3(28.0, 29.0, 30.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(24.0, 28.0, 25.0), q=wp.quat(29.0, 26.0, 30.0, 27.0)), True)
-
-        t[::-1] = vec7(31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(37.0, 36.0, 35.0), q=wp.quat(34.0, 33.0, 32.0, 31.0)), True)
-
-        t[::-2] = vec4(38.0, 39.0, 40.0, 41.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(41.0, 36.0, 40.0), q=wp.quat(34.0, 39.0, 32.0, 38.0)), True)
-
-        t[1::-2] = vec1(42.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(41.0, 42.0, 40.0), q=wp.quat(34.0, 39.0, 32.0, 38.0)), True)
-
-        t[1:] += vec6(43.0, 44.0, 45.0, 46.0, 47.0, 48.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(41.0, 85.0, 84.0), q=wp.quat(79.0, 85.0, 79.0, 86.0)), True)
-
-        t[:-1] -= vec6(49.0, 50.0, 51.0, 52.0, 53.0, 54.0)
-        wp.expect_eq(t == wp.transform(p=wp.vec3(-8.0, 35.0, 33.0), q=wp.quat(27.0, 32.0, 25.0, 86.0)), True)
-
-    @wp.kernel(module="unique")
-    def kernel():
-        fn()
-
-    wp.launch(kernel, 1, device=device)
+    wp.launch(transform_slicing_assign_kernel, 1, device=device)
     wp.synchronize()
-    fn()
+    transform_slicing_assign_func()
+
+
+@wp.kernel
+def transform_slicing_assign_backward_kernel(arr_x: wp.array[wp.vec2], arr_y: wp.array[wp.transform]):
+    i = wp.tid()
+
+    y = arr_y[i]
+
+    y[:2] = arr_x[i]
+    y[1:-4] += arr_x[i][:2]
+    y[3:1:-1] -= arr_x[i][0:]
+
+    arr_y[i] = y
 
 
 def test_transform_slicing_assign_backward(test, device):
-    @wp.kernel(module="unique")
-    def kernel(arr_x: wp.array(dtype=wp.vec2), arr_y: wp.array(dtype=wp.transform)):
-        i = wp.tid()
-
-        y = arr_y[i]
-
-        y[:2] = arr_x[i]
-        y[1:-4] += arr_x[i][:2]
-        y[3:1:-1] -= arr_x[i][0:]
-
-        arr_y[i] = y
-
     x = wp.ones(1, dtype=wp.vec2, requires_grad=True, device=device)
     y = wp.zeros(1, dtype=wp.transform, requires_grad=True, device=device)
 
     tape = wp.Tape()
     with tape:
-        wp.launch(kernel, 1, inputs=(x,), outputs=(y,), device=device)
+        wp.launch(transform_slicing_assign_backward_kernel, 1, inputs=(x,), outputs=(y,), device=device)
 
     y.grad = wp.ones_like(y)
     tape.backward()
@@ -2599,22 +2608,149 @@ def test_transform_slicing_assign_backward(test, device):
     assert_np_equal(x.grad.numpy(), np.array(((1.0, 1.0),), dtype=float))
 
 
+transform_default_q_vec7 = wp.types.vector(7, float)
+
+
+@wp.func
+def transform_default_q_arg_func():
+    t = wp.transform(p=wp.vec3(1.0, 2.0, 3.0))
+
+    wp.expect_eq(t[:] == transform_default_q_vec7(1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0), True)
+
+
+@wp.kernel
+def transform_default_q_arg_kernel():
+    transform_default_q_arg_func()
+
+
 def test_transform_default_q_arg(test, device):
-    vec7 = wp.types.vector(7, float)
-
-    @wp.func
-    def fn():
-        t = wp.transform(p=wp.vec3(1.0, 2.0, 3.0))
-
-        wp.expect_eq(t[:] == vec7(1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0), True)
-
-    @wp.kernel(module="unique")
-    def kernel():
-        fn()
-
-    wp.launch(kernel, 1, device=device)
+    wp.launch(transform_default_q_arg_kernel, 1, device=device)
     wp.synchronize()
-    fn()
+    transform_default_q_arg_func()
+
+
+transform_constructor_vec7 = wp.types.vector(7, float)
+
+
+@wp.func
+def transform_constructor_fill_func():
+    t = wp.transform(1.5)
+
+    wp.expect_eq(
+        t[:] == transform_constructor_vec7(1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5),
+        True,
+    )
+
+
+@wp.kernel
+def transform_constructor_fill_kernel(
+    out_f: wp.array[wp.transformf],
+    out_d: wp.array[wp.transformd],
+    out_h: wp.array[wp.transformh],
+):
+    transform_constructor_fill_func()
+
+    out_f[0] = wp.transform(1.5)
+    out_d[0] = wp.transformd(wp.float64(2.5))
+    out_h[0] = wp.transformh(wp.float16(3.5))
+
+
+@wp.kernel
+def transform_constructor_fill_backward_kernel(value: wp.array[float], out: wp.array[float]):
+    t = wp.transform(value[0])
+
+    out[0] = t[0] + 2.0 * t[1] + 3.0 * t[2] + 4.0 * t[3] + 5.0 * t[4] + 6.0 * t[5] + 7.0 * t[6]
+
+
+@wp.kernel
+def transform_constructor_copy_kernel(
+    src_f: wp.array[wp.transformf],
+    src_d: wp.array[wp.transformd],
+    out_f: wp.array[wp.transformf],
+    out_generic: wp.array[wp.transformf],
+    out_d: wp.array[wp.transformd],
+):
+    out_f[0] = wp.transform(src_f[0])
+    out_d[0] = wp.transformd(src_d[0])
+
+    # The generic form has no typed target, so the `dtype` must be inferred
+    # from the source rather than taken to be the transform type itself.
+    out_generic[0] = wp.types.transformation(src_f[0])
+
+
+@wp.kernel
+def transform_constructor_copy_backward_kernel(src: wp.array[wp.transformf], out: wp.array[float]):
+    t = wp.transform(src[0])
+
+    out[0] = t[0] + 2.0 * t[1] + 3.0 * t[2] + 4.0 * t[3] + 5.0 * t[4] + 6.0 * t[5] + 7.0 * t[6]
+
+
+def test_transform_constructor_fill(test, device):
+    out_f = wp.empty(1, dtype=wp.transformf, device=device)
+    out_d = wp.empty(1, dtype=wp.transformd, device=device)
+    out_h = wp.empty(1, dtype=wp.transformh, device=device)
+
+    wp.launch(transform_constructor_fill_kernel, 1, outputs=(out_f, out_d, out_h), device=device)
+
+    np.testing.assert_allclose(out_f.numpy(), np.full((1, 7), 1.5, dtype=np.float32))
+    np.testing.assert_allclose(out_d.numpy(), np.full((1, 7), 2.5, dtype=np.float64))
+    np.testing.assert_allclose(out_h.numpy(), np.full((1, 7), 3.5, dtype=np.float16))
+
+    # Python scope must agree with kernel scope on this form.
+    transform_constructor_fill_func()
+
+
+def test_transform_constructor_fill_backward(test, device):
+    value = wp.array((1.5,), dtype=float, requires_grad=True, device=device)
+    out = wp.zeros(1, dtype=float, requires_grad=True, device=device)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(transform_constructor_fill_backward_kernel, 1, inputs=(value,), outputs=(out,), device=device)
+
+    tape.backward(loss=out)
+
+    assert_np_equal(out.numpy(), np.array((1.5 * 28.0,), dtype=float))
+    assert_np_equal(value.grad.numpy(), np.array((28.0,), dtype=float))
+
+
+def test_transform_constructor_copy(test, device):
+    values = np.array(((1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0),), dtype=np.float32)
+
+    src_f = wp.array(values, dtype=wp.transformf, device=device)
+    src_d = wp.array(values.astype(np.float64), dtype=wp.transformd, device=device)
+    out_f = wp.empty(1, dtype=wp.transformf, device=device)
+    out_generic = wp.empty(1, dtype=wp.transformf, device=device)
+    out_d = wp.empty(1, dtype=wp.transformd, device=device)
+
+    wp.launch(
+        transform_constructor_copy_kernel,
+        1,
+        inputs=(src_f, src_d),
+        outputs=(out_f, out_generic, out_d),
+        device=device,
+    )
+
+    assert_np_equal(out_f.numpy(), values)
+    assert_np_equal(out_generic.numpy(), values)
+    assert_np_equal(out_d.numpy(), values.astype(np.float64))
+
+
+def test_transform_constructor_copy_backward(test, device):
+    values = np.array(((1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0),), dtype=np.float32)
+    weights = np.arange(1.0, 8.0, dtype=np.float32).reshape(1, 7)
+
+    src = wp.array(values, dtype=wp.transformf, requires_grad=True, device=device)
+    out = wp.zeros(1, dtype=float, requires_grad=True, device=device)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(transform_constructor_copy_backward_kernel, 1, inputs=(src,), outputs=(out,), device=device)
+
+    tape.backward(loss=out)
+
+    assert_np_equal(out.numpy(), np.array(((values * weights).sum(),), dtype=float))
+    assert_np_equal(src.grad.numpy(), weights)
 
 
 devices = get_test_devices()
@@ -2667,6 +2803,177 @@ class TestSpatial(unittest.TestCase):
         v = vec_type(4.0, 5.0, 6.0)
         result = wp.dot(v, v)
         self.assertAlmostEqual(result, 4.0**2 + 5.0**2 + 6.0**2)
+
+    def test_transform_constructor_python_scope(self):
+        """Verify that Python-scope transform construction fills or raises instead of returning zeroed storage."""
+        for transform_type in (wp.transformh, wp.transformf, wp.transformd):
+            type_name = transform_type.__name__
+
+            components = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
+            # Supported forms, guarded against regressions from the changes below.
+            with self.subTest(type=type_name, form="identity"):
+                self.assertEqual([float(x) for x in transform_type()], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+            with self.subTest(type=type_name, form="scalar fill"):
+                self.assertEqual([float(x) for x in transform_type(1.5)], [1.5] * 7)
+
+            with self.subTest(type=type_name, form="components"):
+                self.assertEqual([float(x) for x in transform_type(*components)], components)
+
+            with self.subTest(type=type_name, form="p sequence"):
+                self.assertEqual(
+                    [float(x) for x in transform_type((1.0, 2.0, 3.0))], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]
+                )
+
+            with self.subTest(type=type_name, form="p/q sequences"):
+                self.assertEqual([float(x) for x in transform_type((1.0, 2.0, 3.0), (4.0, 5.0, 6.0, 7.0))], components)
+
+            with self.subTest(type=type_name, form="p/q keywords"):
+                self.assertEqual(
+                    [float(x) for x in transform_type(p=(1.0, 2.0, 3.0), q=(4.0, 5.0, 6.0, 7.0))], components
+                )
+
+            # Copy construction, from the same type, from each of the other
+            # dtypes, and from the generic type the named ones derive from.
+            with self.subTest(type=type_name, form="copy", source="transformh"):
+                self.assertEqual([float(x) for x in transform_type(wp.transformh(*components))], components)
+
+            with self.subTest(type=type_name, form="copy", source="transformf"):
+                self.assertEqual([float(x) for x in transform_type(wp.transformf(*components))], components)
+
+            with self.subTest(type=type_name, form="copy", source="transformd"):
+                self.assertEqual([float(x) for x in transform_type(wp.transformd(*components))], components)
+
+            with self.subTest(type=type_name, form="copy", source="generic"):
+                generic_type = wp.types.transformation(dtype=transform_type._wp_scalar_type_)
+                self.assertEqual([float(x) for x in transform_type(generic_type(*components))], components)
+
+            # NumPy and bool scalar values fill every component, like `wp.vec3()` and `wp.quat()` do.
+            with self.subTest(type=type_name, value="np.float16"):
+                self.assertEqual([float(x) for x in transform_type(np.float16(1.5))], [1.5] * 7)
+
+            with self.subTest(type=type_name, value="np.float32"):
+                self.assertEqual([float(x) for x in transform_type(np.float32(1.5))], [1.5] * 7)
+
+            with self.subTest(type=type_name, value="np.float64"):
+                self.assertEqual([float(x) for x in transform_type(np.float64(1.5))], [1.5] * 7)
+
+            with self.subTest(type=type_name, value="bool"):
+                self.assertEqual([float(x) for x in transform_type(True)], [1.0] * 7)
+
+            # A value that cannot fill the components must be reported, not silently ignored.
+            with (
+                self.subTest(type=type_name, value="object()"),
+                self.assertRaisesRegex(
+                    TypeError,
+                    re.escape("Invalid argument in transformation constructor: expected a scalar value, got object"),
+                ),
+            ):
+                transform_type(object())
+
+            # Explicitly given `p`/`q` components that aren't sequences must name the culprit.
+            with (
+                self.subTest(type=type_name, form="both positional"),
+                self.assertRaisesRegex(
+                    TypeError,
+                    re.escape("Invalid argument 'p' in transformation constructor: expected a sequence, got float"),
+                ),
+            ):
+                transform_type(1.5, 2.5)
+
+            with (
+                self.subTest(type=type_name, form="bad q positional"),
+                self.assertRaisesRegex(
+                    TypeError,
+                    re.escape("Invalid argument 'q' in transformation constructor: expected a sequence, got float"),
+                ),
+            ):
+                transform_type((1.0, 2.0, 3.0), 1.0)
+
+            with (
+                self.subTest(type=type_name, form="bad p positional"),
+                self.assertRaisesRegex(
+                    TypeError,
+                    re.escape("Invalid argument 'p' in transformation constructor: expected a sequence, got float"),
+                ),
+            ):
+                transform_type(1.0, (0.0, 0.0, 0.0, 1.0))
+
+            with (
+                self.subTest(type=type_name, form="bad p keyword"),
+                self.assertRaisesRegex(
+                    TypeError,
+                    re.escape("Invalid argument 'p' in transformation constructor: expected a sequence, got float"),
+                ),
+            ):
+                transform_type(p=1.0)
+
+            with (
+                self.subTest(type=type_name, form="bad q keyword"),
+                self.assertRaisesRegex(
+                    TypeError,
+                    re.escape("Invalid argument 'q' in transformation constructor: expected a sequence, got float"),
+                ),
+            ):
+                transform_type(q=1.0)
+
+            # Keywords cannot be silently ignored by the positional component fallback.
+            with (
+                self.subTest(type=type_name, form="components with duplicate keyword"),
+                self.assertRaisesRegex(TypeError, r"^multiple values for argument 'q'$"),
+            ):
+                transform_type(*components, q=(8.0, 9.0, 10.0, 11.0))
+
+            # An unexpected keyword must be named, not hidden behind the number of values.
+            with (
+                self.subTest(type=type_name, form="components with unexpected keyword"),
+                self.assertRaisesRegex(TypeError, r"^got an unexpected keyword argument 'pos'$"),
+            ):
+                transform_type(*components, pos=(8.0, 9.0, 10.0))
+
+    def test_transform_constructor_invalid_kernel_arity(self):
+        """Unsupported argument counts must be reported, not reach an internal error."""
+
+        @wp.kernel(module="unique")
+        def kernel_two_values():
+            wp.transform(1.0, 2.0)
+
+        @wp.kernel(module="unique")
+        def kernel_three_values():
+            wp.transform(1.0, 2.0, 3.0)
+
+        with (
+            self.subTest(count=2),
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"incompatible number of values given \(2\) when constructing a transform; expected 0, 1, or 7$",
+            ),
+        ):
+            wp.launch(kernel_two_values, dim=1, device="cpu")
+
+        with (
+            self.subTest(count=3),
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"incompatible number of values given \(3\) when constructing a transform; expected 0, 1, or 7$",
+            ),
+        ):
+            wp.launch(kernel_three_values, dim=1, device="cpu")
+
+    def test_transform_constructor_copy_dtype_mismatch(self):
+        """Copy construction is only defined between matching dtypes."""
+
+        @wp.kernel(module="unique")
+        def kernel():
+            wp.transformd(wp.transform(1.0))
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"copy constructing a transform requires matching source and target dtypes, "
+            r"got `float32` and `float64`$",
+        ):
+            wp.launch(kernel, dim=1, device="cpu")
 
 
 for dtype in np_float_types:
@@ -2866,8 +3173,6 @@ for dtype in np_float_types:
         devices=devices,
         dtype=dtype,
     )
-    # \TODO: test spatial_mass and spatial_jacobian
-
 add_function_test(
     TestSpatial, "test_transform_getter_setter", test_transform_getter_setter, devices=wp.get_device("cpu")
 )
@@ -2885,6 +3190,20 @@ add_function_test(
     TestSpatial, "test_transform_slicing_assign_backward", test_transform_slicing_assign_backward, devices=devices
 )
 add_function_test(TestSpatial, "test_transform_default_q_arg", test_transform_default_q_arg, devices=devices)
+add_function_test(TestSpatial, "test_transform_constructor_fill", test_transform_constructor_fill, devices=devices)
+add_function_test(
+    TestSpatial,
+    "test_transform_constructor_fill_backward",
+    test_transform_constructor_fill_backward,
+    devices=devices,
+)
+add_function_test(TestSpatial, "test_transform_constructor_copy", test_transform_constructor_copy, devices=devices)
+add_function_test(
+    TestSpatial,
+    "test_transform_constructor_copy_backward",
+    test_transform_constructor_copy_backward,
+    devices=devices,
+)
 
 
 if __name__ == "__main__":

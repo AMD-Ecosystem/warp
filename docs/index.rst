@@ -77,11 +77,12 @@ warp/examples/core
       - wave
     * - .. image:: ./img/examples/core_fft_poisson_navier_stokes_2d.png
            :target: https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fft_poisson_navier_stokes_2d.py
-      -
+      - .. image:: ./img/examples/core_fdtd_3d.png
+           :target: https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fdtd_3d.py
       -
       -
     * - 2-D incompressible turbulence in a periodic box
-      -
+      - 3-D FDTD Luneburg lens
       -
       -
 
@@ -171,32 +172,41 @@ warp/examples/tile
 .. toctree::
     :maxdepth: 2
     :caption: User Guide
+    :includehidden:
 
     user_guide/installation
+    user_guide/compatibility
     user_guide/basics
     user_guide/runtime
-    user_guide/devices
     user_guide/differentiability
-    user_guide/generics
-    user_guide/tiles
+    user_guide/programming_model
     user_guide/interoperability
+    user_guide/execution_and_performance
     user_guide/configuration
     user_guide/debugging
     user_guide/limitations
-    user_guide/contribution_guide
-    user_guide/publications
-    user_guide/compatibility
     user_guide/faq
-    user_guide/changelog
 
 .. toctree::
     :maxdepth: 2
-    :caption: Deep Dive
+    :caption: Language Reference
 
-    deep_dive/codegen
-    deep_dive/allocators
-    deep_dive/concurrency
-    deep_dive/profiling
+    language_reference/builtins
+
+.. toctree::
+    :maxdepth: 1
+    :caption: API Reference
+
+    api_reference/warp
+    api_reference/warp_autograd
+    api_reference/warp_build_experimental
+    api_reference/warp_config
+    api_reference/warp_fem
+    api_reference/warp_optim
+    api_reference/warp_render
+    api_reference/warp_sparse
+    api_reference/warp_types
+    api_reference/warp_utils
 
 .. toctree::
     :maxdepth: 2
@@ -208,24 +218,11 @@ warp/examples/tile
 
 .. toctree::
     :maxdepth: 1
-    :caption: API Reference
+    :caption: Project
 
-    api_reference/warp
-    api_reference/warp_autograd
-    api_reference/warp_config
-    api_reference/warp_fem
-    api_reference/warp_jax_experimental
-    api_reference/warp_optim
-    api_reference/warp_render
-    api_reference/warp_sparse
-    api_reference/warp_types
-    api_reference/warp_utils
-
-.. toctree::
-    :maxdepth: 2
-    :caption: Language Reference
-
-    language_reference/builtins
+    project/contribution_guide
+    project/publications
+    project/changelog
 
 .. toctree::
     :hidden:

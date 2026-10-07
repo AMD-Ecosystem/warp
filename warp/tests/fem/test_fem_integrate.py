@@ -33,7 +33,7 @@ from warp.tests.unittest_utils import *
 
 
 @wp.kernel
-def atomic_sum(v: wp.array(dtype=float), sum: wp.array(dtype=float)):
+def atomic_sum(v: wp.array[float], sum: wp.array[float]):
     i = wp.tid()
     wp.atomic_add(sum, 0, v[i])
 
@@ -71,6 +71,11 @@ def tensor_boundary_form(domain: Domain, s: Sample, tau: Field, v: Field):
 @integrand
 def grad_decomposition(s: Sample, u: Field, v: Field):
     return wp.length_sq(grad(u, s) * v(s) - D(u, s) * v(s) - wp.cross(curl(u, s), v(s)))
+
+
+@integrand
+def scaled_bilinear_form(s: Sample, u: Field, v: Field, scale: wp.array[float]):
+    return u(s) * v(s) * scale[0]
 
 
 # -- Test functions --
@@ -510,6 +515,157 @@ def test_integrate_high_order(test, device):
         assert_np_equal(h0.values[:h0_nnz].numpy(), h1.values[:h1_nnz].numpy(), tol=1.0e-6)
 
 
+def test_padded_sparse_assembly(test, device):
+    with wp.ScopedDevice(device):
+        geo = fem.Grid3D(res=(4, 4, 4))
+        space = fem.make_polynomial_space(geo, degree=1)
+        test_field = fem.make_test(space)
+        trial_field = fem.make_trial(space)
+
+        compact = fem.integrate(
+            bilinear_form,
+            fields={"v": test_field, "u": trial_field},
+            output_dtype=float,
+            assembly="generic",
+            kernel_options={"enable_backward": False},
+        )
+
+        padded_options = {"topology": "padded"}
+        padded_reuse_options = {"topology": "padded", "capacity": "reuse"}
+        padded = fem.integrate(
+            bilinear_form,
+            fields={"v": test_field, "u": trial_field},
+            output_dtype=float,
+            assembly="generic",
+            kernel_options={"enable_backward": False},
+            bsr_options=padded_options,
+        )
+        test.assertEqual(padded.status_sync(), 0)
+
+        x = wp.array(np.linspace(1.0, 2.0, compact.shape[1], dtype=np.float32), dtype=float, device=device)
+        assert_np_equal((padded @ x).numpy(), (compact @ x).numpy(), tol=1.0e-5)
+
+        padded_columns_ptr = padded.columns.ptr
+        padded_values_ptr = padded.values.ptr
+        fem.integrate(
+            bilinear_form,
+            fields={"v": test_field, "u": trial_field},
+            output=padded,
+            assembly="generic",
+            kernel_options={"enable_backward": False},
+            bsr_options=padded_reuse_options,
+        )
+        test.assertEqual(padded.status_sync(), 0)
+        test.assertEqual(padded.columns.ptr, padded_columns_ptr)
+        test.assertEqual(padded.values.ptr, padded_values_ptr)
+        assert_np_equal((padded @ x).numpy(), (compact @ x).numpy(), tol=1.0e-5)
+
+        with wp.ScopedCapture(force_module_load=False) as capture:
+            fem.integrate(
+                bilinear_form,
+                fields={"v": test_field, "u": trial_field},
+                output=padded,
+                assembly="generic",
+                kernel_options={"enable_backward": False},
+                bsr_options=padded_reuse_options,
+            )
+        wp.capture_launch(capture.graph)
+        test.assertEqual(padded.status_sync(), 0)
+        test.assertEqual(padded.columns.ptr, padded_columns_ptr)
+        test.assertEqual(padded.values.ptr, padded_values_ptr)
+        assert_np_equal((padded @ x).numpy(), (compact @ x).numpy(), tol=1.0e-5)
+
+        quadrature = fem.RegularQuadrature(fem.Cells(geo), order=1)
+        jacobian_block_type = wp.types.matrix(shape=(3, 1), dtype=float)
+        compact_jacobian = bsr_zeros(
+            rows_of_blocks=quadrature.total_point_count(),
+            cols_of_blocks=space.node_count(),
+            block_type=jacobian_block_type,
+            device=device,
+        )
+        padded_jacobian = bsr_zeros(
+            rows_of_blocks=quadrature.total_point_count(),
+            cols_of_blocks=space.node_count(),
+            block_type=jacobian_block_type,
+            device=device,
+        )
+
+        fem.interpolate(
+            grad_field,
+            dest=compact_jacobian,
+            at=quadrature,
+            fields={"p": trial_field},
+            kernel_options={"enable_backward": False},
+        )
+        fem.interpolate(
+            grad_field,
+            dest=padded_jacobian,
+            at=quadrature,
+            fields={"p": trial_field},
+            kernel_options={"enable_backward": False},
+            bsr_options=padded_options,
+        )
+        test.assertEqual(padded_jacobian.status_sync(), 0)
+
+        x = wp.array(np.linspace(1.0, 2.0, space.node_count(), dtype=np.float32), dtype=float, device=device)
+        assert_np_equal((padded_jacobian @ x).numpy(), (compact_jacobian @ x).numpy(), tol=1.0e-5)
+
+        padded_jacobian_columns_ptr = padded_jacobian.columns.ptr
+        padded_jacobian_values_ptr = padded_jacobian.values.ptr
+        fem.interpolate(
+            grad_field,
+            dest=padded_jacobian,
+            at=quadrature,
+            fields={"p": trial_field},
+            kernel_options={"enable_backward": False},
+            bsr_options=padded_reuse_options,
+        )
+        test.assertEqual(padded_jacobian.status_sync(), 0)
+        test.assertEqual(padded_jacobian.columns.ptr, padded_jacobian_columns_ptr)
+        test.assertEqual(padded_jacobian.values.ptr, padded_jacobian_values_ptr)
+        assert_np_equal((padded_jacobian @ x).numpy(), (compact_jacobian @ x).numpy(), tol=1.0e-5)
+
+        grad_geo = fem.Grid2D(res=wp.vec2i(2))
+        grad_space = fem.make_polynomial_space(grad_geo, degree=1)
+        grad_test = fem.make_test(grad_space)
+        grad_trial = fem.make_trial(grad_space)
+        scale = wp.ones(1, dtype=float, device=device, requires_grad=True)
+        loss = wp.zeros(1, dtype=float, device=device, requires_grad=True)
+
+        reference = fem.integrate(
+            scaled_bilinear_form,
+            fields={"v": grad_test, "u": grad_trial},
+            values={"scale": wp.ones(1, dtype=float, device=device)},
+            output_dtype=float,
+            assembly="generic",
+        )
+
+        row_compress = bsr_zeros(
+            rows_of_blocks=grad_space.node_count(),
+            cols_of_blocks=grad_space.node_count(),
+            block_type=float,
+            device=device,
+        )
+        row_compress.values = wp.empty(shape=(0,), dtype=float, device=device, requires_grad=True)
+
+        with wp.Tape() as tape:
+            fem.integrate(
+                scaled_bilinear_form,
+                fields={"v": grad_test, "u": grad_trial},
+                values={"scale": scale},
+                output=row_compress,
+                assembly="generic",
+                bsr_options={"construction": "row_compress"},
+            )
+            active_nnz = row_compress.nnz_sync()
+            wp.launch(atomic_sum, dim=active_nnz, inputs=[row_compress.values[:active_nnz], loss])
+
+        x = wp.array(np.linspace(1.0, 2.0, row_compress.shape[1], dtype=np.float32), dtype=float, device=device)
+        assert_np_equal((row_compress @ x).numpy(), (reference @ x).numpy(), tol=1.0e-5)
+        tape.backward(loss=loss)
+        test.assertAlmostEqual(loss.numpy()[0], scale.grad.numpy()[0], places=4)
+
+
 def test_capturability(test, device):
     A = bsr_zeros(0, 0, block_type=wp.float32, device=device)
 
@@ -548,7 +704,7 @@ def test_capturability(test, device):
         bsr_set_zero(A)
         assert A.nnz_sync() == 0
 
-        with wp.ScopedCapture() as capture:
+        with wp.ScopedCapture(force_module_load=False) as capture:
             test_body()
         wp.capture_launch(capture.graph)
         assert A.nnz_sync() == nnz_ref
@@ -556,15 +712,87 @@ def test_capturability(test, device):
         assert_np_equal(A.columns.numpy()[:nnz_ref], columns_ref)
 
 
+def test_restriction_rebuild(test, device):
+    with wp.ScopedDevice(device):
+        geo = fem.Grid2D(res=wp.vec2i(4, 4))
+        space = fem.make_polynomial_space(geo, degree=1)
+
+        cell_mask = wp.zeros(geo.cell_count(), dtype=int, device=device)
+        cell_mask[:2].fill_(1)
+        geo_partition = fem.ExplicitGeometryPartition(geo, cell_mask)
+        space_partition = fem.make_space_partition(
+            space_topology=space.topology,
+            geometry_partition=geo_partition,
+            with_halo=False,
+        )
+        restriction = fem.make_space_restriction(
+            space_partition=space_partition,
+            domain=fem.Cells(geo_partition),
+            device=device,
+        )
+
+        # Get NodeArg before rebuild.
+        restriction.node_arg_value(device)
+
+        # Rebuild dependent FEM objects after expanding the cell mask.
+        cell_mask[:8].fill_(1)
+        geo_partition.rebuild(cell_mask)
+        space_partition.rebuild(device=device)
+        restriction.rebuild(device=device)
+
+        cached_node_arg = restriction.node_arg_value(device)
+
+        # Check NodeArg is updated after rebuild.
+        test.assertTrue(
+            cached_node_arg.dof_partition_indices.ptr == restriction._dof_partition_indices.ptr,
+            "NodeArg is stale after rebuild.",
+        )
+
+
 # -- Device setup and test registration --
 
 devices = get_test_devices()
 cuda_devices = get_selected_cuda_test_devices()
-cuda_graph_devices = [d for d in cuda_devices if d.supports_graph_capture]
+cuda_devices_with_mempool = get_selected_cuda_test_devices_with_mempool()
 
 
 class TestFemIntegrate(unittest.TestCase):
-    pass
+    def test_make_space_partition_requires_space_topology(self):
+        with self.assertRaisesRegex(TypeError, "missing 1 required positional argument: 'space_topology'"):
+            fem.make_space_partition()
+
+    def test_make_space_restriction_requires_space_source(self):
+        with self.assertRaisesRegex(ValueError, "One of `space_partition` or `space_topology` must be provided"):
+            fem.make_space_restriction()
+
+    def test_removed_deprecated_fem_arguments(self):
+        device = "cpu"
+
+        with wp.ScopedDevice(device):
+            geo = fem.Grid2D(res=wp.vec2i(2))
+            domain = fem.Cells(geometry=geo)
+            scalar_space = fem.make_polynomial_space(geo, degree=1)
+
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'space'"):
+                fem.make_space_partition(space=scalar_space)
+            modern_partition = fem.make_space_partition(space_topology=scalar_space.topology)
+            self.assertEqual(modern_partition.node_count(), scalar_space.node_count())
+
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'space'"):
+                fem.make_space_restriction(space=scalar_space, domain=domain)
+            modern_restriction = fem.make_space_restriction(space_topology=scalar_space.topology, domain=domain)
+            self.assertEqual(modern_restriction.node_count(), scalar_space.node_count())
+
+            modern_field = scalar_space.make_field()
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'domain'"):
+                fem.interpolate(bilinear_field, dest=modern_field, domain=domain)
+            fem.interpolate(bilinear_field, dest=modern_field, at=domain)
+
+            quadrature = fem.RegularQuadrature(domain=domain, order=1)
+            modern_values = wp.empty(quadrature.total_point_count(), dtype=float, device=device)
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'quadrature'"):
+                fem.interpolate(piecewise_constant, dest=modern_values, quadrature=quadrature)
+            fem.interpolate(piecewise_constant, dest=modern_values, at=quadrature)
 
 
 add_function_test(TestFemIntegrate, "test_integrate_gradient", test_integrate_gradient, devices=devices)
@@ -572,7 +800,8 @@ add_function_test(TestFemIntegrate, "test_interpolate_gradient", test_interpolat
 add_function_test(TestFemIntegrate, "test_vector_divergence_theorem", test_vector_divergence_theorem, devices=devices)
 add_function_test(TestFemIntegrate, "test_tensor_divergence_theorem", test_tensor_divergence_theorem, devices=devices)
 add_function_test(TestFemIntegrate, "test_grad_decomposition", test_grad_decomposition, devices=devices)
-add_function_test(TestFemIntegrate, "test_integrate_high_order", test_integrate_high_order, devices=cuda_graph_devices)
+add_function_test(TestFemIntegrate, "test_integrate_high_order", test_integrate_high_order, devices=cuda_devices)
+add_function_test(TestFemIntegrate, "test_padded_sparse_assembly", test_padded_sparse_assembly, devices=cuda_devices)
 add_function_test(TestFemIntegrate, "test_interpolate_reduction", test_interpolate_reduction, devices=devices)
 # On HIP this test faults on non-primary devices: `fem.integrate` builds BSR
 # topology by chaining data-dependent matrix creations inside the capture, which
@@ -580,8 +809,9 @@ add_function_test(TestFemIntegrate, "test_interpolate_reduction", test_interpola
 # in-capture allocations are backed by device-0 memory and fault on replay).
 # Since a GPU memory-access fault aborts the whole process, restrict to the
 # primary device on HIP. See HIP_GRAPH_CAPTURE_TODO.md section 2.1a.
-capturability_devices = [d for d in cuda_graph_devices if not (d.is_hip and d.ordinal != 0)]
+capturability_devices = [d for d in cuda_devices_with_mempool if not (d.is_hip and d.ordinal != 0)]
 add_function_test(TestFemIntegrate, "test_capturability", test_capturability, devices=capturability_devices)
+add_function_test(TestFemIntegrate, "test_restriction_rebuild", test_restriction_rebuild, devices=devices)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

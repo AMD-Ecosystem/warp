@@ -5,6 +5,7 @@
 
 #include "bvh.h"
 #include "cuda_util.h"
+#include "error.h"
 #include "mesh.h"
 #include "scan.h"
 
@@ -240,6 +241,25 @@ void bvh_refit_with_solid_angle_device(BVH& bvh, Mesh& mesh)
 }  // namespace wp
 
 
+static void wp_mesh_free_device_allocations(wp::Mesh& mesh, wp::Mesh* mesh_device)
+{
+    if (mesh.lowers) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.lowers);
+        mesh.lowers = nullptr;
+    }
+    if (mesh.uppers) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.uppers);
+        mesh.uppers = nullptr;
+    }
+    if (mesh.solid_angle_props) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.solid_angle_props);
+        mesh.solid_angle_props = nullptr;
+    }
+    if (mesh_device) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh_device);
+    }
+}
+
 uint64_t wp_mesh_create_device(
     void* context,
     wp::array_t<wp::vec3> points,
@@ -256,8 +276,7 @@ uint64_t wp_mesh_create_device(
     ContextGuard guard(context);
 
     wp::Mesh mesh(points, velocities, indices, num_points, num_tris);
-    const bool use_cubql = (constructor_type == CUBQL_MESH_CONSTRUCTOR_TYPE);
-    mesh.bvh_backend = use_cubql ? wp::MESH_BVH_BACKEND_CUBQL : wp::MESH_BVH_BACKEND_WARP;
+    const bool use_cubql = (constructor_type == BVH_CONSTRUCTOR_CUBQL);
 
     mesh.context = context ? context : wp_cuda_context_get_current();
 
@@ -299,18 +318,18 @@ uint64_t wp_mesh_create_device(
     );
 #ifndef WP_DISABLE_CUBQL
     if (use_cubql) {
-        wp::cubql_bvh_create_device(mesh.context, mesh.lowers, mesh.uppers, num_tris, bvh_leaf_size, mesh.cubql_bvh);
-        wp_memcpy_h2d(WP_CURRENT_CONTEXT, &(mesh_device->cubql_bvh), &mesh.cubql_bvh, sizeof(wp::CuBQLBVH));
+        wp::cubql_bvh_create_device(mesh.context, mesh.lowers, mesh.uppers, num_tris, bvh_leaf_size, mesh.bvh);
+        if ((!mesh.bvh.node_lowers || !mesh.bvh.primitive_indices) && num_tris > 0) {
+            wp::cubql_bvh_destroy_device(mesh.bvh);
+            wp_mesh_free_device_allocations(mesh, mesh_device);
+            return 0;
+        }
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, &(mesh_device->bvh), &mesh.bvh, sizeof(wp::BVH));
     } else
 #else
     if (use_cubql) {
-        fprintf(stderr, "Warp error: cuBQL support disabled (WP_DISABLE_CUBQL)\n");
-        wp_free_device(WP_CURRENT_CONTEXT, mesh.lowers);
-        wp_free_device(WP_CURRENT_CONTEXT, mesh.uppers);
-        if (mesh.solid_angle_props) {
-            wp_free_device(WP_CURRENT_CONTEXT, mesh.solid_angle_props);
-        }
-        wp_free_device(WP_CURRENT_CONTEXT, mesh_device);
+        wp::set_error_string("Warp error: cuBQL support disabled (WP_DISABLE_CUBQL)");
+        wp_mesh_free_device_allocations(mesh, mesh_device);
         return 0;
     }
 #endif
@@ -336,14 +355,7 @@ void wp_mesh_destroy_device(uint64_t id)
     if (wp::mesh_get_descriptor(id, mesh)) {
         ContextGuard guard(mesh.context);
 
-#ifndef WP_DISABLE_CUBQL
-        if (mesh.bvh_backend == wp::MESH_BVH_BACKEND_CUBQL) {
-            wp::cubql_bvh_destroy_device(mesh.cubql_bvh);
-        } else
-#endif
-        {
-            wp::bvh_destroy_device(mesh.bvh);
-        }
+        wp::bvh_destroy_device(mesh.bvh);
 
         wp_free_device(WP_CURRENT_CONTEXT, mesh.lowers);
         wp_free_device(WP_CURRENT_CONTEXT, mesh.uppers);
@@ -358,7 +370,7 @@ void wp_mesh_destroy_device(uint64_t id)
 
 void mesh_update_stats(uint64_t id) { }
 
-void wp_mesh_refit_device(uint64_t id)
+int wp_mesh_refit_device(uint64_t id)
 {
     // recompute triangle bounds
     wp::Mesh m;
@@ -386,30 +398,28 @@ void wp_mesh_refit_device(uint64_t id)
             (m.num_tris, m.points, m.indices, m.lowers, m.uppers)
         );
 
-#ifndef WP_DISABLE_CUBQL
-        if (m.bvh_backend == wp::MESH_BVH_BACKEND_CUBQL) {
-            wp::cubql_bvh_refit_device(m.cubql_bvh);
-        } else
-#endif
-            if (m.solid_angle_props) {
+        if (m.solid_angle_props) {
             // update solid angle data
             bvh_refit_with_solid_angle_device(m.bvh, m);
         } else {
             wp::bvh_refit_device(m.bvh);
         }
+        return 1;
     }
+
+    wp::set_error_string("Warp error: invalid mesh id");
+    return 0;
 }
 
-void wp_mesh_set_points_device(uint64_t id, wp::array_t<wp::vec3> points)
+int wp_mesh_set_points_device(uint64_t id, wp::array_t<wp::vec3> points)
 {
     wp::Mesh m;
     if (mesh_get_descriptor(id, m)) {
         if (points.ndim != 1 || points.shape[0] != m.points.shape[0]) {
-            fprintf(
-                stderr,
-                "The new points input for wp_mesh_set_points_device does not match the shape of the original points!\n"
+            wp::set_error_string(
+                "Warp error: new points input for wp_mesh_set_points_device does not match the original points shape"
             );
-            return;
+            return 0;
         }
 
         m.points = points;
@@ -420,10 +430,10 @@ void wp_mesh_set_points_device(uint64_t id, wp::array_t<wp::vec3> points)
         // update the cpu copy as well
         mesh_set_descriptor(id, m);
 
-        wp_mesh_refit_device(id);
+        return wp_mesh_refit_device(id);
     } else {
-        fprintf(stderr, "The mesh id provided to wp_mesh_set_points_device is not valid!\n");
-        return;
+        wp::set_error_string("Warp error: invalid mesh id");
+        return 0;
     }
 }
 
@@ -432,10 +442,9 @@ void wp_mesh_set_velocities_device(uint64_t id, wp::array_t<wp::vec3> velocities
     wp::Mesh m;
     if (mesh_get_descriptor(id, m)) {
         if (velocities.ndim != 1 || velocities.shape[0] != m.velocities.shape[0]) {
-            fprintf(
-                stderr,
-                "The new velocities input for wp_mesh_set_velocities_device does not match the shape of the original "
-                "velocities\n"
+            wp::set_error_string(
+                "Warp error: new velocities input for wp_mesh_set_velocities_device does not match the original "
+                "velocities shape"
             );
             return;
         }
@@ -446,7 +455,7 @@ void wp_mesh_set_velocities_device(uint64_t id, wp::array_t<wp::vec3> velocities
         wp_memcpy_h2d(WP_CURRENT_CONTEXT, mesh_device, &m, sizeof(wp::Mesh));
         mesh_set_descriptor(id, m);
     } else {
-        fprintf(stderr, "The mesh id provided to wp_mesh_set_velocities_device is not valid!\n");
+        wp::set_error_string("Warp error: invalid mesh id");
         return;
     }
 }

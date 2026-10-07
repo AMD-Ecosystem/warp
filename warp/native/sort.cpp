@@ -3,145 +3,306 @@
 
 #include "warp.h"
 
+#include "apic.h"
+#include "apic_internal.h"
+#include "apic_types.h"
+#include "error.h"
 #include "sort.h"
 #include "string.h"
 
+#include <cassert>
 #include <cstdint>
+#include <vector>
+
+template <int Size> struct SortPayload {
+    uint8_t data[Size];
+};
+
+// Keep only the vector metadata in TLS; its histogram storage is allocated
+// lazily for threads that sort and reused by later sorts.
+static std::vector<int>& radix_sort_histogram()
+{
+    static thread_local std::vector<int> histogram;
+    return histogram;
+}
+
+// Record a host segmented sort into the active APIC byte stream; returns true
+// if the sort was recorded (and therefore should NOT execute now), false
+// otherwise. Mirrors apic_capture_array_scan in warp.cpp: under CPU graph
+// capture the host sort is otherwise invisible to the byte stream, so replay
+// would leave the data in capture-time order. ``dtype`` is the key
+// APICType (INT32 or FLOAT32).
+static bool apic_capture_segmented_sort(
+    uint64_t keys, uint64_t values, int n, uint64_t segment_start, uint64_t segment_end, int num_segments, uint8_t dtype
+)
+{
+    APICState* state = wp_apic_get_recording_state();
+    if (!state)
+        return false;
+    if (n <= 0)
+        return true;
+    // keys/values span 2*n elements (sort scratch). Keys are int32 or float32
+    // (both 4 bytes); values are always int32.
+    uint64_t kv_bytes = static_cast<uint64_t>(2) * static_cast<uint64_t>(n) * sizeof(uint32_t);
+    // In the inferred-end case segment_end_indices == segment_start_indices[1:],
+    // so the end pointer aliases the start array one element in and the start
+    // region spans num_segments+1 entries. In the explicit-end case the two are
+    // separate arrays of num_segments entries each, so claiming num_segments+1
+    // for the start array would over-run its allocation.
+    bool inferred_end = (segment_end == segment_start + sizeof(int32_t));
+    uint64_t segstart_count = static_cast<uint64_t>(num_segments) + (inferred_end ? 1u : 0u);
+    uint64_t segstart_bytes = segstart_count * sizeof(int32_t);
+    uint64_t segend_bytes = static_cast<uint64_t>(num_segments) * sizeof(int32_t);
+    APICAddress keys_addr = apic_resolve_host_ptr(state, keys, kv_bytes);
+    APICAddress values_addr = apic_resolve_host_ptr(state, values, kv_bytes);
+    APICAddress segstart_addr = apic_resolve_host_ptr(state, segment_start, segstart_bytes);
+    APICAddress segend_addr = apic_resolve_host_ptr(state, segment_end, segend_bytes);
+    apic_record_segmented_sort(
+        state, keys_addr.region_id, keys_addr.offset, values_addr.region_id, values_addr.offset,
+        segstart_addr.region_id, segstart_addr.offset, segend_addr.region_id, segend_addr.offset,
+        static_cast<uint32_t>(n), static_cast<uint32_t>(num_segments), dtype
+    );
+    return true;
+}
+
+// Record a host radix sort into the active APIC byte stream; returns true if
+// recorded (and therefore should NOT execute now). ``dtype`` is the key
+// APICType; ``key_size`` is 4 or 8 and ``value_size`` is 4 or 8.
+static bool apic_capture_radix_sort(
+    uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size, uint8_t dtype, uint64_t key_size
+)
+{
+    APICState* state = wp_apic_get_recording_state();
+    if (!state)
+        return false;
+    if (n <= 0)
+        return true;
+    if (value_size != 4 && value_size != 8)
+        return false;
+    // keys/values span 2*n elements (sort scratch).
+    uint64_t keys_bytes = static_cast<uint64_t>(2) * static_cast<uint64_t>(n) * key_size;
+    uint64_t values_bytes = static_cast<uint64_t>(2) * static_cast<uint64_t>(n) * static_cast<uint64_t>(value_size);
+    APICAddress keys_addr = apic_resolve_host_ptr(state, keys, keys_bytes);
+    APICAddress values_addr = apic_resolve_host_ptr(state, values, values_bytes);
+    apic_record_radix_sort(
+        state, keys_addr.region_id, keys_addr.offset, values_addr.region_id, values_addr.offset,
+        static_cast<uint32_t>(n), begin_bit, end_bit, value_size, dtype
+    );
+    return true;
+}
 
 // Only integer keys (bit count 32 or 64) are supported. Floats need to get converted into int first. see
 // radix_float_to_int.
-template <typename KeyType> void radix_sort_pairs_host(KeyType* keys, int* values, int n, int offset_to_scratch_memory)
+template <typename KeyType, typename ValueType, typename RadixKeyType, typename KeyToRadix>
+void radix_sort_pairs_host(
+    KeyType* keys,
+    ValueType* values,
+    int n,
+    int offset_to_scratch_memory,
+    int begin_bit,
+    int end_bit,
+    KeyToRadix key_to_radix
+)
 {
-    const int numPasses = sizeof(KeyType) / 2;
-    static int tables[numPasses][1 << 16];
-    memset(tables, 0, sizeof(tables));
+    constexpr int keyWidth = sizeof(RadixKeyType) * 8;
+    constexpr int maxPasses = (keyWidth + 15) / 16;
 
-    // build histograms
-    for (int p = 0; p < numPasses; ++p) {
-        for (int i = 0; i < n; ++i) {
-            const int shift = p * 16;
-            const int b = (keys[i] >> shift) & 0xffff;
-
-            ++tables[p][b];
-        }
+    if (begin_bit < 0 || end_bit <= begin_bit || end_bit > keyWidth) {
+        return;
     }
 
-    // convert histograms to offset tables in-place
-    for (int p = 0; p < numPasses; ++p) {
-        int off = 0;
-        for (int i = 0; i < 65536; ++i) {
-            const int newoff = off + tables[p][i];
+    if (n <= 0) {
+        return;
+    }
 
-            tables[p][i] = off;
+    const int requestedPasses = (end_bit - begin_bit + 15) / 16;
+    const int numPasses = requestedPasses < maxPasses ? requestedPasses : maxPasses;
+
+    std::vector<int>& histogram = radix_sort_histogram();
+
+    // Build and consume one radix pass at a time so the same histogram can be
+    // reused instead of keeping a table for every possible pass.
+    for (int p = 0; p < numPasses; ++p) {
+        const int flipFlop = p % 2;
+        KeyType* readKeys = keys + offset_to_scratch_memory * flipFlop;
+        ValueType* readValues = values + offset_to_scratch_memory * flipFlop;
+        KeyType* writeKeys = keys + offset_to_scratch_memory * (1 - flipFlop);
+        ValueType* writeValues = values + offset_to_scratch_memory * (1 - flipFlop);
+
+        const int shift = begin_bit + p * 16;
+        const int passBits = (end_bit - shift) < 16 ? (end_bit - shift) : 16;
+        const int bucketCount = 1 << passBits;
+        const RadixKeyType mask = (RadixKeyType(1) << passBits) - 1;
+
+        histogram.assign(bucketCount, 0);
+
+        for (int i = 0; i < n; ++i) {
+            const int b = (key_to_radix(readKeys[i]) >> shift) & mask;
+
+            ++histogram[b];
+        }
+
+        int off = 0;
+        for (int i = 0; i < bucketCount; ++i) {
+            const int newoff = off + histogram[i];
+
+            histogram[i] = off;
 
             off = newoff;
         }
-    }
 
-    for (int p = 0; p < numPasses; ++p) {
-        int flipFlop = p % 2;
-        KeyType* readKeys = keys + offset_to_scratch_memory * flipFlop;
-        int* readValues = values + offset_to_scratch_memory * flipFlop;
-        KeyType* writeKeys = keys + offset_to_scratch_memory * (1 - flipFlop);
-        int* writeValues = values + offset_to_scratch_memory * (1 - flipFlop);
-
-        // pass 1 - sort by low 16 bits
         for (int i = 0; i < n; ++i) {
-            // lookup offset of input
             const KeyType k = readKeys[i];
-            const int v = readValues[i];
+            const ValueType v = readValues[i];
+            const int b = (key_to_radix(k) >> shift) & mask;
 
-            const int shift = p * 16;
-            const int b = (k >> shift) & 0xffff;
-
-            // find offset and increment
-            const int offset = tables[p][b]++;
+            const int offset = histogram[b]++;
 
             writeKeys[offset] = k;
             writeValues[offset] = v;
         }
     }
+
+    if (numPasses % 2 == 1) {
+        KeyType* auxKeys = keys + offset_to_scratch_memory;
+        ValueType* auxValues = values + offset_to_scratch_memory;
+        memcpy(keys, auxKeys, sizeof(KeyType) * n);
+        memcpy(values, auxValues, sizeof(ValueType) * n);
+    }
 }
 
-void radix_sort_pairs_host(int* keys, int* values, int n) { radix_sort_pairs_host<int>(keys, values, n, n); }
+template <typename KeyType, typename RadixKeyType, typename KeyToRadix>
+void radix_sort_pairs_host_dispatch_value(
+    KeyType* keys,
+    void* values,
+    int n,
+    int offset_to_scratch_memory,
+    int begin_bit,
+    int end_bit,
+    int value_size,
+    KeyToRadix key_to_radix
+)
+{
+    if (value_size == 4) {
+        radix_sort_pairs_host<KeyType, SortPayload<4>, RadixKeyType>(
+            keys, reinterpret_cast<SortPayload<4>*>(values), n, offset_to_scratch_memory, begin_bit, end_bit,
+            key_to_radix
+        );
+    } else if (value_size == 8) {
+        radix_sort_pairs_host<KeyType, SortPayload<8>, RadixKeyType>(
+            keys, reinterpret_cast<SortPayload<8>*>(values), n, offset_to_scratch_memory, begin_bit, end_bit,
+            key_to_radix
+        );
+    } else {
+        wp::set_error_string("Warp sort error: Unsupported radix sort value size %d", value_size);
+        assert(false && "Unsupported radix sort value size");
+    }
+}
 
-void radix_sort_pairs_host(int64_t* keys, int* values, int n) { radix_sort_pairs_host<int64_t>(keys, values, n, n); }
+void radix_sort_pairs_host(
+    int* keys, void* values, int n, int offset_to_scratch_memory, int begin_bit, int end_bit, int value_size
+)
+{
+    radix_sort_pairs_host_dispatch_value<int, uint32_t>(
+        keys, values, n, offset_to_scratch_memory, begin_bit, end_bit, value_size,
+        [](int key) { return static_cast<uint32_t>(key) ^ 0x80000000u; }
+    );
+}
 
-void radix_sort_pairs_host(uint64_t* keys, int* values, int n) { radix_sort_pairs_host<uint64_t>(keys, values, n, n); }
+void radix_sort_pairs_host(int* keys, int* values, int n, int begin_bit, int end_bit)
+{
+    radix_sort_pairs_host(keys, values, n, n, begin_bit, end_bit, sizeof(int));
+}
+
+void radix_sort_pairs_host(
+    uint32_t* keys, void* values, int n, int offset_to_scratch_memory, int begin_bit, int end_bit, int value_size
+)
+{
+    radix_sort_pairs_host_dispatch_value<uint32_t, uint32_t>(
+        keys, values, n, offset_to_scratch_memory, begin_bit, end_bit, value_size, [](uint32_t key) { return key; }
+    );
+}
+
+void radix_sort_pairs_host(uint32_t* keys, int* values, int n, int begin_bit, int end_bit)
+{
+    radix_sort_pairs_host(keys, values, n, n, begin_bit, end_bit, sizeof(int));
+}
+
+void radix_sort_pairs_host(
+    int64_t* keys, void* values, int n, int offset_to_scratch_memory, int begin_bit, int end_bit, int value_size
+)
+{
+    radix_sort_pairs_host_dispatch_value<int64_t, uint64_t>(
+        keys, values, n, offset_to_scratch_memory, begin_bit, end_bit, value_size,
+        [](int64_t key) { return static_cast<uint64_t>(key) ^ 0x8000000000000000ull; }
+    );
+}
+
+void radix_sort_pairs_host(int64_t* keys, int* values, int n, int begin_bit, int end_bit)
+{
+    radix_sort_pairs_host(keys, values, n, n, begin_bit, end_bit, sizeof(int));
+}
+
+void radix_sort_pairs_host(
+    uint64_t* keys, void* values, int n, int offset_to_scratch_memory, int begin_bit, int end_bit, int value_size
+)
+{
+    radix_sort_pairs_host_dispatch_value<uint64_t, uint64_t>(
+        keys, values, n, offset_to_scratch_memory, begin_bit, end_bit, value_size, [](uint64_t key) { return key; }
+    );
+}
+
+void radix_sort_pairs_host(uint64_t* keys, int* values, int n, int begin_bit, int end_bit)
+{
+    radix_sort_pairs_host(keys, values, n, n, begin_bit, end_bit, sizeof(int));
+}
 
 // http://stereopsis.com/radix.html
 inline unsigned int radix_float_to_int(float f)
 {
-    unsigned int i = reinterpret_cast<unsigned int&>(f);
+    unsigned int i;
+    memcpy(&i, &f, sizeof(i));
     unsigned int mask = (unsigned int)(-(int)(i >> 31)) | 0x80000000;
     return i ^ mask;
 }
 
-void radix_sort_pairs_host(float* keys, int* values, int n, int offset_to_scratch_memory)
+inline uint64_t radix_double_to_int(double f)
 {
-    static unsigned int tables[2][1 << 16];
-    memset(tables, 0, sizeof(tables));
-
-    float* auxKeys = keys + offset_to_scratch_memory;
-    int* auxValues = values + offset_to_scratch_memory;
-
-    // build histograms
-    for (int i = 0; i < n; ++i) {
-        const unsigned int k = radix_float_to_int(keys[i]);
-        const unsigned short low = k & 0xffff;
-        const unsigned short high = k >> 16;
-
-        ++tables[0][low];
-        ++tables[1][high];
-    }
-
-    // convert histograms to offset tables in-place
-    unsigned int offlow = 0;
-    unsigned int offhigh = 0;
-
-    for (int i = 0; i < 65536; ++i) {
-        const unsigned int newofflow = offlow + tables[0][i];
-        const unsigned int newoffhigh = offhigh + tables[1][i];
-
-        tables[0][i] = offlow;
-        tables[1][i] = offhigh;
-
-        offlow = newofflow;
-        offhigh = newoffhigh;
-    }
-
-    // pass 1 - sort by low 16 bits
-    for (int i = 0; i < n; ++i) {
-        // lookup offset of input
-        const float f = keys[i];
-        const unsigned int k = radix_float_to_int(f);
-        const int v = values[i];
-        const unsigned int b = k & 0xffff;
-
-        // find offset and increment
-        const unsigned int offset = tables[0][b]++;
-
-        auxKeys[offset] = f;
-        auxValues[offset] = v;
-    }
-
-    // pass 2 - sort by high 16 bits
-    for (int i = 0; i < n; ++i) {
-        // lookup offset of input
-        const float f = auxKeys[i];
-        const unsigned int k = radix_float_to_int(f);
-        const int v = auxValues[i];
-
-        const unsigned int b = k >> 16;
-
-        const unsigned int offset = tables[1][b]++;
-
-        keys[offset] = f;
-        values[offset] = v;
-    }
+    uint64_t i;
+    memcpy(&i, &f, sizeof(i));
+    uint64_t mask = (uint64_t)(-(int64_t)(i >> 63)) | 0x8000000000000000ull;
+    return i ^ mask;
 }
 
-void radix_sort_pairs_host(float* keys, int* values, int n) { radix_sort_pairs_host(keys, values, n, n); }
+void radix_sort_pairs_host(
+    float* keys, void* values, int n, int offset_to_scratch_memory, int begin_bit, int end_bit, int value_size
+)
+{
+    radix_sort_pairs_host_dispatch_value<float, uint32_t>(
+        keys, values, n, offset_to_scratch_memory, begin_bit, end_bit, value_size,
+        [](float key) { return radix_float_to_int(key); }
+    );
+}
+
+void radix_sort_pairs_host(float* keys, int* values, int n, int begin_bit, int end_bit)
+{
+    radix_sort_pairs_host(keys, values, n, n, begin_bit, end_bit, sizeof(int));
+}
+
+void radix_sort_pairs_host(
+    double* keys, void* values, int n, int offset_to_scratch_memory, int begin_bit, int end_bit, int value_size
+)
+{
+    radix_sort_pairs_host_dispatch_value<double, uint64_t>(
+        keys, values, n, offset_to_scratch_memory, begin_bit, end_bit, value_size,
+        [](double key) { return radix_double_to_int(key); }
+    );
+}
+
+void radix_sort_pairs_host(double* keys, int* values, int n, int begin_bit, int end_bit)
+{
+    radix_sort_pairs_host(keys, values, n, n, begin_bit, end_bit, sizeof(int));
+}
 
 void segmented_sort_pairs_host(
     float* keys, int* values, int n, int* segment_start_indices, int* segment_end_indices, int num_segments
@@ -150,7 +311,7 @@ void segmented_sort_pairs_host(
     for (int i = 0; i < num_segments; ++i) {
         const int start = segment_start_indices[i];
         const int end = segment_end_indices[i];
-        radix_sort_pairs_host(keys + start, values + start, end - start, n);
+        radix_sort_pairs_host(keys + start, values + start, end - start, n, 0, 32, sizeof(int));
     }
 }
 
@@ -161,22 +322,40 @@ void segmented_sort_pairs_host(
     for (int i = 0; i < num_segments; ++i) {
         const int start = segment_start_indices[i];
         const int end = segment_end_indices[i];
-        radix_sort_pairs_host(keys + start, values + start, end - start, n);
+        radix_sort_pairs_host(keys + start, values + start, end - start, n, 0, 32, sizeof(int));
     }
 }
 
 
 #if !WP_ENABLE_CUDA
 
-void radix_sort_reserve(void* context, int n, void** mem_out, size_t* size_out) { }
+void wp_radix_sort_pairs_int_device(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
+{
+}
 
-void wp_radix_sort_pairs_int_device(uint64_t keys, uint64_t values, int n) { }
+void wp_radix_sort_pairs_uint_device(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
+{
+}
 
-void wp_radix_sort_pairs_int64_device(uint64_t keys, uint64_t values, int n) { }
+void wp_radix_sort_pairs_int64_device(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
+{
+}
 
-void wp_radix_sort_pairs_uint64_device(uint64_t keys, uint64_t values, int n) { }
+void wp_radix_sort_pairs_uint64_device(
+    uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size
+)
+{
+}
 
-void wp_radix_sort_pairs_float_device(uint64_t keys, uint64_t values, int n) { }
+void wp_radix_sort_pairs_float_device(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
+{
+}
+
+void wp_radix_sort_pairs_double_device(
+    uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size
+)
+{
+}
 
 void wp_segmented_sort_pairs_float_device(
     uint64_t keys,
@@ -203,24 +382,58 @@ void wp_segmented_sort_pairs_int_device(
 #endif  // !WP_ENABLE_CUDA
 
 
-void wp_radix_sort_pairs_int_host(uint64_t keys, uint64_t values, int n)
+void wp_radix_sort_pairs_int_host(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
 {
-    radix_sort_pairs_host(reinterpret_cast<int*>(keys), reinterpret_cast<int*>(values), n);
+    if (apic_capture_radix_sort(keys, values, n, begin_bit, end_bit, value_size, APIC_TYPE_INT32, sizeof(int32_t)))
+        return;
+    radix_sort_pairs_host(
+        reinterpret_cast<int*>(keys), reinterpret_cast<void*>(values), n, n, begin_bit, end_bit, value_size
+    );
 }
 
-void wp_radix_sort_pairs_int64_host(uint64_t keys, uint64_t values, int n)
+void wp_radix_sort_pairs_uint_host(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
 {
-    radix_sort_pairs_host(reinterpret_cast<int64_t*>(keys), reinterpret_cast<int*>(values), n);
+    if (apic_capture_radix_sort(keys, values, n, begin_bit, end_bit, value_size, APIC_TYPE_UINT32, sizeof(uint32_t)))
+        return;
+    radix_sort_pairs_host(
+        reinterpret_cast<uint32_t*>(keys), reinterpret_cast<void*>(values), n, n, begin_bit, end_bit, value_size
+    );
 }
 
-void wp_radix_sort_pairs_uint64_host(uint64_t keys, uint64_t values, int n)
+void wp_radix_sort_pairs_int64_host(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
 {
-    radix_sort_pairs_host(reinterpret_cast<uint64_t*>(keys), reinterpret_cast<int*>(values), n);
+    if (apic_capture_radix_sort(keys, values, n, begin_bit, end_bit, value_size, APIC_TYPE_INT64, sizeof(int64_t)))
+        return;
+    radix_sort_pairs_host(
+        reinterpret_cast<int64_t*>(keys), reinterpret_cast<void*>(values), n, n, begin_bit, end_bit, value_size
+    );
 }
 
-void wp_radix_sort_pairs_float_host(uint64_t keys, uint64_t values, int n)
+void wp_radix_sort_pairs_uint64_host(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
 {
-    radix_sort_pairs_host(reinterpret_cast<float*>(keys), reinterpret_cast<int*>(values), n);
+    if (apic_capture_radix_sort(keys, values, n, begin_bit, end_bit, value_size, APIC_TYPE_UINT64, sizeof(uint64_t)))
+        return;
+    radix_sort_pairs_host(
+        reinterpret_cast<uint64_t*>(keys), reinterpret_cast<void*>(values), n, n, begin_bit, end_bit, value_size
+    );
+}
+
+void wp_radix_sort_pairs_float_host(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
+{
+    if (apic_capture_radix_sort(keys, values, n, begin_bit, end_bit, value_size, APIC_TYPE_FLOAT32, sizeof(float)))
+        return;
+    radix_sort_pairs_host(
+        reinterpret_cast<float*>(keys), reinterpret_cast<void*>(values), n, n, begin_bit, end_bit, value_size
+    );
+}
+
+void wp_radix_sort_pairs_double_host(uint64_t keys, uint64_t values, int n, int begin_bit, int end_bit, int value_size)
+{
+    if (apic_capture_radix_sort(keys, values, n, begin_bit, end_bit, value_size, APIC_TYPE_FLOAT64, sizeof(double)))
+        return;
+    radix_sort_pairs_host(
+        reinterpret_cast<double*>(keys), reinterpret_cast<void*>(values), n, n, begin_bit, end_bit, value_size
+    );
 }
 
 void wp_segmented_sort_pairs_float_host(
@@ -232,6 +445,10 @@ void wp_segmented_sort_pairs_float_host(
     int num_segments
 )
 {
+    if (apic_capture_segmented_sort(
+            keys, values, n, segment_start_indices, segment_end_indices, num_segments, APIC_TYPE_FLOAT32
+        ))
+        return;
     segmented_sort_pairs_host(
         reinterpret_cast<float*>(keys), reinterpret_cast<int*>(values), n,
         reinterpret_cast<int*>(segment_start_indices), reinterpret_cast<int*>(segment_end_indices), num_segments
@@ -247,6 +464,10 @@ void wp_segmented_sort_pairs_int_host(
     int num_segments
 )
 {
+    if (apic_capture_segmented_sort(
+            keys, values, n, segment_start_indices, segment_end_indices, num_segments, APIC_TYPE_INT32
+        ))
+        return;
     segmented_sort_pairs_host(
         reinterpret_cast<int*>(keys), reinterpret_cast<int*>(values), n, reinterpret_cast<int*>(segment_start_indices),
         reinterpret_cast<int*>(segment_end_indices), num_segments

@@ -27,7 +27,7 @@ on platforms with NVIDIA CUDA support. The following table summarizes platform s
     +=====================+==============+======================+====================+=====================+
     | **Windows** 10/11   | ``x86-64``   | PC                   | Supported ✅       | CUDA                |
     +---------------------+--------------+----------------------+--------------------+---------------------+
-    | **Windows** 11      | ``arm64``    | PC                   | Planned            | CUDA (Planned)      |
+    | **Windows** 11      | ``arm64``    | PC                   | Source build ✅    | CPU Only            |
     +---------------------+--------------+----------------------+--------------------+---------------------+
     | **Linux**           | ``x86-64``   | PC / Server          | Supported ✅       | CUDA                |
     +---------------------+--------------+----------------------+--------------------+---------------------+
@@ -37,6 +37,8 @@ on platforms with NVIDIA CUDA support. The following table summarizes platform s
     +---------------------+--------------+----------------------+--------------------+---------------------+
     | **macOS**           | ``x86-64``   | Intel-based Mac      | Discontinued       | None                |
     +---------------------+--------------+----------------------+--------------------+---------------------+
+
+Warp supports CPU execution on Windows ARM64 when built from source. We do not currently publish pre-built wheels for this platform.
 
 Runtime requirements
 --------------------
@@ -215,7 +217,7 @@ We employ multiple channels to ensure users are aware of deprecated and removed 
 **CHANGELOG.md**
     The primary source of truth for all deprecations and removals. Each release's changelog includes
     dedicated **Deprecated** and **Removed** sections. The changelog is available in the GitHub repository
-    and at :doc:`changelog`.
+    and at :doc:`/project/changelog`.
 
 **Runtime Warnings**
     When you use a deprecated feature in your code, Warp will emit a ``DeprecationWarning`` to
@@ -237,7 +239,7 @@ What to do when you see a deprecation warning
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. Read the warning message for the suggested replacement, if any.
-2. Check the **Deprecated** section of :doc:`changelog` to find the release in which the
+2. Check the **Deprecated** section of :doc:`/project/changelog` to find the release in which the
    deprecation was first announced. Combined with the deprecation timeline above, this tells you
    roughly when the feature will be removed.
 3. Migrate your code to the replacement API. The deprecated feature will remain functional for at

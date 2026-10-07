@@ -5,6 +5,15 @@ name: CI
 
 on:
   workflow_call:
+    inputs:
+      allow-ctk-cache-save:
+        description: Permit a trusted caller to save branch-scoped CTK caches
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CODECOV_TOKEN:
+        required: false
   workflow_dispatch:
   push:
     tags:
@@ -24,113 +33,415 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    env:
+      UV_PYTHON: ${{ matrix.python_request || '3.12' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-2025
+          # CUDA 12.x and CUDA 13.0 reject the VS 2026 image.
+          - os: windows-2022
             platform: windows
-            cuda-sub-packages: '["cudart", "nvcc", "nvrtc_dev", "nvjitlink"]'
-            cuda-non-cuda-packages: ''
+            cuda-version: "12.9.2"
+            cuda-platform: windows-x86_64
+            build-args: ""
+            artifact-name: build-artifact-windows-cuda12
+          - os: windows-2022
+            platform: windows
+            cuda-version: "13.0.3"
+            cuda-platform: windows-x86_64
+            build-args: ""
+            artifact-name: build-artifact-windows-cuda13
+          - os: windows-11-arm
+            platform: windows-aarch64
+            python_request: cpython-3.12-windows-aarch64-none
+            cuda-version: ""
+            cuda-platform: ""
+            build-args: --no-cuda
+            artifact-name: build-artifact-windows-aarch64-cpu
           - os: ubuntu-24.04
             platform: ubuntu-x86_64
-            cuda-sub-packages: '["cudart-dev", "nvcc", "nvrtc-dev"]'
-            cuda-non-cuda-packages: '["libnvjitlink-dev"]'
+            cuda-version: "12.9.2"
+            cuda-platform: linux-x86_64
+            build-args: ""
+            artifact-name: build-artifact-ubuntu-x86_64-cuda12
+          - os: ubuntu-24.04
+            platform: ubuntu-x86_64
+            cuda-version: "13.0.3"
+            cuda-platform: linux-x86_64
+            build-args: ""
+            artifact-name: build-artifact-ubuntu-x86_64-cuda13
           - os: ubuntu-24.04-arm
             platform: ubuntu-aarch64
-            cuda-sub-packages: '["cudart-dev", "nvcc", "nvrtc-dev"]'
-            cuda-non-cuda-packages: '["libnvjitlink-dev"]'
+            cuda-version: "12.9.2"
+            cuda-platform: linux-aarch64
+            build-args: ""
+            artifact-name: build-artifact-ubuntu-aarch64-cuda12
+          - os: ubuntu-24.04-arm
+            platform: ubuntu-aarch64
+            cuda-version: "13.0.3"
+            cuda-platform: linux-sbsa
+            build-args: ""
+            artifact-name: build-artifact-ubuntu-aarch64-cuda13
           - os: macos-latest
             platform: macos
-            cuda-sub-packages: ''
-            cuda-non-cuda-packages: ''
+            cuda-version: ''
+            cuda-platform: ''
+            build-args: ""
+            artifact-name: build-artifact-macos
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          persist-credentials: false
           lfs: true
       
       - name: Install uv
-        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57  # v8.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
-          version: "0.11.3"
+          version: "0.12.7"
       
       - name: Set up Python
         run: uv python install
       
       - name: Cache build artifacts
-        if: matrix.platform != 'macos'
-        uses: actions/cache@v4
+        if: matrix.platform != 'macos' && github.repository == 'NVIDIA/warp'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         id: cache-build
         with:
           path: warp/bin/
-          key: build-${{ matrix.platform }}-${{ hashFiles('build_lib.py', 'warp/build_dll.py', 'build_llvm.py', 'warp/native/**/*.cpp', 'warp/native/**/*.cu', 'warp/native/**/*.h', 'deps/libmathdx-deps.packman.xml') }}
+          # Hash only native-binary inputs. VERSION.md changes flow through
+          # generated warp/native/version.h, which is covered by native headers.
+          key: build-${{ matrix.artifact-name }}-${{ matrix.cuda-version }}-${{ hashFiles('build_lib.py', 'build_llvm.py', 'warp/_src/build_architecture.py', 'warp/_src/build_dll.py', 'warp/native/clang/clang.cpp', 'warp/native/**/*.cpp', 'warp/native/**/*.cu', 'warp/native/**/*.cuh', 'warp/native/**/*.h', 'warp/native/libdevice/*.bc', 'warp/native/warp.map', 'deps/llvm-deps.packman.xml', 'deps/libmathdx-deps.packman.xml', '.github/actions/setup-warp-cuda/action.yml', 'tools/ci/cuda_toolkit.py', 'tools/ci/cuda_toolkit_requirements.json', 'tools/ci/cuda_toolkit_lock.json') }}
       
-      - name: Install CTK (with non-CUDA packages)
-        if: steps.cache-build.outputs.cache-hit != 'true' && matrix.cuda-sub-packages != '' && matrix.cuda-non-cuda-packages != ''
-        uses: Jimver/cuda-toolkit@1a3c14e26833ccf292b268f9a790fb47dea7b2da
+      - name: Set up CUDA Toolkit for Warp
+        if: steps.cache-build.outputs.cache-hit != 'true' && matrix.cuda-version != ''
+        uses: ./.github/actions/setup-warp-cuda
         with:
-          sub-packages: ${{ matrix.cuda-sub-packages }}
-          non-cuda-sub-packages: ${{ matrix.cuda-non-cuda-packages }}
-          method: 'network'
-      
-      - name: Install CTK (without non-CUDA packages)
-        if: steps.cache-build.outputs.cache-hit != 'true' && matrix.cuda-sub-packages != '' && matrix.cuda-non-cuda-packages == ''
-        uses: Jimver/cuda-toolkit@c35baa1a18fd1fc9dcf47c5bd839bf30559c0bc3  # https://github.com/Jimver/cuda-toolkit/issues/395
-        with:
-          sub-packages: ${{ matrix.cuda-sub-packages }}
-          method: 'network'
-      
+          version: ${{ matrix.cuda-version }}
+          platform: ${{ matrix.cuda-platform }}
+          cache-read: ${{ github.repository == 'NVIDIA/warp' }}
+          cache-write: ${{ github.repository == 'NVIDIA/warp' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release-') || inputs.allow-ctk-cache-save) }}
+
       - name: Build Warp
         if: steps.cache-build.outputs.cache-hit != 'true'
-        run: uv run build_lib.py
+        env:
+          WARP_CACHE_PATH: ${{ runner.temp }}/warp-cache-${{ matrix.artifact-name }}
+        run: uv run build_lib.py ${{ matrix.build-args }}
       
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: build-artifact-${{ matrix.platform }}
+          name: ${{ matrix.artifact-name }}
           path: warp/bin/
+          retention-days: ${{ github.repository == 'NVIDIA/warp' && 7 || 1 }}
       
+  build-warp-python-free-threaded:
+    if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
 
-  test-warp:
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install 3.14t
+
+      - name: Cache build artifacts
+        if: github.repository == 'NVIDIA/warp'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        id: cache-build
+        with:
+          path: warp/bin/
+          # Hash only native-binary inputs. VERSION.md changes flow through
+          # generated warp/native/version.h, which is covered by native headers.
+          key: build-ubuntu-x86_64-cuda13-python314t-13.0.3-${{ hashFiles('build_lib.py', 'build_llvm.py', 'warp/_src/build_dll.py', 'warp/native/**/*.cpp', 'warp/native/**/*.cu', 'warp/native/**/*.cuh', 'warp/native/**/*.h', 'warp/native/libdevice/*.bc', 'warp/native/warp.map', 'deps/libmathdx-deps.packman.xml', '.github/actions/setup-warp-cuda/action.yml', 'tools/ci/cuda_toolkit.py', 'tools/ci/cuda_toolkit_requirements.json', 'tools/ci/cuda_toolkit_lock.json') }}
+
+      - name: Set up CUDA Toolkit for Warp
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-warp-cuda
+        with:
+          version: "13.0.3"
+          platform: linux-x86_64
+          cache-read: ${{ github.repository == 'NVIDIA/warp' }}
+          cache-write: ${{ github.repository == 'NVIDIA/warp' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release-') || inputs.allow-ctk-cache-save) }}
+
+      - name: Build Warp
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        run: uv run --python 3.14t build_lib.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: build-artifact-ubuntu-x86_64-cuda13-python314t
+          path: warp/bin/
+          retention-days: ${{ github.repository == 'NVIDIA/warp' && 7 || 1 }}
+
+
+  build-warp-cmake:
+    if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      UV_PYTHON: ${{ matrix.python_request || '3.12' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CUDA 12.x and CUDA 13.0 reject the VS 2026 image.
+          - os: windows-2022
+            platform: windows
+            cuda-version: "13.0.3"
+            cuda-platform: windows-x86_64
+            warp-enable-cuda: "ON"
+            msvc-component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+            msvc-host-arch: x64
+            msvc-target-arch: x64
+            warp-cache-path-suffix: '\warp-cache-cmake'
+          - os: windows-11-arm
+            platform: windows-aarch64
+            python_request: cpython-3.12-windows-aarch64-none
+            cuda-version: ""
+            cuda-platform: ""
+            warp-enable-cuda: "OFF"
+            msvc-component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
+            msvc-host-arch: arm64
+            msvc-target-arch: arm64
+            warp-cache-path-suffix: '\warp-cache-cmake-windows-aarch64'
+          - os: ubuntu-24.04
+            platform: ubuntu-x86_64
+            cuda-version: "13.0.3"
+            cuda-platform: linux-x86_64
+            warp-enable-cuda: "ON"
+            warp-cache-path-suffix: /warp-cache-cmake
+          - os: ubuntu-24.04-arm
+            platform: ubuntu-aarch64
+            cuda-version: "13.0.3"
+            cuda-platform: linux-sbsa
+            warp-enable-cuda: "ON"
+            warp-cache-path-suffix: /warp-cache-cmake
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Set up CUDA Toolkit for Warp
+        if: matrix.warp-enable-cuda == 'ON'
+        uses: ./.github/actions/setup-warp-cuda
+        with:
+          version: ${{ matrix.cuda-version }}
+          platform: ${{ matrix.cuda-platform }}
+          cache-read: ${{ github.repository == 'NVIDIA/warp' }}
+          cache-write: ${{ github.repository == 'NVIDIA/warp' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release-') || inputs.allow-ctk-cache-save) }}
+
+      - name: Print build tool versions
+        run: |
+          cmake --version
+          ninja --version
+
+      - name: Prepare Python environment for CMake codegen
+        run: uv sync --no-install-project
+
+      - name: Set up MSVC developer environment
+        if: startsWith(matrix.platform, 'windows')
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -requires "${{ matrix.msvc-component }}" -property installationPath
+          $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+          if (!(Test-Path $vsDevCmd)) {
+            throw "VsDevCmd.bat was not found"
+          }
+
+          $before = @{}
+          $developerEnvironment = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $environmentLines = cmd /c "`"$vsDevCmd`" -arch=${{ matrix.msvc-target-arch }} -host_arch=${{ matrix.msvc-host-arch }} > nul && set"
+          if ($LASTEXITCODE -ne 0) {
+            throw "VsDevCmd.bat failed with exit code $LASTEXITCODE"
+          }
+
+          $environmentLines |
+            ForEach-Object {
+              $name, $value = $_ -split '=', 2
+              if ($name) {
+                $developerEnvironment[$name] = $value
+                if ($before[$name] -ne $value) {
+                  "$name=$value" >> $env:GITHUB_ENV
+                }
+              }
+            }
+
+          if ("${{ matrix.platform }}" -eq "windows-aarch64") {
+            if ($developerEnvironment["VSCMD_ARG_HOST_ARCH"] -ne "arm64") {
+              throw "MSVC host architecture is not arm64"
+            }
+            if ($developerEnvironment["VSCMD_ARG_TGT_ARCH"] -ne "arm64") {
+              throw "MSVC target architecture is not arm64"
+            }
+          }
+
+      - name: Build Warp with CMake
+        if: ${{ !startsWith(matrix.platform, 'windows') }}
+        env:
+          WARP_CACHE_PATH: ${{ runner.temp }}${{ matrix.warp-cache-path-suffix }}
+        run: |
+          cmake_args=(
+            -S .
+            -B _build/cmake
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            "-DWARP_ENABLE_CUDA=${{ matrix.warp-enable-cuda }}"
+          )
+          if [ "${{ matrix.warp-enable-cuda }}" = "ON" ]; then
+            cuda_path="${CUDA_HOME:-${CUDA_PATH:-}}"
+            if [ -z "$cuda_path" ]; then
+              echo "CUDA_HOME or CUDA_PATH must be set" >&2
+              exit 1
+            fi
+            cmake_args+=("-DWARP_CUDA_PATH:PATH=$cuda_path")
+          fi
+          cmake "${cmake_args[@]}"
+          cmake --build _build/cmake --parallel
+
+      - name: Build Warp with CMake
+        if: startsWith(matrix.platform, 'windows')
+        env:
+          WARP_CACHE_PATH: ${{ runner.temp }}${{ matrix.warp-cache-path-suffix }}
+        run: |
+          $cmakeArgs = @(
+            "-S", ".",
+            "-B", "_build/cmake",
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_C_COMPILER=cl",
+            "-DCMAKE_CXX_COMPILER=cl",
+            "-DWARP_ENABLE_CUDA=${{ matrix.warp-enable-cuda }}"
+          )
+          if ("${{ matrix.warp-enable-cuda }}" -eq "ON") {
+            if (!$env:CUDA_PATH) {
+              throw "CUDA_PATH must be set"
+            }
+            $cmakeArgs += "-DWARP_CUDA_PATH:PATH=$env:CUDA_PATH"
+          }
+          cmake @cmakeArgs
+          cmake --build _build/cmake --parallel
+
+      - name: Verify Warp diagnostics
+        env:
+          WARP_CACHE_PATH: ${{ runner.temp }}${{ matrix.warp-cache-path-suffix }}
+        run: |
+          uv run python -c "import warp; info = warp.print_diagnostics(); assert not info['warp_native'].startswith('unknown'); assert not info['warp_clang'].startswith('unknown')"
+
+
+  check-cuda-toolkit:
+    if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Validate CUDA Toolkit tooling
+        run: |
+          uv run --no-project python tools/ci/cuda_toolkit.py validate-lock
+          uv run --no-project python tools/ci/test_cuda_toolkit.py
+
+
+  test-warp-cpu:
     if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
     runs-on: ${{ matrix.os }}
     needs: build-warp
     permissions:
       contents: read
+    env:
+      UV_PYTHON: ${{ matrix.python_request || '3.12' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-2025
             platform: windows
+            artifact-name: build-artifact-windows-cuda12
+            jax-extra: jax>=0.5
+          - os: windows-11-arm
+            platform: windows-aarch64
+            python_request: cpython-3.12-windows-aarch64-none
+            artifact-name: build-artifact-windows-aarch64-cpu
+            jax-extra: ""
           - os: ubuntu-24.04
             platform: ubuntu-x86_64
+            artifact-name: build-artifact-ubuntu-x86_64-cuda13
+            jax-extra: jax[cuda13]>=0.5
           - os: ubuntu-24.04-arm
             platform: ubuntu-aarch64
+            artifact-name: build-artifact-ubuntu-aarch64-cuda13
+            jax-extra: jax[cuda13]>=0.5
           - os: macos-latest
             platform: macos
+            artifact-name: build-artifact-macos
+            jax-extra: jax>=0.5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          persist-credentials: false
           lfs: true
       
       - name: Install uv
-        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57  # v8.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
-          version: "0.11.3"
+          version: "0.12.7"
       
       - name: Set up Python
         run: uv python install
       
       - name: Download Warp build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: build-artifact-${{ matrix.platform }}
+          name: ${{ matrix.artifact-name }}
           path: warp/bin/
       
       - name: Run Tests
+        if: matrix.jax-extra != ''
+        env:
+          WARP_CACHE_PATH: ${{ runner.temp }}/warp-cache-${{ matrix.artifact-name }}-tests
+        run: uv run --extra dev --with "${{ matrix.jax-extra }}" -m warp.tests --junit-report-xml rspec.xml -s autodetect
+
+      - name: Run Tests
+        if: matrix.jax-extra == ''
+        env:
+          WARP_CACHE_PATH: ${{ runner.temp }}/warp-cache-${{ matrix.artifact-name }}-tests
         run: uv run --extra dev -m warp.tests --junit-report-xml rspec.xml -s autodetect
       
       - name: Test Summary
@@ -149,22 +460,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          persist-credentials: false
           lfs: true
       
       - name: Install uv
-        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57  # v8.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
-          version: "0.11.3"
+          version: "0.12.7"
       
       - name: Set up Python
         run: uv python install
       
       - name: Download Warp build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: build-artifact-ubuntu-x86_64
+          name: build-artifact-ubuntu-x86_64-cuda13
           path: warp/bin/
       
       - name: Run Debug Mode Tests (CPU)
@@ -177,11 +489,193 @@ jobs:
           show: "fail"
         if: always()
 
-  test-warp-gpu:
-    runs-on: linux-amd64-gpu-h100-latest-1
-    needs: build-warp
-    # Only run on PRs (pull-request branches) or scheduled runs
-    if: github.repository == 'NVIDIA/warp' && (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'schedule')
+  # Compute whether the changes on a pull-request/* branch touch files relevant
+  # to GPU testing or to doctest. Always runs (cheap). Downstream jobs read the
+  # outputs to decide whether to run on PR branches; non-PR events (schedule,
+  # workflow_dispatch, push to main / release-* / tag) bypass these outputs via
+  # the dependent jobs' own `if:` blocks.
+  gpu-changes:
+    if: github.repository == 'NVIDIA/warp'
+    runs-on: ubuntu-latest
+    # Stay green for dependents on failure; combined with the `|| 'true'` fallback
+    # on the outputs below, this keeps PR-style branches from silently skipping
+    # GPU testing or doctest when the filter has a transient error.
+    continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      gpu_relevant: ${{ steps.filter-gpu.outputs.any_changed || 'true' }}
+      docs_relevant: ${{ steps.filter-docs.outputs.any_changed || 'true' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Fetch main for diff base
+        run: git fetch --depth=1 origin main
+
+      - name: Detect GPU-relevant changes
+        id: filter-gpu
+        uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad  # v47.0.5
+        with:
+          base_sha: origin/main
+          files: |
+            .github/actions/setup-warp-cuda/**
+            .github/workflows/ci.yml
+            .python-version
+            warp/**
+            pyproject.toml
+            tools/**
+            deps/*
+            build_lib.py
+            build_llvm.py
+            uv.lock
+
+      - name: Detect doctest-relevant changes
+        id: filter-docs
+        uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad  # v47.0.5
+        with:
+          base_sha: origin/main
+          files: docs/**
+
+  test-warp-gpu-linux:
+    runs-on: ${{ matrix.runner-label }}
+    needs: [build-warp, gpu-changes]
+    if: |
+      github.repository == 'NVIDIA/warp' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        startsWith(github.ref, 'refs/tags/') ||
+        github.ref == 'refs/heads/main' ||
+        startsWith(github.ref, 'refs/heads/release-') ||
+        needs.gpu-changes.outputs.gpu_relevant == 'true'
+      )
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner-label: linux-amd64-gpu-h100-latest-1
+            gpu-name: h100
+            artifact-name: build-artifact-ubuntu-x86_64-cuda13
+            python-version: "3.12"
+            torch-extra: torch-cu13
+            jax-extra: jax[cuda13]
+            rmm-args: ""
+          - runner-label: linux-amd64-gpu-rtxpro6000-latest-1
+            gpu-name: rtxpro6000
+            artifact-name: build-artifact-ubuntu-x86_64-cuda13
+            python-version: "3.12"
+            torch-extra: torch-cu13
+            jax-extra: jax[cuda13]
+            rmm-args: ""
+          - runner-label: linux-amd64-gpu-l4-earliest-1
+            gpu-name: l4
+            artifact-name: build-artifact-ubuntu-x86_64-cuda12
+            python-version: "3.12"
+            torch-extra: torch-cu12
+            jax-extra: jax[cuda12]
+            rmm-args: --with rmm-cu12
+          - runner-label: linux-arm64-gpu-l4-latest-1
+            gpu-name: l4-arm64
+            artifact-name: build-artifact-ubuntu-aarch64-cuda13
+            python-version: "3.14"
+            torch-extra: torch-cu13
+            jax-extra: jax[cuda13]
+            rmm-args: --with rmm-cu13
+    container:
+      image: ubuntu:24.04
+      options: -u root --security-opt seccomp=unconfined --shm-size 16g
+      env:
+        NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
+    timeout-minutes: 45
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      WARP_CACHE_PATH: /tmp/warp-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.gpu-name }}
+    steps:
+      - name: Display GPU information
+        run: nvidia-smi
+
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+        with:
+          enable-apt: true
+
+      - name: Install system dependencies
+        # curl and gpg are required by codecov/codecov-action@v6 to download and verify the uploader.
+        run: |
+          apt-get update
+          apt-get install -y git git-lfs curl gpg
+          git lfs install
+
+      - name: Install Python 3.14 build dependencies
+        if: matrix.python-version == '3.14'
+        run: apt-get install -y build-essential
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Download Warp build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: warp/bin/
+
+      - name: Report Warp diagnostics
+        # Warp counterpart to nvidia-smi: dump the build, CUDA, driver, and device
+        # snapshot into the log, then fail loudly if Warp enumerated no GPU (otherwise
+        # the test suite silently falls back to CPU-only and still passes green).
+        run: uv run --extra dev --extra ${{ matrix.torch-extra }} --with "${{ matrix.jax-extra }}" ${{ matrix.rmm-args }} python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+
+      - name: Run Tests
+        run: uv run --extra dev --extra ${{ matrix.torch-extra }} --with "${{ matrix.jax-extra }}" ${{ matrix.rmm-args }} -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect
+
+      - name: Test Summary
+        uses: test-summary/action@31493c76ec9e7aa675f1585d3ed6f1da69269a86  # v2.4
+        with:
+          paths: "rspec.xml"
+          show: "fail"
+        if: always()
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./rspec.xml
+          report_type: test_results
+          flags: test-warp-gpu-linux-${{ matrix.gpu-name }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage reports to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./coverage.xml
+          flags: test-warp-gpu-linux-${{ matrix.gpu-name }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-warp-gpu-linux-gb300:
+    # GB300 capacity is intentionally limited to one scheduled nightly job.
+    if: github.repository == 'NVIDIA/warp' && github.event_name == 'schedule'
+    runs-on: linux-arm64-gpu-gb300-latest-1
+    needs: [build-warp]
     permissions:
       contents: read
     container:
@@ -199,40 +693,387 @@ jobs:
         with:
           enable-apt: true
 
-      - name: Install git and git-lfs
+      - name: Install system dependencies
+        # curl and gpg are required by codecov/codecov-action@v6 to download and verify the uploader.
         run: |
           apt-get update
-          apt-get install -y git git-lfs
+          apt-get install -y git git-lfs curl gpg
           git lfs install
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          persist-credentials: false
           lfs: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57  # v8.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
-          version: "0.11.3"
-      
+          version: "0.12.7"
+
       - name: Set up Python
         run: uv python install
-      
+
       - name: Download Warp build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: build-artifact-ubuntu-x86_64
+          name: build-artifact-ubuntu-aarch64-cuda13
           path: warp/bin/
-      
+
+      - name: Report Warp diagnostics
+        # See the note in test-warp-gpu-linux; the Warp counterpart to nvidia-smi.
+        run: uv run --extra dev --with "jax[cuda13]" python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+
       - name: Run Tests
-        run: uv run --extra dev --extra torch-cu12 -m warp.tests --junit-report-xml rspec.xml -s autodetect
-      
+        run: uv run --extra dev --with "jax[cuda13]" -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect
+
       - name: Test Summary
         uses: test-summary/action@31493c76ec9e7aa675f1585d3ed6f1da69269a86  # v2.4
         with:
           paths: "rspec.xml"
           show: "fail"
         if: always()
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./rspec.xml
+          report_type: test_results
+          flags: test-warp-gpu-linux-gb300
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage reports to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./coverage.xml
+          flags: test-warp-gpu-linux-gb300
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-warp-gpu-linux-python-free-threaded:
+    runs-on: linux-amd64-gpu-rtxpro6000-latest-1
+    needs: [build-warp-python-free-threaded, gpu-changes]
+    if: |
+      github.repository == 'NVIDIA/warp' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        startsWith(github.ref, 'refs/tags/') ||
+        github.ref == 'refs/heads/main' ||
+        startsWith(github.ref, 'refs/heads/release-') ||
+        needs.gpu-changes.outputs.gpu_relevant == 'true'
+      )
+    permissions:
+      contents: read
+    container:
+      image: ubuntu:24.04
+      options: -u root --security-opt seccomp=unconfined --shm-size 16g
+      env:
+        NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
+    timeout-minutes: 45
+    steps:
+      - name: Display GPU information
+        run: nvidia-smi
+
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+        with:
+          enable-apt: true
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y git git-lfs curl gpg build-essential
+          git lfs install
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install 3.14t
+
+      - name: Download Warp build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: build-artifact-ubuntu-x86_64-cuda13-python314t
+          path: warp/bin/
+
+      # usd-core wheels use ABI tag "none" but are built against the regular
+      # (GIL) CPython ABI, so importing pxr on a free-threaded interpreter
+      # segfaults. Blosc also does not support free-threaded Python and importing
+      # its extension re-enables the GIL. Keep both packages out of this environment.
+      - name: Install Python dependencies
+        run: uv sync --python 3.14t --extra dev --no-install-package usd-core --no-install-package blosc
+
+      - name: Report Warp diagnostics
+        # See the note in test-warp-gpu-linux; the Warp counterpart to nvidia-smi.
+        run: uv run --python 3.14t --no-sync python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+
+      - name: Run Tests
+        run: uv run --python 3.14t --no-sync -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
+
+      - name: Test Summary
+        uses: test-summary/action@31493c76ec9e7aa675f1585d3ed6f1da69269a86  # v2.4
+        with:
+          paths: "rspec.xml"
+          show: "fail"
+        if: always()
+
+  test-warp-gpu-linux-mgpu-python310:
+    runs-on: linux-amd64-gpu-rtxpro6000-latest-2
+    needs: [build-warp, gpu-changes]
+    if: |
+      github.repository == 'NVIDIA/warp' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        startsWith(github.ref, 'refs/tags/') ||
+        github.ref == 'refs/heads/main' ||
+        startsWith(github.ref, 'refs/heads/release-') ||
+        needs.gpu-changes.outputs.gpu_relevant == 'true'
+      )
+    permissions:
+      contents: read
+    container:
+      image: ubuntu:24.04
+      options: -u root --security-opt seccomp=unconfined --shm-size 16g
+      env:
+        NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
+    env:
+      UV_PYTHON: "3.10"
+      WARP_CACHE_PATH: /tmp/warp-cache-${{ github.run_id }}-${{ github.run_attempt }}-mgpu-python310
+    timeout-minutes: 60
+    steps:
+      - name: Display GPU information
+        run: nvidia-smi
+
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+        with:
+          enable-apt: true
+
+      - name: Install system dependencies
+        # curl and gpg are required by codecov/codecov-action@v6 to download and verify the uploader.
+        run: |
+          apt-get update
+          apt-get install -y git git-lfs curl gpg
+          git lfs install
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Download Warp build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: build-artifact-ubuntu-x86_64-cuda13
+          path: warp/bin/
+
+      - name: Report Warp diagnostics
+        # See the note in test-warp-gpu-linux; the Warp counterpart to nvidia-smi.
+        run: uv run --extra dev python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+
+      - name: Run Tests
+        # Keep this minimum-Python lane focused on core Warp multi-GPU coverage;
+        # current JAX and PyTorch interoperability is covered by the standard Python GPU jobs.
+        run: uv run --extra dev -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect
+
+      - name: Test Summary
+        uses: test-summary/action@31493c76ec9e7aa675f1585d3ed6f1da69269a86  # v2.4
+        with:
+          paths: "rspec.xml"
+          show: "fail"
+        if: always()
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./rspec.xml
+          report_type: test_results
+          flags: test-warp-gpu-linux-mgpu-python310
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage reports to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./coverage.xml
+          flags: test-warp-gpu-linux-mgpu-python310
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-warp-gpu-windows:
+    runs-on: windows-amd64-gpu-rtxpro6000-latest-1
+    needs: [build-warp, gpu-changes]
+    if: |
+      github.repository == 'NVIDIA/warp' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        startsWith(github.ref, 'refs/tags/') ||
+        github.ref == 'refs/heads/main' ||
+        startsWith(github.ref, 'refs/heads/release-') ||
+        needs.gpu-changes.outputs.gpu_relevant == 'true'
+      )
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - name: Display GPU information
+        run: nvidia-smi
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Download Warp build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: build-artifact-windows-cuda13
+          path: warp/bin/
+
+      - name: Report Warp diagnostics
+        # See the note in test-warp-gpu-linux; the Warp counterpart to nvidia-smi.
+        run: uv run --extra dev --extra torch-cu13 --with usd-core==25.5.1 python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+
+      - name: Run Tests
+        # Pin usd-core to 25.5.1 to work around a frequent loading crash on Windows.
+        run: uv run --extra dev --extra torch-cu13 --with usd-core==25.5.1 -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect
+
+      - name: Test Summary
+        uses: test-summary/action@31493c76ec9e7aa675f1585d3ed6f1da69269a86  # v2.4
+        with:
+          paths: "rspec.xml"
+          show: "fail"
+        if: always()
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./rspec.xml
+          report_type: test_results
+          flags: test-warp-gpu-windows-rtxpro6000
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage reports to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true  # codecov upload is best-effort; do not fail the job on upload errors.
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        with:
+          disable_search: true
+          files: ./coverage.xml
+          flags: test-warp-gpu-windows-rtxpro6000
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Validate Sphinx doctests (RST testcode blocks and autodoc-extracted docstrings)
+  # against a real GPU. PR-style branches gate on the same filter as the GPU test
+  # rows, plus a docs/** filter for RST-only doctest changes.
+  test-warp-doctest:
+    runs-on: linux-amd64-gpu-l4-latest-1
+    needs: [build-warp, gpu-changes]
+    if: |
+      github.repository == 'NVIDIA/warp' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        startsWith(github.ref, 'refs/tags/') ||
+        github.ref == 'refs/heads/main' ||
+        startsWith(github.ref, 'refs/heads/release-') ||
+        needs.gpu-changes.outputs.gpu_relevant == 'true' ||
+        needs.gpu-changes.outputs.docs_relevant == 'true'
+      )
+    container:
+      image: ubuntu:24.04
+      options: -u root --security-opt seccomp=unconfined --shm-size 16g
+      env:
+        NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Display GPU information
+        run: nvidia-smi
+
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+        with:
+          enable-apt: true
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y git git-lfs
+          git lfs install
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Mark workspace as a safe git directory
+        # actions/checkout sets safe.directory in a temporary HOME that is
+        # discarded after the step. Subsequent steps that invoke git (here:
+        # build_docs.py invoking pre-commit) need their own persistent entry
+        # to avoid "dubious ownership" errors when the container runs as root.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Download Warp build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: build-artifact-ubuntu-x86_64-cuda13
+          path: warp/bin/
+
+      - name: Report Warp diagnostics
+        # See the note in test-warp-gpu-linux; the Warp counterpart to nvidia-smi.
+        run: uv run --extra docs python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+
+      - name: Run doctest
+        run: uv run --extra docs build_docs.py --doctest --no-html --warnings-as-errors
 
   build-docs:
     if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
@@ -244,23 +1085,25 @@ jobs:
       artifact-url: ${{ steps.build-docs-output.outputs.artifact-url }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57  # v8.0.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          version: "0.11.3"
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
       - name: Set up Python
         run: uv python install
       - name: Download Warp binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: build-artifact-ubuntu-x86_64
+          name: build-artifact-ubuntu-x86_64-cuda13
           path: warp/bin/
       - name: Build Sphinx documentation
         run: |
-          uv run --extra docs build_docs.py
+          uv run --extra docs build_docs.py --warnings-as-errors
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         id: build-docs-output
         with:
           name: build-docs-output
@@ -268,6 +1111,7 @@ jobs:
             warp/__init__.pyi
             docs/api_reference
             docs/language_reference
+          retention-days: ${{ github.repository == 'NVIDIA/warp' && 7 || 1 }}
 
   check-build-docs-output:
     if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
@@ -277,9 +1121,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Download build_docs.py output
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: build-docs-output
           path: .
@@ -292,44 +1138,238 @@ jobs:
 
   check-unnamespaced-symbols:
     if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
-    runs-on: ubuntu-latest
+    name: check-unnamespaced-symbols (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
     needs: build-warp
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64-cuda13
+            artifact-name: build-artifact-ubuntu-x86_64-cuda13
+            symbol-format: elf
+            allow-nv-optimus: false
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64-cuda13
+            artifact-name: build-artifact-ubuntu-aarch64-cuda13
+            symbol-format: elf
+            allow-nv-optimus: false
+          - os: windows-2022
+            platform: windows-x86_64-cuda13
+            artifact-name: build-artifact-windows-cuda13
+            symbol-format: pe
+            allow-nv-optimus: true
+          - os: macos-latest
+            platform: macos-aarch64-cpu
+            artifact-name: build-artifact-macos
+            symbol-format: macho
+            allow-nv-optimus: false
+          - os: windows-11-arm
+            platform: windows-aarch64-cpu
+            artifact-name: build-artifact-windows-aarch64-cpu
+            symbol-format: pe
+            allow-nv-optimus: false
     steps:
       - name: Download Warp build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: build-artifact-ubuntu-x86_64
+          name: ${{ matrix.artifact-name }}
           path: warp/bin/
-      - name: Check for un-namespaced symbols
+      - name: Check ELF exports
+        if: matrix.symbol-format == 'elf'
+        shell: bash
         run: |
-          echo "Checking for un-namespaced symbols..."
-          LIBRARIES_TO_CHECK="warp/bin/warp.so warp/bin/warp-clang.so"
-          found_symbols=""
+          set -uo pipefail
+          libraries=(warp/bin/warp.so warp/bin/warp-clang.so)
+          failed=0
 
-          for lib in $LIBRARIES_TO_CHECK; do
-            echo "--> Checking $lib"
-            if [ ! -f "$lib" ]; then
-              echo "ERROR: $lib not found"
-              found_symbols="true"
+          for library in "${libraries[@]}"; do
+            echo "--> Checking $library"
+            if [ ! -f "$library" ]; then
+              echo "::error::$library not found"
+              failed=1
               continue
             fi
-            output=$(readelf -Ws "$lib" | awk '$7 ~ /^[0-9]+$/ && $8 !~ /^_?wp_/ {print $8}' | grep -Ev '^(_Z|__|\.)' || true)
-            
-            if [ -n "$output" ]; then
-              echo "ERROR: Found un-namespaced symbols in $lib:"
-              echo "$output"
-              found_symbols="true"
+            if ! readelf_output=$(readelf --dyn-syms --wide "$library"); then
+              echo "::error::readelf failed for $library"
+              failed=1
+              continue
+            fi
+
+            symbols=()
+            while IFS= read -r symbol; do
+              [ -n "$symbol" ] && symbols+=("$symbol")
+            done < <(
+              printf '%s\n' "$readelf_output" \
+                | awk '$5 ~ /^(GLOBAL|WEAK)$/ && $7 != "UND" && NF >= 8 {sub(/@.*/, "", $8); if ($8 != "") print $8}' \
+                | sort -u
+            )
+            if [ "${#symbols[@]}" -eq 0 ]; then
+              echo "::error::No exports were parsed from $library"
+              failed=1
+              continue
+            fi
+
+            unexpected=()
+            library_name=$(basename "$library")
+            for symbol in "${symbols[@]}"; do
+              case "$symbol" in
+                wp_*|_wp_*|PyInit__warp_*) continue ;;
+              esac
+              if [ "$library_name" = "warp-clang.so" ] \
+                && { [ "$symbol" = "__jit_debug_descriptor" ] \
+                  || [ "$symbol" = "__jit_debug_register_code" ]; }; then
+                continue
+              fi
+              unexpected+=("$symbol")
+            done
+
+            if [ "${#unexpected[@]}" -ne 0 ]; then
+              echo "::error::Unexpected exports in $library"
+              printf '  %s\n' "${unexpected[@]}"
+              failed=1
             fi
           done
 
-          if [ -n "$found_symbols" ]; then
-            echo "FAIL: Un-namespaced symbols detected. Please prefix them with 'wp_' or '_wp_'."
-            exit 1
-          fi
+          [ "$failed" -eq 0 ] || exit 1
+      - name: Check Mach-O exports
+        if: matrix.symbol-format == 'macho'
+        shell: bash
+        run: |
+          set -uo pipefail
+          libraries=(warp/bin/libwarp.dylib warp/bin/libwarp-clang.dylib)
+          failed=0
 
-          echo "SUCCESS: All symbols are correctly namespaced."
+          for library in "${libraries[@]}"; do
+            echo "--> Checking $library"
+            if [ ! -f "$library" ]; then
+              echo "::error::$library not found"
+              failed=1
+              continue
+            fi
+            if ! nm_output=$(nm -gjU "$library"); then
+              echo "::error::nm failed for $library"
+              failed=1
+              continue
+            fi
+
+            symbols=()
+            while IFS= read -r symbol; do
+              [ -n "$symbol" ] && symbols+=("$symbol")
+            done < <(printf '%s\n' "$nm_output" | sed 's/^_//' | sort -u)
+            if [ "${#symbols[@]}" -eq 0 ]; then
+              echo "::error::No exports were parsed from $library"
+              failed=1
+              continue
+            fi
+
+            unexpected=()
+            library_name=$(basename "$library")
+            for symbol in "${symbols[@]}"; do
+              case "$symbol" in
+                wp_*|_wp_*|PyInit__warp_*) continue ;;
+              esac
+              if [ "$library_name" = "libwarp-clang.dylib" ] \
+                && { [ "$symbol" = "__jit_debug_descriptor" ] \
+                  || [ "$symbol" = "__jit_debug_register_code" ]; }; then
+                continue
+              fi
+              unexpected+=("$symbol")
+            done
+
+            if [ "${#unexpected[@]}" -ne 0 ]; then
+              echo "::error::Unexpected exports in $library"
+              printf '  %s\n' "${unexpected[@]}"
+              failed=1
+            fi
+          done
+
+          [ "$failed" -eq 0 ] || exit 1
+      - name: Check PE exports
+        if: matrix.symbol-format == 'pe'
+        env:
+          ALLOW_NV_OPTIMUS: ${{ matrix.allow-nv-optimus }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path -LiteralPath $vswhere)) {
+            throw "vswhere.exe was not found"
+          }
+          $dumpbin = & $vswhere -latest -products '*' -find 'VC\Tools\MSVC\**\dumpbin.exe' | Select-Object -First 1
+          if (!$dumpbin) {
+            throw "vswhere found no dumpbin.exe"
+          }
+
+          $libraries = @("warp/bin/warp.dll", "warp/bin/warp-clang.dll")
+          $failed = $false
+          foreach ($library in $libraries) {
+            Write-Host "--> Checking $library"
+            if (!(Test-Path -LiteralPath $library)) {
+              Write-Host "::error::$library not found"
+              $failed = $true
+              continue
+            }
+
+            $dumpbinOutput = & $dumpbin /nologo /exports $library 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::dumpbin failed for $library"
+              $dumpbinOutput | Write-Host
+              $failed = $true
+              continue
+            }
+            $symbols = @(
+              $dumpbinOutput |
+                ForEach-Object {
+                  if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') {
+                    $Matches[1]
+                  }
+                } |
+                Sort-Object -Unique
+            )
+            if ($symbols.Count -eq 0) {
+              Write-Host "::error::No exports were parsed from $library"
+              $failed = $true
+              continue
+            }
+
+            $libraryName = Split-Path -Leaf $library
+            $unexpected = [System.Collections.Generic.List[string]]::new()
+            foreach ($symbol in $symbols) {
+              $allowed = $symbol.StartsWith("wp_") `
+                -or $symbol.StartsWith("_wp_") `
+                -or $symbol.StartsWith("PyInit__warp_")
+              if ($libraryName -eq "warp-clang.dll" -and $symbol -in @(
+                "__jit_debug_descriptor",
+                "__jit_debug_register_code"
+              )) {
+                $allowed = $true
+              }
+              if (
+                $env:ALLOW_NV_OPTIMUS -eq "true" `
+                  -and $libraryName -eq "warp.dll" `
+                  -and $symbol -eq "NvOptimusEnablementCuda"
+              ) {
+                $allowed = $true
+              }
+              if (!$allowed) {
+                $unexpected.Add($symbol)
+              }
+            }
+
+            if ($unexpected.Count -ne 0) {
+              Write-Host "::error::Unexpected exports in $library"
+              $unexpected | Sort-Object | ForEach-Object { Write-Host "  $_" }
+              $failed = $true
+            }
+          }
+
+          if ($failed) {
+            throw "Unexpected exported symbols were found"
+          }
 
   # Validate that the type stub file (warp/__init__.pyi) passes static type checking.
   type-check-stubs:
@@ -339,14 +1379,16 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57  # v8.0.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          version: "0.11.3"
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.12.7"
       - name: Set up Python
         run: uv python install
       - name: Run pyright on stub file
-        run: uvx pyright warp/__init__.pyi
+        run: uvx pyright warp/__init__.pyi tools/ci/stub_typecheck_fixture.py
       - name: Run mypy on stub file
-        run: uvx mypy warp/__init__.pyi --follow-imports=silent
+        run: uvx mypy warp/__init__.pyi tools/ci/stub_typecheck_fixture.py --follow-imports=silent

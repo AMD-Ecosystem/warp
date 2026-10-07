@@ -7,7 +7,10 @@
 #include "volume_builder.h"
 #include "volume_impl.h"
 
+#include <algorithm>
+#include <cstring>
 #include <map>
+#include <vector>
 
 using namespace wp;
 
@@ -15,18 +18,25 @@ namespace {
 
 struct VolumeDesc {
     // NanoVDB buffer either in device or host memory
-    void* buffer;
-    uint64_t size_in_bytes;
-    bool owner;  // whether the buffer should be deallocated when the volume is destroyed
+    void* buffer = nullptr;
+    uint64_t size_in_bytes = 0;
+    bool owner = false;  // whether the buffer should be deallocated when the volume is destroyed
 
-    pnanovdb_grid_t grid_data;
-    pnanovdb_tree_t tree_data;
+    pnanovdb_grid_t grid_data {};
+    pnanovdb_tree_t tree_data {};
 
-    // Host-accessible version of the blind metadata (copy if GPU, alias if CPU)
-    pnanovdb_gridblindmetadata_t* blind_metadata;
+    // Keep a host-side snapshot so accessors use the same validated, stable
+    // metadata for host and device volumes.
+    std::vector<pnanovdb_gridblindmetadata_t> blind_metadata;
 
     // CUDA context for this volume (NULL if CPU)
-    void* context;
+    void* context = nullptr;
+
+    // Rebuildable CUDA volumes keep actual counts on the device. The host descriptor
+    // stores capacities so callers can allocate upper-bound output arrays without
+    // forcing a device-to-host count copy during graph capture.
+    bool rebuildable = false;
+    VolumeRebuildCapacities capacities;
 
     pnanovdb_buf_t as_pnano() const { return pnanovdb_make_buf(static_cast<uint32_t*>(buffer), size_in_bytes); }
 };
@@ -53,9 +63,143 @@ bool volume_exists(const void* id)
     return volume_get_descriptor((uint64_t)id, volume);
 }
 
+bool volume_resolve_relative_range(
+    uint64_t base_offset, int64_t relative_offset, uint64_t value_count, uint32_t value_size, uint64_t grid_size
+)
+{
+    if (base_offset > grid_size)
+        return false;
+
+    uint64_t data_offset;
+    if (relative_offset < 0) {
+        // Avoid negating INT64_MIN directly; -(x + 1) remains representable.
+        const uint64_t magnitude = uint64_t(-(relative_offset + 1)) + 1;
+        if (magnitude > base_offset)
+            return false;
+        data_offset = base_offset - magnitude;
+    } else {
+        const uint64_t offset = uint64_t(relative_offset);
+        if (offset > grid_size - base_offset)
+            return false;
+        data_offset = base_offset + offset;
+    }
+
+    // Division avoids overflowing when converting the element count to bytes.
+    return value_size == 0 || value_count <= (grid_size - data_offset) / value_size;
+}
+
+bool volume_validate_grid_metadata(
+    const pnanovdb_grid_t& grid_data, uint64_t buffer_size, uint64_t& metadata_offset, uint64_t& metadata_size
+)
+{
+    // A NanoVDB grid starts with a grid header followed by a tree header.
+    const uint64_t minimum_grid_size = sizeof(pnanovdb_grid_t) + sizeof(pnanovdb_tree_t);
+    if (grid_data.grid_size < minimum_grid_size || grid_data.grid_size > buffer_size)
+        return false;
+
+    // Names cross the C ABI and must terminate within their fixed-size fields.
+    if (std::memchr(grid_data.grid_name, '\0', sizeof(grid_data.grid_name)) == nullptr)
+        return false;
+
+    // The metadata table offset is relative to the grid and must resolve within it.
+    if (grid_data.blind_metadata_offset < 0)
+        return false;
+
+    metadata_offset = uint64_t(grid_data.blind_metadata_offset);
+    if (metadata_offset > grid_data.grid_size)
+        return false;
+
+    const uint64_t available = grid_data.grid_size - metadata_offset;
+    // Bound the count before computing the table size to avoid multiplication overflow.
+    if (grid_data.blind_metadata_count > available / sizeof(pnanovdb_gridblindmetadata_t))
+        return false;
+
+    metadata_size = uint64_t(grid_data.blind_metadata_count) * sizeof(pnanovdb_gridblindmetadata_t);
+    return true;
+}
+
+bool volume_validate_blind_metadata(
+    const pnanovdb_grid_t& grid_data,
+    const std::vector<pnanovdb_gridblindmetadata_t>& blind_metadata,
+    uint64_t metadata_offset
+)
+{
+    for (uint64_t i = 0; i < blind_metadata.size(); ++i) {
+        const pnanovdb_gridblindmetadata_t& metadata = blind_metadata[i];
+        if (std::memchr(metadata.name, '\0', sizeof(metadata.name)) == nullptr)
+            return false;
+
+        // NanoVDB data offsets are relative to the containing metadata entry.
+        const uint64_t entry_offset = metadata_offset + i * sizeof(pnanovdb_gridblindmetadata_t);
+        if (!volume_resolve_relative_range(
+                entry_offset, metadata.data_offset, metadata.value_count, metadata.value_size, grid_data.grid_size
+            )) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void volume_add_descriptor(uint64_t id, VolumeDesc&& volumeDesc) { g_volume_descriptors[id] = std::move(volumeDesc); }
 
 void volume_rem_descriptor(uint64_t id) { g_volume_descriptors.erase(id); }
+
+void volume_copy_live_metadata(const VolumeDesc* volume, pnanovdb_grid_t& grid_data, pnanovdb_tree_t& tree_data)
+{
+    if (volume->context) {
+        ContextGuard guard(volume->context);
+        void* stream = wp_cuda_stream_get_current();
+        wp_memcpy_d2h(WP_CURRENT_CONTEXT, &grid_data, volume->buffer, sizeof(pnanovdb_grid_t), stream);
+        wp_memcpy_d2h(
+            WP_CURRENT_CONTEXT, &tree_data, static_cast<pnanovdb_grid_t*>(volume->buffer) + 1, sizeof(pnanovdb_tree_t),
+            stream
+        );
+        wp_cuda_stream_synchronize(stream);
+    } else {
+        std::memcpy(&grid_data, volume->buffer, sizeof(pnanovdb_grid_t));
+        std::memcpy(&tree_data, static_cast<pnanovdb_grid_t*>(volume->buffer) + 1, sizeof(pnanovdb_tree_t));
+    }
+}
+
+void volume_mark_rebuildable(uint64_t id, const VolumeRebuildCapacities& capacities)
+{
+    auto iter = g_volume_descriptors.find(id);
+    if (iter == g_volume_descriptors.end())
+        return;
+
+    iter->second.rebuildable = true;
+    iter->second.capacities = capacities;
+}
+
+void volume_set_host_status(uint32_t* status, uint32_t value)
+{
+    if (status) {
+        *status = value;
+    }
+}
+
+VolumeRebuildCapacities
+volume_tile_rebuild_capacities(uint32_t max_tiles, uint32_t max_lower_nodes, uint32_t max_upper_nodes)
+{
+    VolumeRebuildCapacities capacities;
+    capacities.leaf_count = max_tiles;
+    capacities.lower_count = max_lower_nodes ? max_lower_nodes : max_tiles;
+    capacities.upper_count = max_upper_nodes ? max_upper_nodes : capacities.lower_count;
+    capacities.voxel_count = uint64_t(capacities.leaf_count) * PNANOVDB_LEAF_TABLE_COUNT;
+    return capacities;
+}
+
+VolumeRebuildCapacities volume_voxel_rebuild_capacities(
+    uint32_t max_active_voxels, uint32_t max_leaf_nodes, uint32_t max_lower_nodes, uint32_t max_upper_nodes
+)
+{
+    VolumeRebuildCapacities capacities;
+    capacities.voxel_count = max_active_voxels;
+    capacities.leaf_count = max_leaf_nodes ? max_leaf_nodes : max_active_voxels;
+    capacities.lower_count = max_lower_nodes ? max_lower_nodes : capacities.leaf_count;
+    capacities.upper_count = max_upper_nodes ? max_upper_nodes : capacities.lower_count;
+    return capacities;
+}
 
 void volume_set_map(nanovdb::Map& map, const float transform[9], const float translation[3])
 {
@@ -85,8 +229,8 @@ uint64_t wp_volume_create_host(void* buf, uint64_t size, bool copy, bool owner)
     VolumeDesc volume;
     volume.context = NULL;
 
-    wp_memcpy_h2h(&volume.grid_data, buf, sizeof(pnanovdb_grid_t));
-    wp_memcpy_h2h(&volume.tree_data, (pnanovdb_grid_t*)buf + 1, sizeof(pnanovdb_tree_t));
+    std::memcpy(&volume.grid_data, buf, sizeof(pnanovdb_grid_t));
+    std::memcpy(&volume.tree_data, (pnanovdb_grid_t*)buf + 1, sizeof(pnanovdb_tree_t));
 
     if (volume.grid_data.magic != PNANOVDB_MAGIC_NUMBER && volume.grid_data.magic != PNANOVDB_MAGIC_GRID)
         return 0;
@@ -95,21 +239,28 @@ uint64_t wp_volume_create_host(void* buf, uint64_t size, bool copy, bool owner)
         size = volume.grid_data.grid_size;
     }
 
+    uint64_t metadata_offset;
+    uint64_t metadata_size;
+    if (!volume_validate_grid_metadata(volume.grid_data, size, metadata_offset, metadata_size))
+        return 0;
+
+    volume.blind_metadata.resize(volume.grid_data.blind_metadata_count);
+    if (metadata_size > 0) {
+        std::memcpy(volume.blind_metadata.data(), static_cast<uint8_t*>(buf) + metadata_offset, metadata_size);
+    }
+    if (!volume_validate_blind_metadata(volume.grid_data, volume.blind_metadata, metadata_offset))
+        return 0;
+
     // Copy or alias buffer
     volume.size_in_bytes = size;
     if (copy) {
         volume.buffer = wp_alloc_host(size, "(native:volume)");
-        wp_memcpy_h2h(volume.buffer, buf, size);
+        std::memcpy(volume.buffer, buf, size);
         volume.owner = true;
     } else {
         volume.buffer = buf;
         volume.owner = owner;
     }
-
-    // Alias blind metadata
-    volume.blind_metadata = reinterpret_cast<pnanovdb_gridblindmetadata_t*>(
-        static_cast<uint8_t*>(volume.buffer) + volume.grid_data.blind_metadata_offset
-    );
 
     uint64_t id = (uint64_t)volume.buffer;
 
@@ -134,9 +285,10 @@ uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool c
     VolumeDesc volume;
     volume.context = context ? context : wp_cuda_context_get_current();
 
-    wp_memcpy_d2h(WP_CURRENT_CONTEXT, &volume.grid_data, buf, sizeof(pnanovdb_grid_t));
-    wp_memcpy_d2h(WP_CURRENT_CONTEXT, &volume.tree_data, (pnanovdb_grid_t*)buf + 1, sizeof(pnanovdb_tree_t));
-    // no sync needed since the above copies are to pageable memory
+    void* stream = wp_cuda_stream_get_current();
+    wp_memcpy_d2h(WP_CURRENT_CONTEXT, &volume.grid_data, buf, sizeof(pnanovdb_grid_t), stream);
+    wp_memcpy_d2h(WP_CURRENT_CONTEXT, &volume.tree_data, (pnanovdb_grid_t*)buf + 1, sizeof(pnanovdb_tree_t), stream);
+    wp_cuda_stream_synchronize(stream);
 
     if (volume.grid_data.magic != PNANOVDB_MAGIC_NUMBER && volume.grid_data.magic != PNANOVDB_MAGIC_GRID)
         return 0;
@@ -144,6 +296,22 @@ uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool c
     if (size == 0) {
         size = volume.grid_data.grid_size;
     }
+
+    uint64_t metadata_offset;
+    uint64_t metadata_size;
+    if (!volume_validate_grid_metadata(volume.grid_data, size, metadata_offset, metadata_size))
+        return 0;
+
+    volume.blind_metadata.resize(volume.grid_data.blind_metadata_count);
+    if (metadata_size > 0) {
+        wp_memcpy_d2h(
+            WP_CURRENT_CONTEXT, volume.blind_metadata.data(), static_cast<uint8_t*>(buf) + metadata_offset,
+            metadata_size, stream
+        );
+        wp_cuda_stream_synchronize(stream);
+    }
+    if (!volume_validate_blind_metadata(volume.grid_data, volume.blind_metadata, metadata_offset))
+        return 0;
 
     // Copy or alias data buffer
     volume.size_in_bytes = size;
@@ -156,18 +324,70 @@ uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool c
         volume.owner = owner;
     }
 
-    // Make blind metadata accessible on host
-    const uint64_t blindmetadata_size = volume.grid_data.blind_metadata_count * sizeof(pnanovdb_gridblindmetadata_t);
-    volume.blind_metadata
-        = static_cast<pnanovdb_gridblindmetadata_t*>(wp_alloc_pinned(blindmetadata_size, "(native:volume)"));
-    wp_memcpy_d2h(
-        WP_CURRENT_CONTEXT, volume.blind_metadata,
-        static_cast<uint8_t*>(volume.buffer) + volume.grid_data.blind_metadata_offset, blindmetadata_size
-    );
-
     uint64_t id = (uint64_t)volume.buffer;
     volume_add_descriptor(id, std::move(volume));
 
+    return id;
+}
+
+template <typename BuildT>
+uint64_t volume_create_rebuildable_device(
+    void* context,
+    nanovdb::Grid<nanovdb::NanoTree<BuildT>>* grid,
+    uint64_t grid_size,
+    const VolumeRebuildCapacities& capacities,
+    const BuildGridParams<BuildT>& params
+)
+{
+    if (grid == nullptr || grid_size < sizeof(pnanovdb_grid_t) + sizeof(pnanovdb_tree_t) || volume_exists(grid))
+        return 0;
+
+    VolumeDesc volume;
+    volume.context = context ? context : wp_cuda_context_get_current();
+    volume.buffer = grid;
+    volume.size_in_bytes = grid_size;
+    volume.owner = true;
+    volume.rebuildable = true;
+    volume.capacities = capacities;
+
+    volume.grid_data.magic = NANOVDB_MAGIC_GRID;
+    volume.grid_data.checksum = ~uint64_t(0);
+    volume.grid_data.version = pnanovdb_make_version(
+        PNANOVDB_MAJOR_VERSION_NUMBER, PNANOVDB_MINOR_VERSION_NUMBER, PNANOVDB_PATCH_VERSION_NUMBER
+    );
+    volume.grid_data.flags = uint32_t(nanovdb::GridFlags::HasBBox) | uint32_t(nanovdb::GridFlags::IsBreadthFirst);
+    volume.grid_data.grid_count = 1u;
+    volume.grid_data.grid_size = grid_size;
+    static_assert(sizeof(volume.grid_data.map) == sizeof(params.map));
+    std::memcpy(&volume.grid_data.map, &params.map, sizeof(params.map));
+    const nanovdb::Vec3d voxel_size = params.map.getVoxelSize();
+    for (int k = 0; k < 3; ++k)
+        volume.grid_data.voxel_size[k] = voxel_size[k];
+    volume.grid_data.grid_class = nanovdb::BuildTraits<BuildT>::is_index ? uint32_t(nanovdb::GridClass::IndexGrid)
+                                                                         : uint32_t(nanovdb::GridClass::Unknown);
+    volume.grid_data.grid_type = uint32_t(nanovdb::toGridType<BuildT>());
+    volume.grid_data.blind_metadata_offset = grid_size;
+
+    const uint64_t root_offset = nanovdb::NanoTree<BuildT>::memUsage();
+    const uint64_t upper_offset = root_offset + nanovdb::NanoRoot<BuildT>::memUsage(capacities.upper_count);
+    const uint64_t lower_offset
+        = upper_offset + nanovdb::NanoUpper<BuildT>::memUsage() * uint64_t(capacities.upper_count);
+    const uint64_t leaf_offset
+        = lower_offset + nanovdb::NanoLower<BuildT>::memUsage() * uint64_t(capacities.lower_count);
+    volume.tree_data.node_offset_root = root_offset;
+    volume.tree_data.node_offset_upper = upper_offset;
+    volume.tree_data.node_offset_lower = lower_offset;
+    volume.tree_data.node_offset_leaf = leaf_offset;
+    volume.tree_data.node_count_upper = capacities.upper_count;
+    volume.tree_data.node_count_lower = capacities.lower_count;
+    volume.tree_data.node_count_leaf = capacities.leaf_count;
+    volume.tree_data.tile_count_upper = capacities.upper_count;
+    volume.tree_data.tile_count_lower = capacities.lower_count;
+    volume.tree_data.tile_count_leaf = capacities.leaf_count;
+    volume.tree_data.voxel_count = capacities.voxel_count;
+
+    uint64_t id = reinterpret_cast<uint64_t>(grid);
+    volume_add_descriptor(id, std::move(volume));
     return id;
 }
 
@@ -202,6 +422,12 @@ void wp_volume_get_tile_and_voxel_count(uint64_t id, uint32_t& tile_count, uint6
 
     const VolumeDesc* volume;
     if (volume_get_descriptor(id, volume)) {
+        if (volume->rebuildable) {
+            tile_count = volume->capacities.leaf_count;
+            voxel_count = volume->capacities.voxel_count;
+            return;
+        }
+
         tile_count = volume->tree_data.node_count_leaf;
 
         const uint32_t grid_type = volume->grid_data.grid_type;
@@ -216,6 +442,39 @@ void wp_volume_get_tile_and_voxel_count(uint64_t id, uint32_t& tile_count, uint6
             // all leaf voxels are indexable
             voxel_count = uint64_t(tile_count) * PNANOVDB_LEAF_TABLE_COUNT;
         }
+    }
+}
+
+void wp_volume_get_active_stats(
+    uint64_t id, uint64_t* voxel_count, uint32_t* leaf_count, uint32_t* lower_count, uint32_t* upper_count
+)
+{
+    *voxel_count = 0;
+    *leaf_count = 0;
+    *lower_count = 0;
+    *upper_count = 0;
+
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume)) {
+        return;
+    }
+
+    pnanovdb_grid_t grid_data {};
+    pnanovdb_tree_t tree_data {};
+    volume_copy_live_metadata(volume, grid_data, tree_data);
+
+    *leaf_count = tree_data.node_count_leaf;
+    *lower_count = tree_data.node_count_lower;
+    *upper_count = tree_data.node_count_upper;
+
+    switch (grid_data.grid_type) {
+    case PNANOVDB_GRID_TYPE_ONINDEX:
+    case PNANOVDB_GRID_TYPE_ONINDEXMASK:
+        *voxel_count = tree_data.voxel_count;
+        break;
+    default:
+        *voxel_count = uint64_t(*leaf_count) * PNANOVDB_LEAF_TABLE_COUNT;
+        break;
     }
 }
 
@@ -284,19 +543,16 @@ const char* wp_volume_get_blind_data_info(
 
 void wp_volume_get_tiles_host(uint64_t id, void* buf)
 {
-    static constexpr uint32_t MASK = (1u << 3u) - 1u;  // mask for bit operations
-
     const VolumeDesc* volume;
     if (volume_get_descriptor(id, volume)) {
-        const uint32_t leaf_count = volume->tree_data.node_count_leaf;
+        uint32_t leaf_count;
+        uint64_t voxel_count;
+        wp_volume_get_tile_and_voxel_count(id, leaf_count, voxel_count);
 
         pnanovdb_coord_t* leaf_coords = static_cast<pnanovdb_coord_t*>(buf);
-
-        const uint64_t first_leaf
-            = (uint64_t)volume->buffer + sizeof(pnanovdb_grid_t) + volume->tree_data.node_offset_leaf;
-        const uint32_t leaf_stride = PNANOVDB_GRID_TYPE_GET(volume->grid_data.grid_type, leaf_size);
-
         const pnanovdb_buf_t pnano_buf = volume->as_pnano();
+        const uint32_t actual_leaf_count = pnanovdb_tree_get_node_count_leaf(pnano_buf, volume::get_tree(pnano_buf));
+        leaf_count = std::min(leaf_count, actual_leaf_count);
 
         for (uint32_t i = 0; i < leaf_count; ++i) {
             pnanovdb_leaf_handle_t leaf = volume::get_leaf(pnano_buf, i);
@@ -316,6 +572,12 @@ void wp_volume_get_voxels_host(uint64_t id, void* buf)
         pnanovdb_coord_t* voxel_coords = static_cast<pnanovdb_coord_t*>(buf);
 
         const pnanovdb_buf_t pnano_buf = volume->as_pnano();
+        const pnanovdb_tree_handle_t tree = volume::get_tree(pnano_buf);
+        const uint32_t actual_leaf_count = pnanovdb_tree_get_node_count_leaf(pnano_buf, tree);
+        const uint64_t actual_voxel_count = volume::effective_voxel_count(pnano_buf);
+        leaf_count = std::min(leaf_count, actual_leaf_count);
+        voxel_count = std::min(voxel_count, actual_voxel_count);
+
         for (uint32_t i = 0; i < leaf_count; ++i) {
             pnanovdb_leaf_handle_t leaf = volume::get_leaf(pnano_buf, i);
             pnanovdb_coord_t leaf_coords = volume::leaf_origin(pnano_buf, leaf);
@@ -348,34 +610,26 @@ void wp_volume_destroy_host(uint64_t id)
     }
 }
 
-void wp_volume_destroy_device(uint64_t id)
-{
-    const VolumeDesc* volume;
-    if (volume_get_descriptor(id, volume)) {
-        ContextGuard guard(volume->context);
-        if (volume->owner) {
-            wp_free_device(WP_CURRENT_CONTEXT, volume->buffer);
-        }
-        wp_free_pinned(volume->blind_metadata);
-        volume_rem_descriptor(id);
-    }
-}
-
-#if WP_ENABLE_CUDA
-
-uint64_t wp_volume_from_tiles_device(
-    void* context,
+uint64_t wp_volume_from_tiles_host(
     void* points,
     int num_points,
+    const int32_t* point_mask,
     float transform[9],
     float translation[3],
     bool points_in_world_space,
     const void* value_ptr,
     uint32_t value_size,
-    const char* value_type
+    const char* value_type,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
 )
 {
     char gridTypeStr[12];
+    const VolumeRebuildCapacities capacities
+        = volume_tile_rebuild_capacities(max_tiles, max_lower_nodes, max_upper_nodes);
 
 #define EXPAND_BUILDER_TYPE(type)                                                                                      \
     nanovdb::toStr(gridTypeStr, nanovdb::toGridType<type>());                                                          \
@@ -386,8 +640,244 @@ uint64_t wp_volume_from_tiles_device(
         volume_set_map(params.map, transform, translation);                                                            \
         size_t gridSize;                                                                                               \
         nanovdb::Grid<nanovdb::NanoTree<type>>* grid;                                                                  \
-        build_grid_from_points(grid, gridSize, points, num_points, points_in_world_space, params);                     \
-        return wp_volume_create_device(context, grid, gridSize, false, true);                                             \
+        if (rebuildable)                                                                                               \
+        {                                                                                                              \
+            allocate_rebuildable_grid_from_tiles_host(                                                                 \
+                grid, gridSize, points, num_points, points_in_world_space, point_mask, capacities, params, status       \
+            );                                                                                                         \
+            uint64_t id = wp_volume_create_host(grid, gridSize, false, true);                                          \
+            volume_mark_rebuildable(id, capacities);                                                                   \
+            return id;                                                                                                 \
+        }                                                                                                              \
+        allocate_grid_from_tiles_host(grid, gridSize, points, num_points, points_in_world_space, point_mask, params);   \
+        return wp_volume_create_host(grid, gridSize, false, true);                                                     \
+    }
+
+    WP_VOLUME_BUILDER_INSTANTIATE_TYPES
+#undef EXPAND_BUILDER_TYPE
+
+    return 0;
+}
+
+uint64_t wp_volume_index_from_tiles_host(
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
+)
+{
+    nanovdb::IndexGrid* grid;
+    size_t gridSize;
+    BuildGridParams<nanovdb::ValueIndex> params;
+    volume_set_map(params.map, transform, translation);
+
+    if (rebuildable) {
+        const VolumeRebuildCapacities capacities
+            = volume_tile_rebuild_capacities(max_tiles, max_lower_nodes, max_upper_nodes);
+        allocate_rebuildable_grid_from_tiles_host(
+            grid, gridSize, points, num_points, points_in_world_space, point_mask, capacities, params, status
+        );
+
+        uint64_t id = wp_volume_create_host(grid, gridSize, false, true);
+        volume_mark_rebuildable(id, capacities);
+        return id;
+    }
+
+    allocate_grid_from_tiles_host(grid, gridSize, points, num_points, points_in_world_space, point_mask, params);
+    return wp_volume_create_host(grid, gridSize, false, true);
+}
+
+uint64_t wp_volume_from_active_voxels_host(
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_active_voxels,
+    uint32_t max_leaf_nodes,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
+)
+{
+    nanovdb::OnIndexGrid* grid;
+    size_t gridSize;
+    BuildGridParams<nanovdb::ValueOnIndex> params;
+    volume_set_map(params.map, transform, translation);
+
+    if (rebuildable) {
+        const VolumeRebuildCapacities capacities
+            = volume_voxel_rebuild_capacities(max_active_voxels, max_leaf_nodes, max_lower_nodes, max_upper_nodes);
+        allocate_rebuildable_grid_from_active_voxels_host(
+            grid, gridSize, points, num_points, points_in_world_space, point_mask, capacities, params, status
+        );
+
+        uint64_t id = wp_volume_create_host(grid, gridSize, false, true);
+        volume_mark_rebuildable(id, capacities);
+        return id;
+    }
+
+    allocate_grid_from_active_voxels_host(
+        grid, gridSize, points, num_points, points_in_world_space, point_mask, params
+    );
+    return wp_volume_create_host(grid, gridSize, false, true);
+}
+
+void wp_volume_rebuild_from_tiles_host(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    const void* value_ptr,
+    uint32_t value_size,
+    const char* value_type,
+    uint32_t* status
+)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume) || !volume->rebuildable) {
+        volume_set_host_status(status, WP_VOLUME_REBUILD_INVALID_INPUT);
+        return;
+    }
+
+    char gridTypeStr[12];
+
+#define EXPAND_BUILDER_TYPE(type)                                                                                      \
+    nanovdb::toStr(gridTypeStr, nanovdb::toGridType<type>());                                                          \
+    if (strncmp(gridTypeStr, value_type, sizeof(gridTypeStr)) == 0)                                                    \
+    {                                                                                                                  \
+        BuildGridParams<type> params;                                                                                  \
+        memcpy(&params.background_value, value_ptr, value_size);                                                       \
+        volume_set_map(params.map, transform, translation);                                                            \
+        rebuild_grid_from_tiles_host(                                                                                  \
+            reinterpret_cast<nanovdb::Grid<nanovdb::NanoTree<type>>*>(volume->buffer), volume->size_in_bytes, points,  \
+            num_points, points_in_world_space, point_mask, volume->capacities, params, status                          \
+        );                                                                                                             \
+        return;                                                                                                        \
+    }
+
+    WP_VOLUME_BUILDER_INSTANTIATE_TYPES
+#undef EXPAND_BUILDER_TYPE
+
+    volume_set_host_status(status, WP_VOLUME_REBUILD_INVALID_INPUT);
+}
+
+void wp_volume_index_rebuild_from_tiles_host(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume) || !volume->rebuildable) {
+        volume_set_host_status(status, WP_VOLUME_REBUILD_INVALID_INPUT);
+        return;
+    }
+
+    BuildGridParams<nanovdb::ValueIndex> params;
+    volume_set_map(params.map, transform, translation);
+    rebuild_grid_from_tiles_host(
+        reinterpret_cast<nanovdb::IndexGrid*>(volume->buffer), volume->size_in_bytes, points, num_points,
+        points_in_world_space, point_mask, volume->capacities, params, status
+    );
+}
+
+void wp_volume_rebuild_from_active_voxels_host(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume) || !volume->rebuildable) {
+        volume_set_host_status(status, WP_VOLUME_REBUILD_INVALID_INPUT);
+        return;
+    }
+
+    BuildGridParams<nanovdb::ValueOnIndex> params;
+    volume_set_map(params.map, transform, translation);
+    rebuild_grid_from_active_voxels_host(
+        reinterpret_cast<nanovdb::OnIndexGrid*>(volume->buffer), volume->size_in_bytes, points, num_points,
+        points_in_world_space, point_mask, volume->capacities, params, status
+    );
+}
+
+void wp_volume_destroy_device(uint64_t id)
+{
+    const VolumeDesc* volume;
+    if (volume_get_descriptor(id, volume)) {
+        ContextGuard guard(volume->context);
+        if (volume->owner) {
+            wp_free_device(WP_CURRENT_CONTEXT, volume->buffer);
+        }
+        volume_rem_descriptor(id);
+    }
+}
+
+#if WP_ENABLE_CUDA
+
+uint64_t wp_volume_from_tiles_device(
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    const void* value_ptr,
+    uint32_t value_size,
+    const char* value_type,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
+)
+{
+    char gridTypeStr[12];
+    const VolumeRebuildCapacities capacities
+        = volume_tile_rebuild_capacities(max_tiles, max_lower_nodes, max_upper_nodes);
+
+#define EXPAND_BUILDER_TYPE(type)                                                                                      \
+    nanovdb::toStr(gridTypeStr, nanovdb::toGridType<type>());                                                          \
+    if (strncmp(gridTypeStr, value_type, sizeof(gridTypeStr)) == 0)                                                    \
+    {                                                                                                                  \
+        BuildGridParams<type> params;                                                                                  \
+        memcpy(&params.background_value, value_ptr, value_size);                                                       \
+        volume_set_map(params.map, transform, translation);                                                            \
+        size_t gridSize;                                                                                               \
+        nanovdb::Grid<nanovdb::NanoTree<type>>* grid;                                                                  \
+        if (rebuildable)                                                                                               \
+        {                                                                                                              \
+            allocate_rebuildable_grid_from_tiles(                                                                      \
+                grid, gridSize, points, num_points, points_in_world_space, point_mask, capacities, params, status       \
+            );                                                                                                         \
+            return volume_create_rebuildable_device(context, grid, gridSize, capacities, params);                     \
+        }                                                                                                              \
+        allocate_grid_from_tiles(grid, gridSize, points, num_points, points_in_world_space, point_mask, params);        \
+        return wp_volume_create_device(context, grid, gridSize, false, true);                                           \
     }
 
     WP_VOLUME_BUILDER_INSTANTIATE_TYPES
@@ -397,7 +887,18 @@ uint64_t wp_volume_from_tiles_device(
 }
 
 uint64_t wp_volume_index_from_tiles_device(
-    void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
 )
 {
     nanovdb::IndexGrid* grid;
@@ -405,13 +906,34 @@ uint64_t wp_volume_index_from_tiles_device(
     BuildGridParams<nanovdb::ValueIndex> params;
     volume_set_map(params.map, transform, translation);
 
-    build_grid_from_points(grid, gridSize, points, num_points, points_in_world_space, params);
+    if (rebuildable) {
+        const VolumeRebuildCapacities capacities
+            = volume_tile_rebuild_capacities(max_tiles, max_lower_nodes, max_upper_nodes);
+        allocate_rebuildable_grid_from_tiles(
+            grid, gridSize, points, num_points, points_in_world_space, point_mask, capacities, params, status
+        );
 
+        return volume_create_rebuildable_device(context, grid, gridSize, capacities, params);
+    }
+
+    allocate_grid_from_tiles(grid, gridSize, points, num_points, points_in_world_space, point_mask, params);
     return wp_volume_create_device(context, grid, gridSize, false, true);
 }
 
 uint64_t wp_volume_from_active_voxels_device(
-    void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_active_voxels,
+    uint32_t max_leaf_nodes,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
 )
 {
     nanovdb::OnIndexGrid* grid;
@@ -419,9 +941,129 @@ uint64_t wp_volume_from_active_voxels_device(
     BuildGridParams<nanovdb::ValueOnIndex> params;
     volume_set_map(params.map, transform, translation);
 
-    build_grid_from_points(grid, gridSize, points, num_points, points_in_world_space, params);
+    if (rebuildable) {
+        const VolumeRebuildCapacities capacities
+            = volume_voxel_rebuild_capacities(max_active_voxels, max_leaf_nodes, max_lower_nodes, max_upper_nodes);
+        allocate_rebuildable_grid_from_active_voxels(
+            grid, gridSize, points, num_points, points_in_world_space, point_mask, capacities, params, status
+        );
 
+        return volume_create_rebuildable_device(context, grid, gridSize, capacities, params);
+    }
+
+    allocate_grid_from_active_voxels(grid, gridSize, points, num_points, points_in_world_space, point_mask, params);
     return wp_volume_create_device(context, grid, gridSize, false, true);
+}
+
+void wp_volume_rebuild_from_tiles_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    const void* value_ptr,
+    uint32_t value_size,
+    const char* value_type,
+    uint32_t* status
+)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume) || !volume->rebuildable) {
+        if (status) {
+            uint32_t invalid = WP_VOLUME_REBUILD_INVALID_INPUT;
+            wp_memcpy_h2d(WP_CURRENT_CONTEXT, status, &invalid, sizeof(uint32_t));
+        }
+        return;
+    }
+
+    ContextGuard guard(volume->context);
+
+    char gridTypeStr[12];
+
+#define EXPAND_BUILDER_TYPE(type)                                                                                      \
+    nanovdb::toStr(gridTypeStr, nanovdb::toGridType<type>());                                                          \
+    if (strncmp(gridTypeStr, value_type, sizeof(gridTypeStr)) == 0)                                                    \
+    {                                                                                                                  \
+        BuildGridParams<type> params;                                                                                  \
+        memcpy(&params.background_value, value_ptr, value_size);                                                       \
+        volume_set_map(params.map, transform, translation);                                                            \
+        rebuild_grid_from_tiles(                                                                                       \
+            reinterpret_cast<nanovdb::Grid<nanovdb::NanoTree<type>>*>(volume->buffer), volume->size_in_bytes, points,  \
+            num_points, points_in_world_space, point_mask, volume->capacities, params, status                          \
+        );                                                                                                             \
+        return;                                                                                                        \
+    }
+
+    WP_VOLUME_BUILDER_INSTANTIATE_TYPES
+#undef EXPAND_BUILDER_TYPE
+
+    if (status) {
+        uint32_t invalid = WP_VOLUME_REBUILD_INVALID_INPUT;
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, status, &invalid, sizeof(uint32_t));
+    }
+    return;
+}
+
+void wp_volume_index_rebuild_from_tiles_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume) || !volume->rebuildable) {
+        if (status) {
+            uint32_t invalid = WP_VOLUME_REBUILD_INVALID_INPUT;
+            wp_memcpy_h2d(WP_CURRENT_CONTEXT, status, &invalid, sizeof(uint32_t));
+        }
+        return;
+    }
+
+    ContextGuard guard(volume->context);
+
+    BuildGridParams<nanovdb::ValueIndex> params;
+    volume_set_map(params.map, transform, translation);
+    rebuild_grid_from_tiles(
+        reinterpret_cast<nanovdb::IndexGrid*>(volume->buffer), volume->size_in_bytes, points, num_points,
+        points_in_world_space, point_mask, volume->capacities, params, status
+    );
+}
+
+void wp_volume_rebuild_from_active_voxels_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume) || !volume->rebuildable) {
+        if (status) {
+            uint32_t invalid = WP_VOLUME_REBUILD_INVALID_INPUT;
+            wp_memcpy_h2d(WP_CURRENT_CONTEXT, status, &invalid, sizeof(uint32_t));
+        }
+        return;
+    }
+
+    ContextGuard guard(volume->context);
+
+    BuildGridParams<nanovdb::ValueOnIndex> params;
+    volume_set_map(params.map, transform, translation);
+    rebuild_grid_from_active_voxels(
+        reinterpret_cast<nanovdb::OnIndexGrid*>(volume->buffer), volume->size_in_bytes, points, num_points,
+        points_in_world_space, point_mask, volume->capacities, params, status
+    );
 }
 
 void launch_get_leaf_coords(
@@ -439,7 +1081,9 @@ void wp_volume_get_tiles_device(uint64_t id, void* buf)
 {
     const VolumeDesc* volume;
     if (volume_get_descriptor(id, volume)) {
-        const uint32_t leaf_count = volume->tree_data.node_count_leaf;
+        uint32_t leaf_count;
+        uint64_t voxel_count;
+        wp_volume_get_tile_and_voxel_count(id, leaf_count, voxel_count);
 
         pnanovdb_coord_t* leaf_coords = static_cast<pnanovdb_coord_t*>(buf);
         launch_get_leaf_coords(volume->context, leaf_count, leaf_coords, volume->as_pnano());
@@ -465,29 +1109,100 @@ uint64_t wp_volume_from_tiles_device(
     void* context,
     void* points,
     int num_points,
+    const int32_t* point_mask,
     float transform[9],
     float translation[3],
     bool points_in_world_space,
     const void* value_ptr,
     uint32_t value_size,
-    const char* value_type
+    const char* value_type,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
 )
 {
     return 0;
 }
 
 uint64_t wp_volume_index_from_tiles_device(
-    void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
 )
 {
     return 0;
 }
 
 uint64_t wp_volume_from_active_voxels_device(
-    void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_active_voxels,
+    uint32_t max_leaf_nodes,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
 )
 {
     return 0;
+}
+
+void wp_volume_rebuild_from_tiles_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    const void* value_ptr,
+    uint32_t value_size,
+    const char* value_type,
+    uint32_t* status
+)
+{
+}
+
+void wp_volume_index_rebuild_from_tiles_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+}
+
+void wp_volume_rebuild_from_active_voxels_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
 }
 
 void wp_volume_get_tiles_device(uint64_t id, void* buf) { }

@@ -17,10 +17,10 @@ enum AllocKind {
 };
 
 struct AllocRecord {
-    size_t size;
-    size_t seq;  // allocation sequence number (monotonically increasing)
-    AllocKind kind;
-    int device_ordinal;  // -1 for host/pinned
+    size_t size = 0;
+    size_t seq = 0;  // allocation sequence number (monotonically increasing)
+    AllocKind kind = {};
+    int device_ordinal = 0;  // -1 for host/pinned
     std::string tag;  // Python call-site info or "(native)"
     std::string scope;  // e.g. "simulation/collision"
 };
@@ -40,11 +40,9 @@ public:
     // Associate a tag with an existing live allocation identified by pointer.
     void set_tag(void* ptr, const char* tag);
 
-    // Returns a pointer to an internal buffer.  The caller must copy the
-    // string before the next call to report() from any thread.
     // sort_order: 0 = by size descending (default), 1 = chronological (oldest first)
     // max_items: maximum number of individual allocations shown per category
-    const char* report(int sort_order = 0, int max_items = 10);
+    std::string report(int sort_order = 0, int max_items = 10);
 
     size_t get_current_bytes();
     size_t get_peak_bytes();
@@ -80,8 +78,8 @@ private:
 
     struct ScopeKey {
         std::string scope;
-        AllocKind kind;
-        int ordinal;  // only meaningful for ALLOC_KIND_DEVICE
+        AllocKind kind = {};
+        int ordinal = 0;  // only meaningful for ALLOC_KIND_DEVICE
 
         bool operator==(const ScopeKey& o) const { return scope == o.scope && kind == o.kind && ordinal == o.ordinal; }
     };
@@ -98,9 +96,6 @@ private:
 
     // Scope breakdown: (scope, kind, ordinal) -> (count, bytes)
     std::unordered_map<ScopeKey, std::pair<size_t, size_t>, ScopeKeyHash> m_scope_stats;
-
-    // Buffer for report() return value
-    std::string m_report_buf;
 };
 
 extern AllocTracker g_alloc_tracker;

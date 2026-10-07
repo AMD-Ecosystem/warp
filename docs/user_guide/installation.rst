@@ -1,10 +1,7 @@
 Installation
 ============
 
-Python version 3.10 or newer is required. Warp can run on x86-64 and ARMv8 CPUs on Windows and Linux. macOS requires Apple Silicon (ARM64). GPU support requires a CUDA-capable NVIDIA GPU and driver (minimum GeForce GTX 9xx).
-
-.. note::
-   Intel-based macOS (x86_64) is no longer supported. Users with Intel Macs should use Warp version 1.9.x or earlier.
+Warp requires Python 3.10 or newer. We publish ``warp-lang`` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. CUDA acceleration requires a supported NVIDIA GPU and driver. The macOS wheels support CPU execution but not Metal acceleration.
 
 The easiest way to install Warp is from `PyPI <https://pypi.org/project/warp-lang>`_:
 
@@ -73,11 +70,11 @@ the ``pip install`` command, e.g.
    * - Platform
      - Install Command
    * - Linux aarch64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.13.0/warp_lang-1.13.0+cu13-py3-none-manylinux_2_34_aarch64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.17.0/warp_lang-1.17.0+cu13-py3-none-manylinux_2_34_aarch64.whl``
    * - Linux x86-64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.13.0/warp_lang-1.13.0+cu13-py3-none-manylinux_2_28_x86_64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.17.0/warp_lang-1.17.0+cu13-py3-none-manylinux_2_28_x86_64.whl``
    * - Windows x86-64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.13.0/warp_lang-1.13.0+cu13-py3-none-win_amd64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.17.0/warp_lang-1.17.0+cu13-py3-none-win_amd64.whl``
 
 The ``--force-reinstall`` option may need to be used to overwrite a previous installation.
 
@@ -102,7 +99,7 @@ Warp checks the installed driver during initialization and will report a warning
     Warp UserWarning:
        Insufficient CUDA driver version.
        The minimum required CUDA driver version is 12.0, but the installed CUDA driver version is 11.8.
-       Visit https://nvidia.github.io/warp/user_guide/installation.html for guidance.
+       Visit https://nvidia.github.io/warp/stable/user_guide/installation.html for guidance.
 
 This will make CUDA devices unavailable, but the CPU can still be used.
 
@@ -148,12 +145,15 @@ The following optional dependencies are required to support certain features:
 Building from Source
 --------------------
 
-For developers who want to build the library themselves the following tools are required:
+For developers who want to build the library themselves, the following tools are required:
 
-* Microsoft Visual Studio (Windows), minimum version 2019
-* GCC (Linux), minimum version 9.4
-* `CUDA Toolkit <https://developer.nvidia.com/cuda-toolkit>`_, minimum version 12.0
+* (Windows) Microsoft Visual Studio, minimum version 2019
+* (Linux) GCC, minimum version 9.4
+* (macOS) Xcode Command Line Tools
 * `Git Large File Storage <https://git-lfs.com>`_
+
+A CUDA Toolkit is not required for a CPU-only build. CUDA-enabled builds on Windows and Linux require
+`CUDA Toolkit <https://developer.nvidia.com/cuda-toolkit>`_ 12.0 or newer.
 
 After cloning the repository, users should run:
 
@@ -162,10 +162,26 @@ After cloning the repository, users should run:
     $ python build_lib.py
 
 Upon success, the script will output platform-specific binary files in ``warp/bin/``.
-The build script will look for the CUDA Toolkit in its default installation path.
-This path can be overridden by setting the ``CUDA_PATH`` environment variable. Alternatively,
-the path to the CUDA Toolkit can be passed to the build command as
-``--cuda-path="..."``. After building, the Warp package should be installed using:
+
+Unless a CUDA Toolkit path is provided explicitly, ``build_lib.py`` searches for one in this order:
+
+#. ``WARP_CUDA_PATH``, ``CUDA_HOME``, then ``CUDA_PATH``
+#. The CUDA Toolkit containing ``nvcc`` found on ``PATH``
+#. The standard CUDA installation locations for the operating system
+
+If no CUDA Toolkit is found, ``build_lib.py`` builds Warp without CUDA support.
+
+By default, CUDA libraries (cudart, NVRTC, nvJitLink, MathDx) are linked statically
+to produce self-contained binaries. To link against shared CUDA libraries instead,
+pass ``--use-dynamic-cuda``:
+
+.. code-block:: console
+
+    $ python build_lib.py --use-dynamic-cuda
+
+The corresponding shared libraries must be available at runtime when using this option.
+
+After building, the Warp package should be installed using:
 
 .. code-block:: console
 
@@ -173,6 +189,94 @@ the path to the CUDA Toolkit can be passed to the build command as
 
 The ``-e`` option is optional but ensures that subsequent modifications to the
 library will be reflected in the Python package.
+
+CMake build
+~~~~~~~~~~~
+
+Developers who have CMake installed can use the alternate CMake build path.
+This builds the native Warp libraries in place, like ``build_lib.py``, while
+letting CMake and the selected generator handle parallel and incremental
+rebuilds.
+The commands shown below require CMake 3.24 or newer and Ninja. CMake also uses
+a Python 3.10+ environment with NumPy installed to regenerate derived native
+headers. By default, CMake may fetch LLVM and ``libmathdx`` through Packman
+unless explicit paths are provided or the corresponding features are disabled
+(``-DWARP_BUILD_CLANG=OFF`` for LLVM, ``-DWARP_USE_LIBMATHDX=OFF`` for
+``libmathdx``, or ``-DWARP_ENABLE_CUDA=OFF`` for a CPU-only build).
+
+From the repository root, the recommended path uses
+`uv <https://docs.astral.sh/uv/>`__ to prepare the Python environment before
+configuring and building:
+
+.. code-block:: console
+
+    $ uv sync --no-install-project
+    $ cmake -S . -B _build/cmake -G Ninja
+    $ cmake --build _build/cmake --parallel
+
+Without ``uv``, use a Python environment you manage and install NumPy before
+running the CMake commands:
+
+.. code-block:: console
+
+    $ python -m pip install numpy
+    $ cmake -S . -B _build/cmake -G Ninja
+    $ cmake --build _build/cmake --parallel
+
+Upon success, the CMake build writes the native libraries to ``warp/bin/``.
+The default CMake build enables CUDA on Linux and Windows, disables CUDA on
+macOS, and builds both ``warp`` and ``warp-clang``. Pass
+``-DWARP_ENABLE_CUDA=OFF`` for a CPU-only CMake build. CUDA builds default to a
+single PTX target for fast local builds; use ``CMAKE_CUDA_ARCHITECTURES`` to
+select different GPU architectures. Use ``build_lib.py`` for release builds
+that need Warp's full GPU architecture coverage.
+
+To use a specific CUDA Toolkit:
+
+.. code-block:: console
+
+    $ cmake -S . -B _build/cmake -G Ninja -DWARP_CUDA_PATH=/usr/local/cuda
+    $ cmake --build _build/cmake --parallel
+
+To link against shared CUDA libraries in the CMake build:
+
+.. code-block:: console
+
+    $ cmake -S . -B _build/cmake -G Ninja -DWARP_USE_DYNAMIC_CUDA=ON
+    $ cmake --build _build/cmake --parallel
+
+The corresponding shared CUDA libraries, including ``libnvptxcompiler``, must
+be available at runtime when using this option.
+
+To use an existing LLVM installation for ``warp-clang``:
+
+.. code-block:: console
+
+    $ cmake -S . -B _build/cmake -G Ninja -DWARP_LLVM_PATH=/opt/llvm
+    $ cmake --build _build/cmake --parallel
+
+To use an existing ``libmathdx`` installation:
+
+.. code-block:: console
+
+    $ cmake -S . -B _build/cmake -G Ninja -DWARP_LIBMATHDX_PATH=/path/to/libmathdx
+    $ cmake --build _build/cmake --parallel
+
+To build for specific CUDA architectures:
+
+.. code-block:: console
+
+    $ cmake -S . -B _build/cmake -G Ninja -DCMAKE_CUDA_ARCHITECTURES="86;89"
+    $ cmake --build _build/cmake --parallel
+
+After building, verify that the libraries can be loaded:
+
+.. code-block:: console
+
+    $ uv run python -c "import warp; warp.print_diagnostics()"
+
+The CMake path is a native library build path only. It does not replace the
+Python package build backend used for wheels.
 
 .. _conda:
 

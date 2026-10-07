@@ -37,6 +37,7 @@ from warp.tests.unittest_utils import (
     USD_AVAILABLE,
     add_function_test,
     get_selected_cuda_test_devices,
+    get_selected_cuda_test_devices_with_mempool,
     get_test_devices,
     sanitize_identifier,
 )
@@ -188,6 +189,7 @@ def add_example_test(
 
 
 cuda_test_devices = get_selected_cuda_test_devices(mode="basic")  # Don't test on multiple GPUs to save time
+cuda_test_devices_with_mempool = get_selected_cuda_test_devices_with_mempool(mode="basic")
 test_devices = get_test_devices(mode="basic")
 
 # NOTE: To give the parallel test runner more opportunities to parallelize test cases,
@@ -268,6 +270,13 @@ add_example_test(
     devices=cuda_test_devices,
     test_options={"headless": True, "num_steps": 100, "sim_substeps": 10},
 )
+add_example_test(
+    TestCoreExamples,
+    name="core.example_fdtd_3d",
+    devices=test_devices,
+    test_options={"headless": True, "num_steps": 100, "steps_per_frame": 10},
+    test_options_cpu={"resolution": 64, "num_steps": 30},
+)
 
 
 class TestOptimExamples(unittest.TestCase):
@@ -284,7 +293,7 @@ add_example_test(
 add_example_test(
     TestOptimExamples,
     name="optim.example_fluid_checkpoint",
-    devices=cuda_test_devices,
+    devices=cuda_test_devices_with_mempool,
     test_options={"headless": True, "train_iters": 5, "num_frames": 300, "pillow_required": True},
 )
 add_example_test(
@@ -296,7 +305,7 @@ add_example_test(
 add_example_test(
     TestOptimExamples,
     name="optim.example_navier_stokes_perturbation",
-    devices=cuda_test_devices,
+    devices=cuda_test_devices_with_mempool,
     test_options={"headless": True, "train_iters": 5, "lead_steps": 5, "spin_up_steps": 10},
 )
 

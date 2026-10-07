@@ -15,7 +15,7 @@ from warp.tests.unittest_utils import *
 # phase of the backward pass
 @wp.func
 def reversible_increment(
-    counter: wp.array(dtype=int), counter_index: int, value: int, thread_values: wp.array(dtype=int), tid: int
+    counter: wp.array[int], counter_index: int, value: int, thread_values: wp.array[int], tid: int
 ):
     """This is a docstring"""
     next_index = wp.atomic_add(counter, counter_index, value)
@@ -25,7 +25,7 @@ def reversible_increment(
 
 @wp.func_replay(reversible_increment)
 def replay_reversible_increment(
-    counter: wp.array(dtype=int), counter_index: int, value: int, thread_values: wp.array(dtype=int), tid: int
+    counter: wp.array[int], counter_index: int, value: int, thread_values: wp.array[int], tid: int
 ):
     """This is a docstring"""
     return thread_values[tid]
@@ -33,10 +33,10 @@ def replay_reversible_increment(
 
 @wp.kernel
 def run_atomic_add(
-    input: wp.array(dtype=float),
-    counter: wp.array(dtype=int),
-    thread_values: wp.array(dtype=int),
-    output: wp.array(dtype=float),
+    input: wp.array[float],
+    counter: wp.array[int],
+    thread_values: wp.array[int],
+    output: wp.array[float],
 ):
     tid = wp.tid()
     idx = reversible_increment(counter, 0, 1, thread_values, tid)
@@ -97,9 +97,7 @@ def overload_fn_grad(x: MyStruct, adj_ret0: float, adj_ret1: float, adj_ret2: fl
 
 
 @wp.kernel
-def run_overload_float_fn(
-    xs: wp.array(dtype=float), ys: wp.array(dtype=float), output0: wp.array(dtype=float), output1: wp.array(dtype=float)
-):
+def run_overload_float_fn(xs: wp.array[float], ys: wp.array[float], output0: wp.array[float], output1: wp.array[float]):
     """This is a docstring"""
     i = wp.tid()
     out0, out1 = overload_fn(xs[i], ys[i])
@@ -108,7 +106,7 @@ def run_overload_float_fn(
 
 
 @wp.kernel
-def run_overload_struct_fn(xs: wp.array(dtype=MyStruct), output: wp.array(dtype=float)):
+def run_overload_struct_fn(xs: wp.array[MyStruct], output: wp.array[float]):
     i = wp.tid()
     out0, out1, out2 = overload_fn(xs[i])
     output[i] = out0 + out1 + out2
@@ -168,9 +166,7 @@ def test_custom_overload_grad(test, device):
 
 
 @wp.kernel
-def run_defined_float_fn(
-    xs: wp.array(dtype=float), ys: wp.array(dtype=float), output0: wp.array(dtype=float), output1: wp.array(dtype=float)
-):
+def run_defined_float_fn(xs: wp.array[float], ys: wp.array[float], output0: wp.array[float], output1: wp.array[float]):
     i = wp.tid()
     out0, out1 = aux_custom_fn(xs[i], ys[i])
     output0[i] = out0
@@ -211,18 +207,18 @@ def adj_sigmoid(x: float, adj: float):
 
 
 @wp.func
-def sigmoid_no_return(i: int, xs: wp.array(dtype=float), ys: wp.array(dtype=float)):
+def sigmoid_no_return(i: int, xs: wp.array[float], ys: wp.array[float]):
     # test function that does not return anything
     ys[i] = sigmoid(xs[i])
 
 
 @wp.func_grad(sigmoid_no_return)
-def adj_sigmoid_no_return(i: int, xs: wp.array(dtype=float), ys: wp.array(dtype=float)):
+def adj_sigmoid_no_return(i: int, xs: wp.array[float], ys: wp.array[float]):
     wp.adjoint[xs][i] += ys[i] * (1.0 - ys[i])
 
 
 @wp.kernel
-def eval_sigmoid(xs: wp.array(dtype=float), ys: wp.array(dtype=float)):
+def eval_sigmoid(xs: wp.array[float], ys: wp.array[float]):
     i = wp.tid()
     sigmoid_no_return(i, xs, ys)
 
@@ -250,10 +246,10 @@ def dense_gemm(
     transpose_A: bool,
     transpose_B: bool,
     add_to_C: bool,
-    A: wp.array(dtype=float),
-    B: wp.array(dtype=float),
+    A: wp.array[float],
+    B: wp.array[float],
     # outputs
-    C: wp.array(dtype=float),
+    C: wp.array[float],
 ):
     # this function doesn't get called but it is an important test for code generation
     # multiply a `m x p` matrix A by a `p x n` matrix B to produce a `m x n` matrix C
@@ -285,10 +281,10 @@ def adj_dense_gemm(
     transpose_A: bool,
     transpose_B: bool,
     add_to_C: bool,
-    A: wp.array(dtype=float),
-    B: wp.array(dtype=float),
+    A: wp.array[float],
+    B: wp.array[float],
     # outputs
-    C: wp.array(dtype=float),
+    C: wp.array[float],
 ):
     # code generation would break here if we didn't defer building the custom grad
     # function until after the forward functions + kernels of the module have been built
@@ -325,7 +321,7 @@ def nested_norm(v: wp.vec3):
 
 
 @wp.kernel
-def test_nested_custom_grad_kernel(vectors: wp.array(dtype=wp.vec3), norms: wp.array(dtype=float)):
+def test_nested_custom_grad_kernel(vectors: wp.array[wp.vec3], norms: wp.array[float]):
     i = wp.tid()
     norms[i] = nested_norm(vectors[i])
 
@@ -402,7 +398,7 @@ def outer_transform(x: float):
 
 
 @wp.kernel
-def test_custom_grad_with_helper_kernel(inputs: wp.array(dtype=float), outputs: wp.array(dtype=float)):
+def test_custom_grad_with_helper_kernel(inputs: wp.array[float], outputs: wp.array[float]):
     i = wp.tid()
     outputs[i] = outer_transform(inputs[i])
 
@@ -445,6 +441,104 @@ def test_custom_grad_with_helper_dependency(test, device):
     assert_np_equal(inputs.grad.numpy(), expected_grad, tol=1e-4)
 
 
+# A helper reached first through a custom grad (before the kernel's own differentiated call
+# to it) must still have its callee's adjoint enabled, not stubbed out.
+@wp.func
+def build_order_leaf(x: float):
+    return x * x
+
+
+@wp.func
+def build_order_helper(x: float):
+    return build_order_leaf(x)
+
+
+@wp.func
+def build_order_trigger(x: float):
+    return x
+
+
+@wp.func_grad(build_order_trigger)
+def adj_build_order_trigger(x: float, adj_ret: float):
+    # Reach the helpers from inside the custom grad (forcing them to build here first); *0.0
+    # keeps this contribution zero.
+    poison = build_order_helper(x)
+    wp.adjoint[x] += 0.0 * poison * adj_ret
+
+
+@wp.kernel
+def build_order_kernel(x: wp.array[float], y: wp.array[float]):
+    tid = wp.tid()
+    # trigger (-> custom grad -> helper -> leaf) is visited before the direct helper call below.
+    t = build_order_trigger(x[tid])
+    y[tid] = build_order_helper(x[tid]) + 0.0 * t
+
+
+def test_custom_grad_helper_backward_propagation(test, device):
+    """A helper reached first through a custom grad must keep its callee's adjoint enabled.
+
+    Otherwise ``adj_build_order_leaf`` is a disabled stub and the gradient is silently zeroed.
+    Forward value is x*x, so the expected gradient is d/dx (x*x) = 2x.
+    """
+    x = wp.array([3.0], dtype=wp.float32, requires_grad=True, device=device)
+    y = wp.zeros_like(x)
+
+    with wp.Tape() as tape:
+        wp.launch(build_order_kernel, dim=1, inputs=[x], outputs=[y], device=device)
+
+    tape.backward(grads={y: wp.ones_like(y)})
+
+    assert_np_equal(y.numpy(), np.array([9.0], dtype=np.float32), tol=1e-4)
+    assert_np_equal(x.grad.numpy(), np.array([6.0], dtype=np.float32), tol=1e-4)
+
+
+# General (no custom grad) form of the same hazard: a helper first built by a forward-only kernel,
+# then differentiated by a separate backward kernel, must still get its callee's adjoint enabled.
+@wp.func
+def cross_kernel_leaf(x: float):
+    return x * x
+
+
+@wp.func
+def cross_kernel_helper(x: float):
+    return cross_kernel_leaf(x)
+
+
+@wp.kernel(enable_backward=False)
+def cross_kernel_forward_only(x: wp.array[float], y: wp.array[float]):
+    tid = wp.tid()
+    y[tid] = cross_kernel_helper(x[tid])
+
+
+@wp.kernel
+def cross_kernel_backward(x: wp.array[float], y: wp.array[float]):
+    tid = wp.tid()
+    y[tid] = cross_kernel_helper(x[tid])
+
+
+def test_backward_use_propagation_across_kernels(test, device):
+    """A helper built by a forward-only kernel first must still differentiate in a backward kernel.
+
+    ``cross_kernel_forward_only`` (enable_backward=False) builds ``cross_kernel_helper`` /
+    ``cross_kernel_leaf`` with backward disabled; ``cross_kernel_backward`` then differentiates the
+    same helper. Without order-independent propagation ``adj_cross_kernel_leaf`` stays a disabled
+    stub and the gradient is zeroed. Expected d/dx (x*x) = 2x.
+    """
+    x = wp.array([3.0], dtype=wp.float32, requires_grad=True, device=device)
+    y = wp.zeros_like(x)
+
+    # Exercise the forward-only kernel first so it participates in the same module build.
+    wp.launch(cross_kernel_forward_only, dim=1, inputs=[x], outputs=[y], device=device)
+
+    with wp.Tape() as tape:
+        wp.launch(cross_kernel_backward, dim=1, inputs=[x], outputs=[y], device=device)
+
+    tape.backward(grads={y: wp.ones_like(y)})
+
+    assert_np_equal(y.numpy(), np.array([9.0], dtype=np.float32), tol=1e-4)
+    assert_np_equal(x.grad.numpy(), np.array([6.0], dtype=np.float32), tol=1e-4)
+
+
 # Native snippet called by function with custom gradient
 # This tests that native snippets are available when generating forward code
 # for functions that have custom gradients
@@ -480,7 +574,7 @@ def adj_func_with_native_and_custom_grad(x: float, adj_ret: float):
 
 
 @wp.kernel
-def test_native_snippet_in_forward_kernel(inputs: wp.array(dtype=float), outputs: wp.array(dtype=float)):
+def test_native_snippet_in_forward_kernel(inputs: wp.array[float], outputs: wp.array[float]):
     i = wp.tid()
     outputs[i] = func_with_native_and_custom_grad(inputs[i])
 
@@ -551,7 +645,7 @@ def adj_func_with_custom_grad_calling_native(x: float, adj_ret: float):
 
 
 @wp.kernel
-def test_native_snippet_in_custom_grad_kernel(inputs: wp.array(dtype=float), outputs: wp.array(dtype=float)):
+def test_native_snippet_in_custom_grad_kernel(inputs: wp.array[float], outputs: wp.array[float]):
     i = wp.tid()
     outputs[i] = func_with_custom_grad_calling_native(inputs[i])
 
@@ -588,6 +682,53 @@ def test_native_snippet_in_custom_grad(test, device):
     assert_np_equal(inputs.grad.numpy(), expected_grad, tol=1e-4)
 
 
+def test_custom_grad_tile_matmul(test, device):
+    """A custom func_grad on a function that uses tile_matmul."""
+    M = 4
+
+    @wp.func
+    def tile_gemm(a: wp.array2d[float], b: wp.array2d[float], c: wp.array2d[float]):
+        a_tile = wp.tile_load(a, shape=(M, M))
+        b_tile = wp.tile_load(b, shape=(M, M))
+        acc = wp.tile_zeros(shape=(M, M), dtype=float)
+        wp.tile_matmul(a_tile, b_tile, acc)
+        wp.tile_store(c, acc)
+
+    # registering the custom grad must not raise (previously KeyError: 'output_arch')
+    @wp.func_grad(tile_gemm)
+    def adj_tile_gemm(a: wp.array2d[float], b: wp.array2d[float], c: wp.array2d[float]):
+        adj_c = wp.tile_load(wp.adjoint[c], shape=(M, M))
+        a_tile = wp.tile_load(a, shape=(M, M))
+        b_tile = wp.tile_load(b, shape=(M, M))
+        adj_a = wp.tile_zeros(shape=(M, M), dtype=float)
+        adj_b = wp.tile_zeros(shape=(M, M), dtype=float)
+        wp.tile_matmul(adj_c, wp.tile_transpose(b_tile), adj_a)
+        wp.tile_matmul(wp.tile_transpose(a_tile), adj_c, adj_b)
+        wp.tile_atomic_add(wp.adjoint[a], adj_a)
+        wp.tile_atomic_add(wp.adjoint[b], adj_b)
+
+    @wp.kernel(module="unique")
+    def run(a: wp.array2d[float], b: wp.array2d[float], c: wp.array2d[float]):
+        tile_gemm(a, b, c)
+
+    rng = np.random.default_rng(42)
+    a_np = rng.standard_normal((M, M), dtype=np.float32)
+    b_np = rng.standard_normal((M, M), dtype=np.float32)
+    a = wp.array(a_np, requires_grad=True, device=device)
+    b = wp.array(b_np, requires_grad=True, device=device)
+    c = wp.zeros((M, M), dtype=float, requires_grad=True, device=device)
+
+    with wp.Tape() as tape:
+        wp.launch_tiled(run, dim=(1,), inputs=[a, b], outputs=[c], block_dim=32, device=device)
+
+    tape.backward(grads={c: wp.ones_like(c)})
+
+    ones = np.ones((M, M), dtype=np.float32)
+    assert_np_equal(c.numpy(), a_np @ b_np, tol=1e-6)
+    assert_np_equal(a.grad.numpy(), ones @ b_np.T, tol=1e-6)
+    assert_np_equal(b.grad.numpy(), a_np.T @ ones, tol=1e-6)
+
+
 devices = get_test_devices()
 
 
@@ -611,6 +752,18 @@ add_function_test(
 )
 add_function_test(
     TestGradCustoms,
+    "test_custom_grad_helper_backward_propagation",
+    test_custom_grad_helper_backward_propagation,
+    devices=devices,
+)
+add_function_test(
+    TestGradCustoms,
+    "test_backward_use_propagation_across_kernels",
+    test_backward_use_propagation_across_kernels,
+    devices=devices,
+)
+add_function_test(
+    TestGradCustoms,
     "test_native_snippet_in_forward_with_custom_grad",
     test_native_snippet_in_forward_with_custom_grad,
     devices=devices,
@@ -618,6 +771,7 @@ add_function_test(
 add_function_test(
     TestGradCustoms, "test_native_snippet_in_custom_grad", test_native_snippet_in_custom_grad, devices=devices
 )
+add_function_test(TestGradCustoms, "test_custom_grad_tile_matmul", test_custom_grad_tile_matmul, devices=devices)
 
 
 if __name__ == "__main__":

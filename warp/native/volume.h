@@ -31,6 +31,7 @@ namespace volume {
 // Need to kept in sync with constants in python-side Volume class
 static constexpr int CLOSEST = 0;
 static constexpr int LINEAR = 1;
+static constexpr uint64_t MAX_INDEXABLE_VOXEL_COUNT = 2147483647ull;
 
 // pnanovdb helper function
 
@@ -662,12 +663,6 @@ CUDA_CALLABLE inline void adj_volume_sample_v(
     adj_volume_sample(id, uvw, sampling_mode, adj_id, adj_uvw, adj_sampling_mode, adj_ret);
 }
 
-CUDA_CALLABLE inline void
-adj_volume_sample_i(uint64_t id, vec3 uvw, uint64_t& adj_id, vec3& adj_uvw, const int32_t& adj_ret)
-{
-    // NOP
-}
-
 // Sampling the volume at the given index-space coordinates, uvw can be fractional
 CUDA_CALLABLE inline float volume_sample_grad_f(uint64_t id, vec3 uvw, int sampling_mode, vec3& grad)
 {
@@ -771,22 +766,6 @@ template <typename T> CUDA_CALLABLE inline T volume_lookup(uint64_t id, int32_t 
     return val;
 }
 
-template <typename T>
-CUDA_CALLABLE inline void adj_volume_lookup(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    const T& adj_ret
-)
-{
-    // NOP -- adjoint of grid values is not available
-}
-
 CUDA_CALLABLE inline float volume_lookup_f(uint64_t id, int32_t i, int32_t j, int32_t k)
 {
     return volume_lookup<float>(id, i, j, k);
@@ -800,51 +779,6 @@ CUDA_CALLABLE inline int32_t volume_lookup_i(uint64_t id, int32_t i, int32_t j, 
 CUDA_CALLABLE inline vec3 volume_lookup_v(uint64_t id, int32_t i, int32_t j, int32_t k)
 {
     return volume_lookup<vec3>(id, i, j, k);
-}
-
-CUDA_CALLABLE inline void adj_volume_lookup_f(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    const float& adj_ret
-)
-{
-    adj_volume_lookup(id, i, j, k, adj_id, adj_i, adj_j, adj_k, adj_ret);
-}
-
-CUDA_CALLABLE inline void adj_volume_lookup_i(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    const int32_t& adj_ret
-)
-{
-    adj_volume_lookup(id, i, j, k, adj_id, adj_i, adj_j, adj_k, adj_ret);
-}
-
-CUDA_CALLABLE inline void adj_volume_lookup_v(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    const vec3& adj_ret
-)
-{
-    adj_volume_lookup(id, i, j, k, adj_id, adj_i, adj_j, adj_k, adj_ret);
 }
 
 CUDA_CALLABLE inline int32_t volume_lookup_index(uint64_t id, int32_t i, int32_t j, int32_t k)
@@ -867,19 +801,24 @@ CUDA_CALLABLE inline int32_t volume_lookup_index(uint64_t id, int32_t i, int32_t
     return -1;
 }
 
-CUDA_CALLABLE inline void adj_volume_lookup_index(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    const vec3& adj_ret
-)
+CUDA_CALLABLE inline int32_t volume_voxel_count(uint64_t id)
 {
-    // NOP
+    const pnanovdb_buf_t buf = volume::id_to_buffer(id);
+    const pnanovdb_tree_handle_t tree = volume::get_tree(buf);
+    const pnanovdb_grid_type_t grid_type = volume::get_grid_type(buf);
+
+    uint64_t count;
+    switch (grid_type) {
+    case PNANOVDB_GRID_TYPE_ONINDEX:
+    case PNANOVDB_GRID_TYPE_ONINDEXMASK:
+        count = pnanovdb_tree_get_voxel_count(buf, tree);
+        break;
+    default:
+        count = uint64_t(pnanovdb_tree_get_node_count_leaf(buf, tree)) * PNANOVDB_LEAF_TABLE_COUNT;
+        break;
+    }
+
+    return count > volume::MAX_INDEXABLE_VOXEL_COUNT ? int32_t(volume::MAX_INDEXABLE_VOXEL_COUNT) : int32_t(count);
 }
 
 // volume_store
@@ -908,42 +847,9 @@ CUDA_CALLABLE inline void volume_store(uint64_t id, int32_t i, int32_t j, int32_
     }
 }
 
-template <typename T>
-CUDA_CALLABLE inline void adj_volume_store(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    const T& value,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    T& adj_value
-)
-{
-    // NOP -- adjoint of grid values is not available
-}
-
 CUDA_CALLABLE inline void volume_store_f(uint64_t id, int32_t i, int32_t j, int32_t k, const float& value)
 {
     volume_store(id, i, j, k, value);
-}
-
-CUDA_CALLABLE inline void adj_volume_store_f(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    const float& value,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    float& adj_value
-)
-{
-    adj_volume_store(id, i, j, k, value, adj_id, adj_i, adj_j, adj_k, adj_value);
 }
 
 CUDA_CALLABLE inline void volume_store_v(uint64_t id, int32_t i, int32_t j, int32_t k, const vec3& value)
@@ -951,41 +857,9 @@ CUDA_CALLABLE inline void volume_store_v(uint64_t id, int32_t i, int32_t j, int3
     volume_store(id, i, j, k, value);
 }
 
-CUDA_CALLABLE inline void adj_volume_store_v(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    const vec3& value,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    vec3& adj_value
-)
-{
-    adj_volume_store(id, i, j, k, value, adj_id, adj_i, adj_j, adj_k, adj_value);
-}
-
 CUDA_CALLABLE inline void volume_store_i(uint64_t id, int32_t i, int32_t j, int32_t k, const int32_t& value)
 {
     volume_store(id, i, j, k, value);
-}
-
-CUDA_CALLABLE inline void adj_volume_store_i(
-    uint64_t id,
-    int32_t i,
-    int32_t j,
-    int32_t k,
-    const int32_t& value,
-    uint64_t& adj_id,
-    int32_t& adj_i,
-    int32_t& adj_j,
-    int32_t& adj_k,
-    int32_t& adj_value
-)
-{
-    adj_volume_store(id, i, j, k, value, adj_id, adj_i, adj_j, adj_k, adj_value);
 }
 
 // Transform position from index space to world space

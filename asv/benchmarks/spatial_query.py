@@ -1,37 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # ruff: noqa: PLC0415
 
 import importlib.util
-import itertools
 import os
 
 import numpy as np
-from asv_runner.benchmarks.mark import skip_benchmark_if, skip_for_params
+from asv_runner.benchmarks.mark import skip_benchmark_if
 from numpy.random import default_rng
 
 import warp as wp
-import warp.examples
+
+from .benchmarks_utils import get_asset_directory, setup_once
 
 pxr = importlib.util.find_spec("pxr")
 USD_AVAILABLE = pxr is not None
 
 wp.set_module_options({"enable_backward": False})
 
-NUM_QUERY_POINTS = 1000000
+NUM_QUERY_POINTS = 200000
 NUM_TRIES = 10
 NUM_MESHES = 10
 seed = 42
@@ -72,19 +60,20 @@ def sample_mesh_query_signed(
 
 
 class MeshQuery:
-    params = [[0, 8], ["bunny", "bear", "rocks"]]
-    param_names = ["leaf_size", "asset"]
+    params = [[0, 8], ["bunny", "rocks"], ["lbvh", "cubql"]]
+    param_names = ["leaf_size", "asset", "constructor"]
     number = 20
     timeout = 60
 
-    def setup(self, leaf_size, asset):
+    @setup_once
+    def setup(self, leaf_size, asset, bvh_constructor):
         from pxr import Usd, UsdGeom
 
         wp.init()
         self.device = wp.get_device("cuda:0")
         wp.load_module(device=self.device)
 
-        asset_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), f"{asset}.usd"))
+        asset_stage = Usd.Stage.Open(os.path.join(get_asset_directory(), f"{asset}.usd"))
         mesh_geom = UsdGeom.Mesh(asset_stage.GetPrimAtPath(f"/root/{asset}"))
 
         points = np.array(mesh_geom.GetPointsAttr().Get())
@@ -106,6 +95,7 @@ class MeshQuery:
                 points=wp.array(points, dtype=wp.vec3, device=self.device),
                 velocities=None,
                 indices=wp.array(indices, dtype=int, device=self.device),
+                bvh_constructor=bvh_constructor,
             )
 
         else:
@@ -114,6 +104,7 @@ class MeshQuery:
                 velocities=None,
                 indices=wp.array(indices, dtype=int, device=self.device),
                 bvh_leaf_size=leaf_size,
+                bvh_constructor=bvh_constructor,
             )
 
         self.query_closest_points = wp.empty_like(self.query_points, device=self.device)
@@ -139,12 +130,12 @@ class MeshQuery:
         wp.synchronize_device(self.device)
 
     @skip_benchmark_if(USD_AVAILABLE is False)
-    def time_mesh_query_closest_point(self, leaf_size, asset):
+    def time_mesh_query_closest_point(self, leaf_size, asset, bvh_constructor):
         self.cmd_no_sign.launch()
         wp.synchronize_device(self.device)
 
     @skip_benchmark_if(USD_AVAILABLE is False)
-    def time_mesh_query_closest_point_signed(self, leaf_size, asset):
+    def time_mesh_query_closest_point_signed(self, leaf_size, asset, bvh_constructor):
         self.cmd_signed.launch()
         wp.synchronize_device(self.device)
 
@@ -360,13 +351,14 @@ def replicate_mesh_with_random_perturbation(
 
 
 class BvhAABBQuery:
-    params = [[0.002, 0.004, 0.008], [0, 8], ["cpu", "cuda"]]
-    param_names = ["query_radius", "leaf_size", "device"]
+    params = [[0.002, 0.008], [0, 8], ["cuda"], ["lbvh", "cubql"]]
+    param_names = ["query_radius", "leaf_size", "device", "constructor"]
 
     number = 5
     timeout = 120
 
-    def setup(self, query_radius, leaf_size, device):
+    @setup_once
+    def setup(self, query_radius, leaf_size, device, bvh_constructor):
         with wp.ScopedDevice(device):
             from pxr import Usd, UsdGeom
 
@@ -379,7 +371,7 @@ class BvhAABBQuery:
             self.device = wp.get_device(device)
             wp.load_module(device=self.device)
 
-            asset_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), "bunny.usd"))
+            asset_stage = Usd.Stage.Open(os.path.join(get_asset_directory(), "bunny.usd"))
             mesh_geom = UsdGeom.Mesh(asset_stage.GetPrimAtPath("/root/bunny"))
 
             points_base = np.array(mesh_geom.GetPointsAttr().Get())
@@ -422,11 +414,13 @@ class BvhAABBQuery:
             )
 
             if leaf_size == 0:
-                self.bvh = wp.Bvh(self.lowers, self.uppers)
-                self.mesh = wp.Mesh(self.points, wp.array(indices, dtype=int))
+                self.bvh = wp.Bvh(self.lowers, self.uppers, constructor=bvh_constructor)
+                self.mesh = wp.Mesh(self.points, wp.array(indices, dtype=int), bvh_constructor=bvh_constructor)
             else:
-                self.bvh = wp.Bvh(self.lowers, self.uppers, leaf_size=leaf_size)
-                self.mesh = wp.Mesh(self.points, wp.array(indices, dtype=int), bvh_leaf_size=leaf_size)
+                self.bvh = wp.Bvh(self.lowers, self.uppers, leaf_size=leaf_size, constructor=bvh_constructor)
+                self.mesh = wp.Mesh(
+                    self.points, wp.array(indices, dtype=int), bvh_leaf_size=leaf_size, bvh_constructor=bvh_constructor
+                )
 
             buffer_size_per_vertex = 32
             self.vertex_colliding_triangles_offsets = wp.array(
@@ -439,102 +433,169 @@ class BvhAABBQuery:
             self.bvh_vertex_triangle_collision_detection_kernel = get_v_t_collision_kernel(True)
             self.mesh_vertex_triangle_collision_detection_kernel = get_v_t_collision_kernel(False)
 
-            if self.bvh.device.is_cpu:
-                self.cmd_bvh = wp.launch(
-                    dim=NUM_QUERY_POINTS,
-                    kernel=self.bvh_vertex_triangle_collision_detection_kernel,
-                    inputs=[
-                        query_radius,
-                        self.bvh.id,
-                        self.query_points,
-                        self.vertex_colliding_triangles_offsets,
-                    ],
-                    outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
-                    record_cmd=True,
-                )
+            wp.load_module(device=device)
+            with wp.ScopedCapture(force_module_load=False) as capture:
+                for _ in range(NUM_TRIES):
+                    wp.launch(
+                        dim=NUM_QUERY_POINTS,
+                        kernel=self.bvh_vertex_triangle_collision_detection_kernel,
+                        inputs=[
+                            query_radius,
+                            self.bvh.id,
+                            self.query_points,
+                            self.vertex_colliding_triangles_offsets,
+                        ],
+                        outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
+                    )
 
-                self.cmd_mesh = wp.launch(
-                    dim=NUM_QUERY_POINTS,
-                    kernel=self.mesh_vertex_triangle_collision_detection_kernel,
-                    inputs=[
-                        query_radius,
-                        self.mesh.id,
-                        self.query_points,
-                        self.vertex_colliding_triangles_offsets,
-                    ],
-                    outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
-                    record_cmd=True,
-                )
-            else:
-                wp.load_module(device=device)
-                with wp.ScopedCapture(force_module_load=False) as capture:
-                    for _ in range(NUM_TRIES):
-                        wp.launch(
-                            dim=NUM_QUERY_POINTS,
-                            kernel=self.bvh_vertex_triangle_collision_detection_kernel,
-                            inputs=[
-                                query_radius,
-                                self.bvh.id,
-                                self.query_points,
-                                self.vertex_colliding_triangles_offsets,
-                            ],
-                            outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
-                        )
+            self.cuda_graph_bvh_aabb_vs_aabb = capture.graph
 
-                self.cuda_graph_bvh_aabb_vs_aabb = capture.graph
+            with wp.ScopedCapture(force_module_load=False) as capture:
+                for _ in range(NUM_TRIES):
+                    wp.launch(
+                        dim=NUM_QUERY_POINTS,
+                        kernel=self.mesh_vertex_triangle_collision_detection_kernel,
+                        inputs=[
+                            query_radius,
+                            self.mesh.id,
+                            self.query_points,
+                            self.vertex_colliding_triangles_offsets,
+                        ],
+                        outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
+                    )
 
-                with wp.ScopedCapture(force_module_load=False) as capture:
-                    for _ in range(NUM_TRIES):
-                        wp.launch(
-                            dim=NUM_QUERY_POINTS,
-                            kernel=self.mesh_vertex_triangle_collision_detection_kernel,
-                            inputs=[
-                                query_radius,
-                                self.mesh.id,
-                                self.query_points,
-                                self.vertex_colliding_triangles_offsets,
-                            ],
-                            outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
-                        )
+            self.cuda_graph_mesh_aabb_vs_aabb = capture.graph
 
-                self.cuda_graph_mesh_aabb_vs_aabb = capture.graph
-
-                # warm up run
-                wp.capture_launch(self.cuda_graph_bvh_aabb_vs_aabb)
-                wp.capture_launch(self.cuda_graph_mesh_aabb_vs_aabb)
-                wp.synchronize_device(self.device)
-
-    @skip_for_params(
-        [t for t in list(itertools.product([0.002, 0.004, 0.008], [0, 8], ["cpu"])) if t != (0.002, 0, "cpu")]
-    )
-    @skip_benchmark_if(USD_AVAILABLE is False)
-    def time_bvh_aabb_vs_aabb_query(self, query_radius, leaf_size, device):
-        if self.bvh.device.is_cpu:
-            self.cmd_bvh.launch()
-        else:
+            # warm up run
             wp.capture_launch(self.cuda_graph_bvh_aabb_vs_aabb)
+            wp.capture_launch(self.cuda_graph_mesh_aabb_vs_aabb)
+            wp.synchronize_device(self.device)
+
+    @skip_benchmark_if(USD_AVAILABLE is False)
+    def time_bvh_aabb_vs_aabb_query(self, query_radius, leaf_size, device, bvh_constructor):
+        wp.capture_launch(self.cuda_graph_bvh_aabb_vs_aabb)
         wp.synchronize_device(self.device)
 
-    @skip_for_params(
-        [t for t in list(itertools.product([0.002, 0.004, 0.008], [0, 8], ["cpu"])) if t != (0.002, 0, "cpu")]
-    )
     @skip_benchmark_if(USD_AVAILABLE is False)
-    def time_mesh_aabb_vs_aabb_query(self, query_radius, leaf_size, device):
-        if self.bvh.device.is_cpu:
-            self.cmd_mesh.launch()
-        else:
-            wp.capture_launch(self.cuda_graph_mesh_aabb_vs_aabb)
+    def time_mesh_aabb_vs_aabb_query(self, query_radius, leaf_size, device, bvh_constructor):
+        wp.capture_launch(self.cuda_graph_mesh_aabb_vs_aabb)
         wp.synchronize_device(self.device)
+
+
+CPU_NUM_QUERY_POINTS = 32768
+
+
+class BvhAABBQueryCPU:
+    """Broad-phase AABB query timing on CPU for both ``wp.Bvh`` and ``wp.Mesh``.
+
+    Uses a bunny mesh (~12k triangle bounds) with 32k query AABBs at two radii
+    (sparse: 0.002, dense: 0.03) and three leaf sizes (default/1/8).
+    The timings query AABBs that traverse the tree.
+    """
+
+    params = [[0.002, 0.03], [0, 1, 8], ["sah"]]
+    param_names = ["query_radius", "leaf_size", "constructor"]
+
+    number = 5
+    repeat = 10
+    timeout = 300
+
+    def setup_cache(self):
+        """Load the mesh and generate query points once; device arrays are built per param in setup().
+
+        Returns NumPy data only: asv pickles the cache to disk, and Warp arrays are not picklable.
+        """
+        from pxr import Usd, UsdGeom
+
+        asset_stage = Usd.Stage.Open(os.path.join(get_asset_directory(), "bunny.usd"))
+        mesh_geom = UsdGeom.Mesh(asset_stage.GetPrimAtPath("/root/bunny"))
+
+        points_np = np.array(mesh_geom.GetPointsAttr().Get())
+        indices_np = np.array(mesh_geom.GetFaceVertexIndicesAttr().Get())
+        bb_min = points_np.min(axis=0)
+        bb_max = points_np.max(axis=0)
+
+        rng = default_rng(42)
+        query_points_np = (bb_min + (bb_max - bb_min) * rng.random((CPU_NUM_QUERY_POINTS, 3))).astype(np.float32)
+
+        return {
+            "points_np": points_np,
+            "indices_np": indices_np,
+            "query_points_np": query_points_np,
+        }
+
+    @setup_once
+    def setup(self, cache, query_radius, leaf_size, bvh_constructor):
+        wp.init()
+        self.device = wp.get_device("cpu")
+
+        with wp.ScopedDevice(self.device):
+            wp.load_module(device=self.device)
+
+            points = wp.array(cache["points_np"], dtype=wp.vec3)
+            indices = wp.array(cache["indices_np"], dtype=int)
+            query_points = wp.array(cache["query_points_np"], dtype=wp.vec3)
+
+            num_faces = int(cache["indices_np"].shape[0] / 3)
+            lowers = wp.zeros(num_faces, dtype=wp.vec3)
+            uppers = wp.zeros(num_faces, dtype=wp.vec3)
+            wp.launch(dim=num_faces, kernel=compute_tri_aabbs, inputs=[points, indices], outputs=[lowers, uppers])
+
+            if leaf_size == 0:
+                self.bvh = wp.Bvh(lowers, uppers, constructor=bvh_constructor)
+                self.mesh = wp.Mesh(points, indices, bvh_constructor=bvh_constructor)
+            else:
+                self.bvh = wp.Bvh(lowers, uppers, leaf_size=leaf_size, constructor=bvh_constructor)
+                self.mesh = wp.Mesh(points, indices, bvh_leaf_size=leaf_size, bvh_constructor=bvh_constructor)
+
+            buffer_size_per_vertex = 32
+            self.vertex_colliding_triangles_offsets = wp.array(
+                np.arange(0, buffer_size_per_vertex * (CPU_NUM_QUERY_POINTS + 1), buffer_size_per_vertex, dtype=int),
+                dtype=wp.int32,
+            )
+            self.vertex_colliding_triangles = wp.zeros(
+                2 * buffer_size_per_vertex * CPU_NUM_QUERY_POINTS, dtype=wp.int32
+            )
+            self.vertex_colliding_triangles_count = wp.zeros(CPU_NUM_QUERY_POINTS, dtype=wp.int32)
+
+            bvh_kernel = get_v_t_collision_kernel(True)
+            mesh_kernel = get_v_t_collision_kernel(False)
+
+            self.launches = {}
+            for name, geom_id, kernel, points_arr in (
+                ("bvh", self.bvh.id, bvh_kernel, query_points),
+                ("mesh", self.mesh.id, mesh_kernel, query_points),
+            ):
+                self.launches[name] = wp.launch(
+                    dim=CPU_NUM_QUERY_POINTS,
+                    kernel=kernel,
+                    inputs=[query_radius, geom_id, points_arr, self.vertex_colliding_triangles_offsets],
+                    outputs=[self.vertex_colliding_triangles, self.vertex_colliding_triangles_count],
+                    record_cmd=True,
+                )
+
+            # warm up
+            for launch in self.launches.values():
+                launch.launch()
+
+    @skip_benchmark_if(USD_AVAILABLE is False)
+    def time_bvh_aabb_vs_aabb_query(self, cache, query_radius, leaf_size, bvh_constructor):
+        self.launches["bvh"].launch()
+
+    @skip_benchmark_if(USD_AVAILABLE is False)
+    def time_mesh_aabb_vs_aabb_query(self, cache, query_radius, leaf_size, bvh_constructor):
+        self.launches["mesh"].launch()
 
 
 class BvhRayQuery:
-    params = [[480, 1080], [0, 8], ["cpu", "cuda"]]
-    param_names = ["resolution", "leaf_size", "device"]
+    params = [[480, 1080], [0, 8], ["cuda"], ["lbvh", "cubql"]]
+    param_names = ["resolution", "leaf_size", "device", "constructor"]
 
     number = 5
     timeout = 120
 
-    def setup(self, resolution, leaf_size, device):
+    @setup_once
+    def setup(self, resolution, leaf_size, device, bvh_constructor):
         cam_pos = wp.vec3(0.0, 0.75, 7.0)
         cam_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
         horizontal_aperture = 36.0
@@ -555,7 +616,7 @@ class BvhRayQuery:
             wp.init()
             wp.load_module(device=self.device)
 
-            asset_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), "bunny.usd"))
+            asset_stage = Usd.Stage.Open(os.path.join(get_asset_directory(), "bunny.usd"))
             mesh_geom = UsdGeom.Mesh(asset_stage.GetPrimAtPath("/root/bunny"))
 
             points_base = np.array(mesh_geom.GetPointsAttr().Get())
@@ -587,11 +648,13 @@ class BvhRayQuery:
                 outputs=[self.lowers, self.uppers],
             )
             if leaf_size == 0:
-                self.bvh = wp.Bvh(self.lowers, self.uppers)
-                self.mesh = wp.Mesh(self.points, wp.array(indices, dtype=int))
+                self.bvh = wp.Bvh(self.lowers, self.uppers, constructor=bvh_constructor)
+                self.mesh = wp.Mesh(self.points, wp.array(indices, dtype=int), bvh_constructor=bvh_constructor)
             else:
-                self.bvh = wp.Bvh(self.lowers, self.uppers, leaf_size=leaf_size)
-                self.mesh = wp.Mesh(self.points, wp.array(indices, dtype=int), bvh_leaf_size=leaf_size)
+                self.bvh = wp.Bvh(self.lowers, self.uppers, leaf_size=leaf_size, constructor=bvh_constructor)
+                self.mesh = wp.Mesh(
+                    self.points, wp.array(indices, dtype=int), bvh_leaf_size=leaf_size, bvh_constructor=bvh_constructor
+                )
 
             bb_min = bounding_box[0]
             bb_max = bounding_box[1]
@@ -632,92 +695,53 @@ class BvhRayQuery:
             self.bvh_ray_vs_aabb_query_kernel = get_ray_query_kernel(True)
             self.mesh_ray_vs_aabb_query_kernel = get_ray_query_kernel(False)
 
-            if self.bvh.device.is_cpu:
-                self.cmd_bvh_query = wp.launch(
-                    dim=self.num_rays,
-                    kernel=self.bvh_ray_vs_aabb_query_kernel,
-                    inputs=[
-                        self.bvh.id,
-                        self.camera,
-                        self.mesh_pos,
-                        self.mesh_rot,
-                        self.rays_width,
-                        self.rays_height,
-                    ],
-                    outputs=[self.rays],
-                    record_cmd=True,
-                )
-                self.cmd_mesh_query = wp.launch(
-                    dim=self.num_rays,
-                    kernel=self.mesh_ray_vs_aabb_query_kernel,
-                    inputs=[
-                        self.mesh.id,
-                        self.camera,
-                        self.mesh_pos,
-                        self.mesh_rot,
-                        self.rays_width,
-                        self.rays_height,
-                    ],
-                    outputs=[self.rays],
-                    record_cmd=True,
-                )
+            wp.load_module(device=device)
+            with wp.ScopedCapture(force_module_load=False) as capture:
+                for _ in range(NUM_TRIES):
+                    wp.launch(
+                        dim=self.num_rays,
+                        kernel=self.bvh_ray_vs_aabb_query_kernel,
+                        inputs=[
+                            self.bvh.id,
+                            self.camera,
+                            self.mesh_pos,
+                            self.mesh_rot,
+                            self.rays_width,
+                            self.rays_height,
+                        ],
+                        outputs=[self.rays],
+                    )
 
-            else:
-                wp.load_module(device=device)
-                with wp.ScopedCapture(force_module_load=False) as capture:
-                    for _ in range(NUM_TRIES):
-                        wp.launch(
-                            dim=self.num_rays,
-                            kernel=self.bvh_ray_vs_aabb_query_kernel,
-                            inputs=[
-                                self.bvh.id,
-                                self.camera,
-                                self.mesh_pos,
-                                self.mesh_rot,
-                                self.rays_width,
-                                self.rays_height,
-                            ],
-                            outputs=[self.rays],
-                        )
+            self.cuda_graph_bvh_ray_vs_aabb = capture.graph
 
-                self.cuda_graph_bvh_ray_vs_aabb = capture.graph
+            with wp.ScopedCapture(force_module_load=False) as capture:
+                for _ in range(NUM_TRIES):
+                    wp.launch(
+                        dim=self.num_rays,
+                        kernel=self.mesh_ray_vs_aabb_query_kernel,
+                        inputs=[
+                            self.mesh.id,
+                            self.camera,
+                            self.mesh_pos,
+                            self.mesh_rot,
+                            self.rays_width,
+                            self.rays_height,
+                        ],
+                        outputs=[self.rays],
+                    )
+            self.cuda_graph_mesh_ray_vs_aabb = capture.graph
 
-                with wp.ScopedCapture(force_module_load=False) as capture:
-                    for _ in range(NUM_TRIES):
-                        wp.launch(
-                            dim=self.num_rays,
-                            kernel=self.mesh_ray_vs_aabb_query_kernel,
-                            inputs=[
-                                self.mesh.id,
-                                self.camera,
-                                self.mesh_pos,
-                                self.mesh_rot,
-                                self.rays_width,
-                                self.rays_height,
-                            ],
-                            outputs=[self.rays],
-                        )
-                self.cuda_graph_mesh_ray_vs_aabb = capture.graph
-
-                # warm up run
-                wp.capture_launch(self.cuda_graph_bvh_ray_vs_aabb)
-                wp.capture_launch(self.cuda_graph_mesh_ray_vs_aabb)
-                wp.synchronize_device()
-
-    @skip_for_params([t for t in itertools.product([480, 1080], [0, 8], ["cpu"]) if t != (480, 0, "cpu")])
-    @skip_benchmark_if(USD_AVAILABLE is False)
-    def time_bvh_ray_vs_aabb_query(self, resolution, leaf_size, device):
-        if self.bvh.device.is_cpu:
-            self.cmd_bvh_query.launch()
-        else:
+            # warm up run
             wp.capture_launch(self.cuda_graph_bvh_ray_vs_aabb)
+            wp.capture_launch(self.cuda_graph_mesh_ray_vs_aabb)
+            wp.synchronize_device()
+
+    @skip_benchmark_if(USD_AVAILABLE is False)
+    def time_bvh_ray_vs_aabb_query(self, resolution, leaf_size, device, bvh_constructor):
+        wp.capture_launch(self.cuda_graph_bvh_ray_vs_aabb)
         wp.synchronize_device()
 
-    @skip_for_params([t for t in itertools.product([480, 1080], [0, 8], ["cpu"]) if t != (480, 0, "cpu")])
     @skip_benchmark_if(USD_AVAILABLE is False)
-    def time_mesh_ray_vs_aabb_query(self, resolution, leaf_size, device):
-        if self.bvh.device.is_cpu:
-            self.cmd_mesh_query.launch()
-        else:
-            wp.capture_launch(self.cuda_graph_mesh_ray_vs_aabb)
+    def time_mesh_ray_vs_aabb_query(self, resolution, leaf_size, device, bvh_constructor):
+        wp.capture_launch(self.cuda_graph_mesh_ray_vs_aabb)
         wp.synchronize_device()

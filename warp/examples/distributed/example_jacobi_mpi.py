@@ -27,7 +27,7 @@ from mpi4py import MPI
 
 import warp as wp
 
-wp.config.quiet = True  # Suppress wp.init() output
+wp.config.log_level = wp.LOG_WARNING  # Suppress wp.init() info/debug output
 
 
 tol = 1e-8
@@ -35,7 +35,7 @@ wptype = wp.float32  # Global precision setting, can set wp.float64 here for dou
 pi = wptype(math.pi)  # GitHub #485
 
 
-def calc_default_device(mpi_comm: "MPI.Comm") -> wp.context.Device:
+def calc_default_device(mpi_comm: "MPI.Comm") -> wp.Device:
     """Return the device that should be used for the current rank.
 
     This function is used to ensure that multiple MPI ranks running on the same
@@ -467,7 +467,7 @@ if __name__ == "__main__":
     parser.add_argument("--nccheck", type=int, default=1, help="Check convergence every nccheck iterations.")
     parser.add_argument("--nx", type=int, default=16384, help="Total resolution in x.")
     parser.add_argument("--ny", type=int, default=16384, help="Total resolution in y.")
-    parser.add_argument("-csv", action="store_true", help="Print results as CSV values.")
+    parser.add_argument("--csv", action="store_true", help="Print results as CSV values.")
     parser.add_argument(
         "--visualize",
         action="store_true",

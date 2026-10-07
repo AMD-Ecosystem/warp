@@ -32,7 +32,7 @@ dynamic = ["version", "readme"]
 
 [project.urls]
 Homepage = "https://developer.nvidia.com/warp-python"
-Documentation = "https://nvidia.github.io/warp"
+Documentation = "https://nvidia.github.io/warp/stable/"
 Repository = "https://github.com/NVIDIA/warp"
 Issues = "https://github.com/NVIDIA/warp/issues"
 Changelog = "https://github.com/NVIDIA/warp/blob/main/CHANGELOG.md"
@@ -45,28 +45,31 @@ docs = [
     "myst_parser",
 ]
 benchmark = [
-    "usd-core>=25.5 ; platform_machine != 'aarch64' and python_version < '3.14'",
-    "usd-exchange>=2.2 ; python_version >= '3.10' and python_version < '3.13' and platform_machine == 'aarch64'",
+    "usd-core>=25.5 ; (sys_platform != 'linux' or platform_machine != 'aarch64') and (sys_platform != 'win32' or (platform_machine != 'ARM64' and platform_machine != 'arm64' and platform_machine != 'aarch64'))",
+    "usd-exchange>=2.2 ; python_version >= '3.10' and python_version < '3.13' and sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 examples = [
-    "blosc>=1.11.1",
+    "blosc>=1.11.1 ; sys_platform != 'win32' or (platform_machine != 'ARM64' and platform_machine != 'arm64' and platform_machine != 'aarch64')",
     "matplotlib>=3.7.5",
     "pillow>=10.4.0",
     "psutil>=7.1.0",
     "pyglet>=2.1.9",
-    "usd-core>=25.5 ; platform_machine != 'aarch64' and python_version < '3.14'",
-    "usd-exchange>=2.2 ; python_version >= '3.10' and python_version < '3.13' and platform_machine == 'aarch64'",
+    "usd-core>=25.5 ; (sys_platform != 'linux' or platform_machine != 'aarch64') and (sys_platform != 'win32' or (platform_machine != 'ARM64' and platform_machine != 'arm64' and platform_machine != 'aarch64'))",
+    "usd-exchange>=2.2 ; python_version >= '3.10' and python_version < '3.13' and sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 torch-cu12 = [
     "warp-lang[examples]",
     "torch>=2.7.0",
 ]
+torch-cu13 = [
+    "warp-lang[examples]",
+    "torch>=2.9.0",
+]
 dev = [
     "warp-lang[examples]",
     "warp-lang[docs]",
-    "nvtx",
+    "nvtx ; sys_platform != 'win32' or (platform_machine != 'ARM64' and platform_machine != 'arm64' and platform_machine != 'aarch64')",
     "coverage[toml]",
-    "rmm-cu12 ; platform_system == 'Linux' and python_version < '3.14'",
     "ml-dtypes>=0.5.4",
 ]
 
@@ -83,10 +86,19 @@ cache-dir = ".cache/ruff"
 line-length = 120
 indent-width = 4
 extend-exclude = [
-    "notebooks",
+    # Skill eval fixtures stand in for third-party codebases under assessment.
+    # Their shape is what the evals grade, so they are neither linted nor
+    # formatted.
+    "skills/*/evals/files",
     "warp/_src/thirdparty/appdirs.py",
     "warp/_src/thirdparty/dlpack.py",
-    "tools",
+    "tools/build",
+    "tools/ci/deploy_doc.py",
+    "tools/ci/publishing",
+    "tools/cmake",
+    "tools/packman",
+    "tools/pre-commit-hooks",
+    "tools/repoman",
 ]
 
 [tool.ruff.lint]
@@ -119,16 +131,30 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "PLC0414"]
-"__init__.pyi" = ["E402", "I001"]
+"__init__.pyi" = ["B008", "E402", "I001"]
+# `warp/__init__.py` registers all Warp module source declarations before
+# importing implementation symbols, so the statement-before-import ordering is
+# intentional.
+"warp/__init__.py" = ["E402"]
 "warp/*.py" = ["PLC0414"]
 "warp/tests/*.py" = ["F841"]
+# Skill evaluation fixtures intentionally contain the defects agents must
+# find (e.g. a computed-but-never-consumed adjoint), so unused-variable
+# lints are expected there.
+"skills/warp-debug-gradients/evals/files/**/*.py" = ["F841", "RUF059"]
 "asv/benchmarks/**.py" = ["RUF012"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.format]
-exclude = ["warp/__init__.pyi"]
+# These skill trees contain signed artifacts and must remain byte-for-byte
+# aligned with the skill-signing pipeline until formatting is coordinated there.
+exclude = [
+    "skills/warp-compile-time-optimizer/**",
+    "skills/warp-debug-gradients/**",
+    "warp/__init__.pyi",
+]
 quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
@@ -136,6 +162,8 @@ line-ending = "auto"
 docstring-code-format = true
 
 [tool.coverage.run]
+# Use sys.monitoring on Python 3.12+ to reduce tracing overhead; Coverage.py falls back on older versions.
+core = "sysmon"
 source = ["warp", "warp.render"]
 disable_warnings = [
     "module-not-measured",
@@ -201,28 +229,83 @@ omit = [
 
 [tool.uv]
 managed = true
-
-[[tool.uv.index]]
-name = "testpypi"
-url = "https://test.pypi.org/simple/"
-publish-url = "https://test.pypi.org/legacy/"
-explicit = true
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+conflicts = [
+    [
+        { extra = "torch-cu12" },
+        { extra = "torch-cu13" },
+    ],
+]
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu128", extra = "torch-cu12" }]
+torch = [
+    { index = "pytorch-cu126", extra = "torch-cu12" },
+    { index = "pytorch-cu130", extra = "torch-cu13" },
+]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.towncrier]
+directory = "changelog"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## [{version}] - {project_date}"
+issue_format = "[GH-{issue}](https://github.com/NVIDIA/warp/issues/{issue})"
+issue_pattern = "\\d+"
+wrap = false
+ignore = []
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "documentation"
+name = "Documentation"
+showcontent = true
+
 [tool.typos]
-files.extend-exclude = ["/tools/packman", "/tools/repoman", "/PUBLICATIONS.md", "/licenses", "/warp/native/nanovdb", "/warp/native/cuBQL", "*.svg", "*.usda"]
+# Skill eval fixtures stand in for third-party codebases under assessment, so
+# their prose and identifiers are deliberately not held to Warp's conventions.
+files.extend-exclude = ["/tools/packman", "/tools/repoman", "/PUBLICATIONS.md", "/licenses", "/warp/native/nanovdb", "/warp/native/cuBQL", "*.svg", "*.usda", "/skills/*/evals/files"]
 
 [tool.typos.default]
 extend-ignore-re = [
     # MSVC compiler flags like /Fo, /Fe, /Fd, etc.
-    "/F[oedpircaOAu]"
+    "/F[oedpircaOAu]",
+    # Short-SHA commit links in design/deprecations.md, e.g. [ba7a865](https://github.com/NVIDIA/warp/commit/<sha>)
+    "\\[[0-9a-f]{7,40}\\]\\(https://github\\.com/NVIDIA/warp/commit/[0-9a-f]{7,40}\\)",
 ]
 
 [tool.typos.default.extend-words]
@@ -231,6 +314,7 @@ commun = "commun"
 dout = "dout"
 iy = "iy"
 iz = "iz"
+lod = "lod"
 nd = "nd"
 setp = "setp"
 transformd = "transformd"

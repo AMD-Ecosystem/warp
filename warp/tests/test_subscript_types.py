@@ -3,8 +3,9 @@
 
 """Tests for subscript-style type annotations on arrays and tiles, plus the internal Vector/Matrix/Quaternion/Transformation generics."""
 
+import sys
 import unittest
-from typing import Any, Literal, TypeVar, get_origin
+from typing import Any, Literal, TypeVar, Union, get_origin
 
 import numpy as np
 
@@ -157,8 +158,8 @@ def generic_scale_subscript(x: wp.array[Any], s: Any):
     x[i] = s * x[i]
 
 
-wp.overload(generic_scale_subscript, [wp.array(dtype=wp.float32), wp.float32])
-wp.overload(generic_scale_subscript, [wp.array(dtype=wp.float64), wp.float64])
+wp.overload(generic_scale_subscript, [wp.array[wp.float32], wp.float32])
+wp.overload(generic_scale_subscript, [wp.array[wp.float64], wp.float64])
 
 
 def test_subscript_generic_kernel(test, device):
@@ -193,6 +194,21 @@ def test_subscript_indexedarray_kernel(test, device):
 
     wp.launch(indexed_add, dim=n, inputs=[iarr, out], device=device)
     np.testing.assert_allclose(out.numpy(), [1.0, 3.0, 5.0, 7.0, 9.0])
+
+
+def test_subscript_local_dtype_unique_kernel(test, device):
+    """Test subscript annotations with local dtype bindings in unique-module kernels."""
+    dtype = wp.float16
+
+    @wp.kernel(module="unique")
+    def local_dtype_kernel(input: wp.array2d[dtype], output: wp.array[dtype]):
+        output[0] = input[0, 0] + dtype(1.0)
+
+    input_data = wp.full((1, 1), 2.0, dtype=dtype, device=device)
+    output = wp.zeros(1, dtype=dtype, device=device)
+
+    wp.launch(local_dtype_kernel, dim=1, inputs=[input_data, output], device=device)
+    np.testing.assert_allclose(output.numpy(), [3.0], rtol=1.0e-3)
 
 
 def test_subscript_non_array_input(test, device):
@@ -470,6 +486,65 @@ class TestSubscriptTypes(unittest.TestCase):
         vars2 = arr_ann.vars
         self.assertIs(vars1, vars2)
 
+    @unittest.skipIf(
+        sys.version_info < (3, 11),
+        "Python 3.10 type.__or__ raises TypeError for non-type operands instead of "
+        "returning NotImplemented, so the __ror__ fallback is never triggered.",
+    )
+    def test_annotation_union_operator(self):
+        """Array annotations support runtime union expressions in both operand orders."""
+        arr_ann = wp.array[float]
+        ia_ann = wp.indexedarray[wp.float64]
+
+        u1 = arr_ann | float
+        self.assertIs(get_origin(u1), Union)
+        self.assertEqual(u1.__args__, (arr_ann, float))
+
+        u2 = float | arr_ann
+        self.assertIs(get_origin(u2), Union)
+        self.assertEqual(u2.__args__, (float, arr_ann))
+
+        u3 = arr_ann | None
+        self.assertIs(get_origin(u3), Union)
+        self.assertCountEqual(u3.__args__, (arr_ann, type(None)))
+
+        u4 = None | ia_ann
+        self.assertIs(get_origin(u4), Union)
+        self.assertCountEqual(u4.__args__, (ia_ann, type(None)))
+
+        # Chaining produces a regular Union annotation.
+        chained = arr_ann | float | ia_ann | float
+        self.assertIs(get_origin(chained), Union)
+        self.assertIn(arr_ann, chained.__args__)
+        self.assertIn(float, chained.__args__)
+        self.assertIn(ia_ann, chained.__args__)
+
+    @unittest.skipIf(
+        sys.version_info < (3, 11),
+        "Python 3.10 type.__or__ raises TypeError for non-type operands instead of "
+        "returning NotImplemented, so the __ror__ fallback is never triggered.",
+    )
+    def test_annotation_union_invalid_for_codegen(self):
+        """Union annotations are intentionally invalid in Warp codegen."""
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Union type annotations are only supported at Python scope",
+        ):
+
+            @wp.func
+            def _invalid_union_arg(a: wp.array[float] | float) -> float:
+                return 0.0
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Union type annotations are only supported at Python scope",
+        ):
+
+            @wp.func
+            def _invalid_native_union_arg(a: int | float) -> float:
+                return 0.0
+
     def test_annotation_helpers(self):
         """Test matches_array_class and concrete_array_type helpers."""
         arr_ann = wp.array[float]
@@ -507,45 +582,62 @@ class TestSubscriptTypes(unittest.TestCase):
         self.assertNotEqual(a1, ia)
 
     def test_annotation_repr(self):
-        """repr() produces readable dtype names instead of raw class paths."""
+        """repr() produces subscript forms that match source syntax and round-trip."""
         # Built-in scalar dtypes
-        self.assertEqual(repr(wp.array[wp.float32]), "wp.array(dtype=wp.float32, ndim=1)")
-        self.assertEqual(repr(wp.array[wp.uint32]), "wp.array(dtype=wp.uint32, ndim=1)")
+        self.assertEqual(repr(wp.array[wp.float32]), "wp.array[wp.float32]")
+        self.assertEqual(repr(wp.array[wp.uint32]), "wp.array[wp.uint32]")
 
-        # Higher-dimensional arrays
-        self.assertEqual(repr(wp.array4d[wp.uint32]), "wp.array(dtype=wp.uint32, ndim=4)")
-        self.assertEqual(repr(wp.array3d[wp.vec3f]), "wp.array(dtype=wp.vec3f, ndim=3)")
-        self.assertEqual(repr(wp.array2d[wp.float32]), "wp.array(dtype=wp.float32, ndim=2)")
+        # Higher-dimensional arrays use the arrayNd shorthand
+        self.assertEqual(repr(wp.array4d[wp.uint32]), "wp.array4d[wp.uint32]")
+        self.assertEqual(repr(wp.array3d[wp.vec3f]), "wp.array3d[wp.vec3f]")
+        self.assertEqual(repr(wp.array2d[wp.float32]), "wp.array2d[wp.float32]")
 
         # Vector/matrix/quaternion/transform dtypes with wp.* aliases
-        self.assertEqual(repr(wp.array[wp.vec3f]), "wp.array(dtype=wp.vec3f, ndim=1)")
-        self.assertEqual(repr(wp.array[wp.mat44f]), "wp.array(dtype=wp.mat44f, ndim=1)")
-        self.assertEqual(repr(wp.array[wp.quatf]), "wp.array(dtype=wp.quatf, ndim=1)")
-        self.assertEqual(repr(wp.array[wp.transformf]), "wp.array(dtype=wp.transformf, ndim=1)")
+        self.assertEqual(repr(wp.array[wp.vec3f]), "wp.array[wp.vec3f]")
+        self.assertEqual(repr(wp.array[wp.mat44f]), "wp.array[wp.mat44f]")
+        self.assertEqual(repr(wp.array[wp.quatf]), "wp.array[wp.quatf]")
+        self.assertEqual(repr(wp.array[wp.transformf]), "wp.array[wp.transformf]")
 
-        # indexedarray uses its own class name
-        self.assertEqual(repr(wp.indexedarray[wp.float32]), "wp.indexedarray(dtype=wp.float32, ndim=1)")
+        # indexedarray has no arrayNd aliases, so it uses the explicit Literal form
+        self.assertEqual(repr(wp.indexedarray[wp.float32]), "wp.indexedarray[wp.float32]")
         self.assertEqual(
             repr(wp.indexedarray[wp.float32, Literal[3]]),
-            "wp.indexedarray(dtype=wp.float32, ndim=3)",
+            "wp.indexedarray[wp.float32, Literal[3]]",
         )
 
-        # Any dtype / ndim
-        ann = _ArrayAnnotation(dtype=Any, ndim=4)
-        self.assertEqual(repr(ann), "wp.array(dtype=Any, ndim=4)")
-        ann = _ArrayAnnotation(dtype=wp.float32, ndim=Any)
-        self.assertEqual(repr(ann), "wp.array(dtype=wp.float32, ndim=Any)")
+        # Any dtype / ndim still render as subscript forms
+        self.assertEqual(repr(_ArrayAnnotation(dtype=Any, ndim=4)), "wp.array4d[Any]")
+        self.assertEqual(repr(_ArrayAnnotation(dtype=wp.float32, ndim=Any)), "wp.array[wp.float32, Any]")
+        self.assertEqual(repr(_ArrayAnnotation(dtype=Any, ndim=Any)), "wp.array[Any, Any]")
 
-        # Custom vector/matrix dtypes with no wp.* alias use type_repr
+        # repr() round-trips: eval(repr(x)) == x
+        for annotation in [
+            wp.array[wp.float32],
+            wp.array4d[wp.uint32],
+            wp.array3d[wp.vec3f],
+            wp.array[wp.float32, Any],
+            wp.indexedarray[wp.float32],
+            wp.indexedarray[wp.float32, Literal[3]],
+        ]:
+            self.assertEqual(eval(repr(annotation)), annotation)
+
+        # Custom vector/matrix dtypes with no wp.* alias fall back to the
+        # descriptive type_repr form, never the internal generic class name
         my_vec5 = wp.types.vector(length=5, dtype=wp.float32)
         r = repr(wp.array[my_vec5])
         self.assertIn("vector(length=5", r)
+        self.assertNotIn("vec_t", r)
         self.assertNotIn("<class", r)
 
         my_mat7x7 = wp.types.matrix(shape=(7, 7), dtype=wp.float32)
         r = repr(wp.array[my_mat7x7])
         self.assertIn("matrix(shape=(7, 7)", r)
+        self.assertNotIn("mat_t", r)
         self.assertNotIn("<class", r)
+
+        # Exotic quaternion/transform dtypes must not leak the internal name
+        self.assertNotIn("quat_t", repr(wp.array[wp.types.quaternion(dtype=wp.float16)]))
+        self.assertNotIn("transform_t", repr(wp.array[wp.types.transformation(dtype=wp.float16)]))
 
         # Struct dtype uses struct key, no wp. prefix
         @wp.struct
@@ -559,9 +651,9 @@ class TestSubscriptTypes(unittest.TestCase):
 
         # Dynamic types that resolve to a wp.* alias
         vec3d_dynamic = wp.types.vector(3, dtype=wp.float64)
-        self.assertEqual(repr(wp.array[vec3d_dynamic]), "wp.array(dtype=wp.vec3d, ndim=1)")
+        self.assertEqual(repr(wp.array[vec3d_dynamic]), "wp.array[wp.vec3d]")
         mat44f_dynamic = wp.types.matrix((4, 4), dtype=wp.float32)
-        self.assertEqual(repr(wp.array[mat44f_dynamic]), "wp.array(dtype=wp.mat44f, ndim=1)")
+        self.assertEqual(repr(wp.array[mat44f_dynamic]), "wp.array[wp.mat44f]")
 
         # Custom passthrough dtype whose __name__ collides with a warp symbol
         # should NOT get a wp. prefix (it's not the real wp.float32)
@@ -689,6 +781,12 @@ add_function_test(
     devices=devices,
 )
 add_function_test(TestSubscriptTypes, "test_subscript_generic_kernel", test_subscript_generic_kernel, devices=devices)
+add_function_test(
+    TestSubscriptTypes,
+    "test_subscript_local_dtype_unique_kernel",
+    test_subscript_local_dtype_unique_kernel,
+    devices=devices,
+)
 add_function_test(TestSubscriptTypes, "test_subscript_non_array_input", test_subscript_non_array_input, devices=devices)
 add_function_test(TestSubscriptTypes, "test_subscript_dtype_mismatch", test_subscript_dtype_mismatch, devices=devices)
 add_function_test(TestSubscriptTypes, "test_subscript_ndim_mismatch", test_subscript_ndim_mismatch, devices=devices)

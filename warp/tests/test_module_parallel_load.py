@@ -5,13 +5,59 @@
 wp.force_load() and wp.load_module().
 """
 
+import importlib
 import os
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from importlib import util
+from unittest import mock
+
+import numpy as np
 
 import warp as wp
+import warp._src.context as context
+
+# Chain of shared ``@wp.func`` helpers used by
+# ``TestParallelLoadSharedHelper`` below. Multiple helpers calling each
+# other transitively maximise the race surface: every kernel build
+# walks the entire chain, so concurrent ``adj.build`` calls have many
+# adjoint-state mutations to interleave with one another.
+
+
+@wp.func
+def _race_leaf(x: float) -> float:
+    a = wp.sin(x) + wp.cos(x)
+    a = a * a + 0.5
+    a = wp.sqrt(wp.abs(a) + 1.0)
+    b = wp.tan(x * 0.5) + wp.exp(-x * x * 0.01)
+    return a + b
+
+
+@wp.func
+def _race_mid(x: float, k: int) -> float:
+    s = float(0.0)
+    for _ in range(4):
+        s = s + _race_leaf(x + s)
+    if k > 0:
+        s = s * float(k)
+    else:
+        s = -s
+    return s
+
+
+@wp.func
+def _race_helper(x: float, idx: int) -> float:
+    y = _race_mid(x, idx)
+    z = float(idx) + 1.0
+    if idx % 2 == 0:
+        y = y + _race_leaf(z)
+    else:
+        y = y - _race_leaf(z)
+    return y
 
 
 def _generate_module_code(index):
@@ -28,7 +74,7 @@ def _generate_module_code(index):
 import warp as wp
 
 @wp.kernel
-def test_kernel_{index}(output: wp.array(dtype=float)):
+def test_kernel_{index}(output: wp.array[float]):
     tid = wp.tid()
     x = float(tid) + 1.0
     x = wp.sin(x) + wp.cos(x)
@@ -75,6 +121,75 @@ def _assert_modules_loaded_on_cpu(test, modules):
         test.assertTrue(has_cpu_exec, f"Module {m.name} was not loaded on CPU")
 
 
+def _make_parallel_cpu_kernel():
+    """Create a kernel in its own module for the parallel CPU load regression."""
+
+    module_name = f"parallel_cpu_load_{uuid.uuid4().hex}"
+
+    @wp.kernel(module=module_name)
+    def transform(values: wp.array[wp.int32]):
+        tid = wp.tid()
+        values[tid] = values[tid] * 2 + 1
+
+    return transform
+
+
+def _run_parallel_cpu_cold_start():
+    """Load and launch four CPU modules concurrently in a fresh subprocess."""
+    wp.init()
+
+    kernels = [_make_parallel_cpu_kernel() for _ in range(4)]
+    modules = [kernel.module for kernel in kernels]
+
+    # This is a fresh process, so none of the calls below should find an
+    # initialized LLVM target registry or an existing CPU JIT instance. Hold
+    # each worker at both native boundaries until all four are ready,
+    # maximizing concurrent first entry without changing production code.
+    compile_barrier = threading.Barrier(len(modules))
+    load_barrier = threading.Barrier(len(modules))
+    original_compile_cpp = context.runtime.llvm.wp_compile_cpp
+    original_load_obj = context.runtime.llvm.wp_load_obj
+
+    def synchronized_compile_cpp(*args):
+        compile_barrier.wait(timeout=120)
+        return original_compile_cpp(*args)
+
+    def synchronized_load_obj(*args):
+        load_barrier.wait(timeout=120)
+        return original_load_obj(*args)
+
+    with (
+        mock.patch.object(
+            context.runtime.llvm,
+            "wp_compile_cpp",
+            side_effect=synchronized_compile_cpp,
+        ),
+        mock.patch.object(
+            context.runtime.llvm,
+            "wp_load_obj",
+            side_effect=synchronized_load_obj,
+        ),
+    ):
+        wp.force_load(device="cpu", modules=modules, block_dim=1, max_workers=len(modules))
+
+    # Checking Module.execs is insufficient for this regression: the Python
+    # bookkeeping can contain a module whose native JIT instance is no longer
+    # reachable. Launch every kernel to force native lookup.
+    values = wp.array([0, 1, 2, 3], dtype=wp.int32, device="cpu")
+    for kernel in kernels:
+        wp.launch(
+            kernel,
+            dim=values.shape,
+            inputs=[values],
+            device="cpu",
+            block_dim=1,
+        )
+
+    actual = values.numpy()
+    expected = [15, 31, 47, 63]
+    np.testing.assert_array_equal(actual, expected)
+
+
 class TestModuleParallelLoad(unittest.TestCase):
     def test_force_load_serial(self):
         """Verify that serial compilation (max_workers=0) loads modules correctly."""
@@ -87,6 +202,67 @@ class TestModuleParallelLoad(unittest.TestCase):
         modules = _generate_modules(4)
         wp.force_load(device="cpu", modules=modules, max_workers=2)
         _assert_modules_loaded_on_cpu(self, modules)
+
+    def test_force_load_parallel_propagates_load_failure(self):
+        """Verify that parallel loading propagates a module-load failure."""
+        module_name = "warp.tests.aux_test_unresolved_func"
+        # Importing registers the invalid kernel without compiling it; force_load() triggers the real codegen error.
+        unresolved_func_module = importlib.import_module(module_name)
+        failed_module = wp.get_module(unresolved_func_module.__name__)
+
+        # The valid companion selects the parallel path and must finish loading before the error reaches the caller.
+        valid_module = _generate_modules(1)[0]
+
+        try:
+            with self.assertRaisesRegex(AttributeError, "Could not find function wp.missing_func"):
+                wp.force_load(device="cpu", modules=[failed_module, valid_module], max_workers=2)
+
+            _assert_modules_loaded_on_cpu(self, [valid_module])
+        finally:
+            # Keep the invalid fixture out of later force_load() calls.
+            context.user_modules.pop(module_name, None)
+            sys.modules.pop(module_name, None)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
+    def test_force_load_restores_cuda_context_on_failure(self):
+        """Verify that a module-load failure restores the calling thread's CUDA context."""
+        module_name = "warp.tests.aux_test_unresolved_func"
+        unresolved_func_module = importlib.import_module(module_name)
+        failed_module = wp.get_module(unresolved_func_module.__name__)
+        valid_module = _generate_modules(1)[0]
+        device = wp.get_device("cuda:0")
+
+        original_context = context.runtime.core.wp_cuda_context_get_current()
+        context.runtime.core.wp_cuda_context_set_current(None)
+        try:
+            with self.assertRaisesRegex(AttributeError, "Could not find function wp.missing_func"):
+                wp.force_load(device=device, modules=[valid_module, failed_module], max_workers=0)
+
+            self.assertIsNone(context.runtime.core.wp_cuda_context_get_current())
+        finally:
+            context.runtime.core.wp_cuda_context_set_current(original_context)
+            context.user_modules.pop(module_name, None)
+            sys.modules.pop(module_name, None)
+
+    def test_force_load_preserves_error_without_cuda_context_snapshot(self):
+        """Verify that cleanup does not mask a load error when no CUDA context was saved."""
+        module_name = "warp.tests.aux_test_unresolved_func"
+        unresolved_func_module = importlib.import_module(module_name)
+        failed_module = wp.get_module(unresolved_func_module.__name__)
+
+        try:
+            # Model CUDA becoming available after the entry-time snapshot check.
+            # There is no caller context to restore in this case, so cleanup must
+            # preserve the original module-load error.
+            with (
+                mock.patch.object(context, "is_cuda_driver_initialized", return_value=False),
+                mock.patch.object(context, "is_cuda_available", return_value=True),
+                self.assertRaisesRegex(AttributeError, "Could not find function wp.missing_func"),
+            ):
+                wp.force_load(device="cpu", modules=[failed_module], max_workers=0)
+        finally:
+            context.user_modules.pop(module_name, None)
+            sys.modules.pop(module_name, None)
 
     def test_force_load_config_default(self):
         """Verify that wp.config.load_module_max_workers is respected when max_workers is not passed."""
@@ -119,6 +295,152 @@ class TestModuleParallelLoad(unittest.TestCase):
         modules = _generate_modules(1)
         wp.force_load(device="cpu", modules=modules, max_workers=2)
         _assert_modules_loaded_on_cpu(self, modules)
+
+    def test_force_load_parallel_cpu_cold_start_kernel_lookup(self):
+        """Verify that modules loaded in parallel remain launchable on the CPU.
+
+        Run in a subprocess because the LLVM target registry and CPU JIT are
+        process-global, and their initialization races only occur on the first
+        native compilation and module loads. Give the subprocess a fresh
+        filesystem cache without clearing Warp's shared test cache, which is
+        unsafe under the parallel test runner.
+        """
+        with tempfile.TemporaryDirectory() as cache_path:
+            env = os.environ.copy()
+            env["WARP_CACHE_PATH"] = cache_path
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from warp.tests.test_module_parallel_load import _run_parallel_cpu_cold_start; "
+                        "_run_parallel_cpu_cold_start()"
+                    ),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=180,
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"Parallel CPU cold-start subprocess failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+
+
+def _assert_modules_loaded_on_cuda(test, modules, device):
+    for m in modules:
+        ctx = device.context
+        loaded = any(c == ctx for (c, _block_dim) in m.execs.keys())
+        test.assertTrue(loaded, f"Module {m.name} was not loaded on {device}")
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "CUDA codegen path race needs a CUDA device")
+class TestParallelLoadSharedHelper(unittest.TestCase):
+    """Regression test for the cross-module codegen race on CUDA.
+
+    Each ``ModuleBuilder`` walks the reachable ``@wp.func`` graph and
+    calls ``adj.build`` on each helper, which mutates per-Adjoint state
+    (``adj.blocks``, ``adj.deferred_static_expressions``, ...). When
+    two modules that reference the *same* helper build concurrently
+    (e.g., via ``wp.force_load(max_workers > 1)``), without
+    ``_codegen_lock`` around the codegen window the threads interleave
+    their writes to the shared adjoint and the emitted .cu file has
+    corrupt sections -- one helper's body emitted inside another, or
+    references to ``var_*`` / ``_idx`` / ``dim`` that were never
+    declared. nvrtc then rejects the file with dozens of syntax errors
+    and ``Module._compile`` raises.
+
+    Reproducing the race reliably requires:
+
+    * a non-trivial *call graph* of shared ``@wp.func`` helpers
+      (``_race_helper`` -> ``_race_mid`` -> ``_race_leaf``) so each
+      module's ``ModuleBuilder`` does meaningful shared adjoint work;
+    * enough modules submitted to ``force_load`` so the
+      ``ThreadPoolExecutor`` actually runs several builds
+      concurrently;
+    * a retry loop (``ATTEMPTS``) so we accept a probabilistic
+      reproduction -- the race is timing-dependent.
+
+    With the codegen lock in place every attempt succeeds. Without
+    the lock at least one attempt raises a build error.
+    """
+
+    NUM_MODULES = 8
+    ATTEMPTS = 4
+
+    @staticmethod
+    def _make_kernel(idx: int):
+        """Create a kernel in its own ``Module`` via ``module="unique"``.
+
+        With ``module="unique"``, every factory output lands in its own ``Module`` object. If N kernels
+        share a helper, N separate modules each try to inline that helper's adjoint at compile time.
+        """
+
+        @wp.kernel(module="unique")
+        def k(out: wp.array[float]):
+            tid = wp.tid()
+            x = float(tid) + float(idx)
+            out[tid] = _race_helper(x, idx)
+
+        return k
+
+    def _build_kernels(self, attempt: int):
+        """Build a fresh set of unique modules for the given attempt.
+
+        Vary the spawn count per attempt so each invocation builds new modules. After the first
+        attempt the earlier kernels' modules are already loaded, so subsequent ``force_load`` calls
+        would short-circuit on the hash check and never exercise the codegen path again.
+        """
+        offset = attempt * 1000
+        kernels = [self._make_kernel(offset + i) for i in range(self.NUM_MODULES)]
+        modules: list = []
+        seen: set = set()
+        for k in kernels:
+            k.module.mark_modified()
+            if id(k.module) in seen:
+                continue
+            seen.add(id(k.module))
+            modules.append(k.module)
+        return modules
+
+    def test_force_load_parallel_with_shared_func(self):
+        """N modules sharing a chain of ``@wp.func`` helpers must load
+        successfully under ``max_workers > 1``. Without the codegen
+        lock at least one of the ``ATTEMPTS`` parallel CUDA builds
+        raises because the shared helpers' adjoints were clobbered
+        mid-build."""
+        device = wp.get_preferred_device()
+        for attempt in range(self.ATTEMPTS):
+            modules = self._build_kernels(attempt)
+            try:
+                wp.force_load(device=device, modules=modules, max_workers=self.NUM_MODULES)
+            except Exception as e:
+                self.fail(
+                    f"attempt {attempt}: parallel build raised {type(e).__name__}: {e}. "
+                    "Check the ``_codegen_lock`` window in warp._src.context.Module._compile."
+                )
+            _assert_modules_loaded_on_cuda(self, modules, device)
+
+    def test_force_load_parallel_with_shared_func_high_concurrency(self):
+        """Same race but with more modules than worker threads, so the
+        ``ThreadPoolExecutor`` queues tasks and reuses workers between
+        builds."""
+        device = wp.get_preferred_device()
+        max_workers = max(2, self.NUM_MODULES // 2)
+        for attempt in range(self.ATTEMPTS):
+            modules = self._build_kernels(attempt + 100) + self._build_kernels(attempt + 200)
+            self.assertGreater(len(modules), max_workers)
+            try:
+                wp.force_load(device=device, modules=modules, max_workers=max_workers)
+            except Exception as e:
+                self.fail(
+                    f"attempt {attempt}: parallel build raised {type(e).__name__}: {e} (high-concurrency variant)."
+                )
+            _assert_modules_loaded_on_cuda(self, modules, device)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ Submodules
 
 These modules are automatically available when you ``import warp``.
 
+- :mod:`warp.build_experimental`
 - :mod:`warp.config`
 - :mod:`warp.types`
 - :mod:`warp.utils`
@@ -22,7 +23,6 @@ These modules must be explicitly imported (e.g., ``import warp.autograd``).
 
 - :mod:`warp.autograd`
 - :mod:`warp.fem`
-- :mod:`warp.jax_experimental`
 - :mod:`warp.optim`
 - :mod:`warp.render`
 - :mod:`warp.sparse`
@@ -38,6 +38,7 @@ Type Annotations
    Float
    Int
    Scalar
+   ref
 
 Data Types
 ----------
@@ -224,9 +225,8 @@ Spatial Acceleration
    BvhQueryTiled
    HashGrid
    HashGridQuery
-   HashGridQueryD
-   HashGridQueryH
    Mesh
+   MeshQuery
    MeshQueryAABB
    MeshQueryAABBTiled
    MeshQueryPoint
@@ -277,6 +277,7 @@ Kernel Programming
    WarpCodegenKeyError
    WarpCodegenTypeError
    WarpCodegenValueError
+   address_of
    func
    func_grad
    func_native
@@ -299,6 +300,8 @@ Kernel Execution
    Kernel
    Launch
    Module
+   ModuleBuildOptions
+   get_cuda_kernel_properties
    get_suggested_block_size
    launch
    launch_tiled
@@ -322,6 +325,7 @@ Device Management
 
    Device
    ScopedDevice
+   can_access
    get_cuda_device
    get_cuda_device_count
    get_cuda_devices
@@ -387,10 +391,13 @@ CUDA Memory Management
    :toctree: _generated
 
    Allocator
+   CudaManagedAllocator
+   MemoryKind
    ScopedAllocator
    ScopedMempool
    ScopedMempoolAccess
    ScopedPeerAccess
+   get_cuda_max_cluster_dim
    get_device_allocator
    get_mempool_release_threshold
    get_mempool_used_mem_current
@@ -415,6 +422,7 @@ Graph Management
    :nosignatures:
    :toctree: _generated
 
+   CaptureMode
    Graph
    ScopedCapture
    capture_begin
@@ -466,6 +474,34 @@ Timing Flags
    TIMING_MEMCPY
    TIMING_MEMSET
 
+CUDA Profiler Control
+^^^^^^^^^^^^^^^^^^^^^
+
+.. autosummary::
+   :nosignatures:
+   :toctree: _generated
+
+   ScopedCudaProfiler
+   cuda_profiler_start
+   cuda_profiler_stop
+
+Logging
+-------
+
+.. autosummary::
+   :nosignatures:
+   :toctree: _generated
+
+   Logger
+   ScopedLogLevel
+   ScopedLogger
+   get_logger
+   set_logger
+   LOG_DEBUG
+   LOG_ERROR
+   LOG_INFO
+   LOG_WARNING
+
 NumPy Interop
 -------------
 
@@ -494,11 +530,16 @@ JAX Interop
    :nosignatures:
    :toctree: _generated
 
+   JaxCallableGraphMode
+   JaxModulePreloadMode
+   clear_jax_callable_graph_cache
    device_from_jax
    device_to_jax
    dtype_from_jax
    dtype_to_jax
    from_jax
+   jax_callable
+   jax_kernel
    to_jax
 
 PyTorch Interop
@@ -574,6 +615,15 @@ Constants
    phi
    pi
    tau
+
+Configuration Modes
+-------------------
+
+.. autosummary::
+   :nosignatures:
+   :toctree: _generated
+
+   DeterministicMode
 
 Misc
 ----

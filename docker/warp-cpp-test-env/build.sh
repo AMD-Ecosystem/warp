@@ -124,6 +124,13 @@ if [[ "$PUSH" = false ]] && [[ -n "$REGISTRY" ]]; then
     echo
 fi
 
+if [[ -z "$REGISTRY" ]]; then
+    echo "To tag and push this image to a registry, run:"
+    echo "  docker tag $FULL_IMAGE <registry>/${IMAGE_NAME}:${TAG}"
+    echo "  docker push <registry>/${IMAGE_NAME}:${TAG}"
+    echo
+fi
+
 echo "To test the image, run:"
 echo "  docker run --rm -it $FULL_IMAGE"
 echo

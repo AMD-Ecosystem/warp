@@ -28,6 +28,7 @@ import time
 import build_llvm
 import warp._src.build_dll as build_dll
 import warp.config as config
+from warp._src.build_architecture import machine_architecture
 from warp._src.generated_files import generate_exports_header_file, generate_version_header
 
 
@@ -120,6 +121,32 @@ def find_cuda_sdk() -> str | None:
     return None
 
 
+def resolve_libmathdx_path(libmathdx_path: str) -> str:
+    """Return the directory that holds libmathdx's ``include`` and ``lib`` subdirectories.
+
+    libmathdx 0.4.0 and newer ship archives that wrap the payload in a single top-level
+    directory (e.g. ``libmathdx-linux-x86_64``), one level above the layout Warp compiles
+    and links against. Descend into that wrapper when the given path does not already
+    hold the expected layout.
+
+    Args:
+        libmathdx_path: Path to a libmathdx installation.
+
+    Returns:
+        The resolved path, or ``libmathdx_path`` unchanged when no nested directory
+        matches, leaving :func:`validate_libmathdx_path` to report the problem.
+    """
+    if os.path.isdir(os.path.join(libmathdx_path, "include")):
+        return libmathdx_path
+
+    for nested in sorted(glob.glob(os.path.join(libmathdx_path, "libmathdx-*"))):
+        if os.path.isdir(os.path.join(nested, "include")):
+            print(f"Using nested libmathdx directory '{nested}'")
+            return nested
+
+    return libmathdx_path
+
+
 def validate_libmathdx_path(libmathdx_path: str) -> bool:
     """Validate that libmathdx path exists and has required directory structure.
 
@@ -168,15 +195,17 @@ def find_libmathdx(cuda_toolkit_major_version: int, base_path: str) -> str | Non
         "pull",
         "--verbose",
         "--platform",
-        f"{platform.system()}-{build_dll.machine_architecture()}".lower(),
+        f"{platform.system()}-{machine_architecture()}".lower(),
         "--include-tag",
         f"cu{cuda_toolkit_major_version}",
         os.path.join(base_path, "deps", "libmathdx-deps.packman.xml"),
     ]
 
     # Reuse the current interpreter so packman skips downloading its bundled Python,
-    # whose manylinux_2_35 build can't run on older-glibc CI images.
-    packman_env = {**os.environ, "PM_PYTHON_EXT": sys.executable}
+    # whose manylinux_2_35 build can't run on older-glibc CI images. Use it only as a
+    # default: a pre-set PM_PYTHON_EXT wins, since cross-compilation (e.g. aarch64) needs
+    # the build-platform Python instead of sys.executable's crossenv wrapper.
+    packman_env = {"PM_PYTHON_EXT": sys.executable, **os.environ}
 
     retry_delays = [10, 30, 60]
     max_attempts = 1 + len(retry_delays)
@@ -226,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Build Warp native libraries with optional CUDA, LLVM, and MathDx support",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
     )
 
     # General options
@@ -235,6 +265,14 @@ def main(argv: list[str] | None = None) -> int:
         choices=["release", "debug"],
         default="release",
         help="Build configuration mode",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_const",
+        const="debug",
+        dest="mode",
+        default=argparse.SUPPRESS,
+        help="Shortcut for --mode debug",
     )
     try:
         available_cpus = len(os.sched_getaffinity(0))
@@ -332,10 +370,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Enable fast math optimizations (may reduce numerical accuracy)",
     )
     group_build.add_argument(
+        "--sanitize",
+        type=str,
+        default=None,
+        metavar="SANITIZER",
+        help="Enable a compiler sanitizer when building native libraries "
+        "(e.g. --sanitize=address). Only 'address' is currently supported; "
+        "'undefined', 'thread', and 'memory' are accepted by the parser for "
+        "future use but are not validated or guaranteed to build.",
+    )
+    group_build.add_argument(
         "--quick",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Fast build mode: compile for minimal GPU architectures (PTX-only for sm_75), disable CUDA forward compatibility",
+    )
+    group_build.add_argument(
+        "--use-dynamic-cuda",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Link against shared CUDA libraries instead of embedding them statically; the corresponding shared libraries must be present at runtime",
     )
 
     # Clang/LLVM options
@@ -389,9 +443,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.clang_build_toolchain:
             print("Error: --clang-build-toolchain requires CUDA (incompatible with --no-cuda).")
             return 1
+        if args.use_dynamic_cuda:
+            print("Error: --use-dynamic-cuda requires CUDA (incompatible with --no-cuda).")
+            return 1
 
     # Warn if building on Intel Mac (cross-compiling for ARM64)
-    if platform.system() == "Darwin" and platform.machine() == "x86_64":
+    if platform.system() == "Darwin" and machine_architecture() == "x86_64":
         print("=" * 80)
         print("WARNING: Building Warp on Intel-based macOS")
         print("=" * 80)
@@ -450,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Validate libmathdx path (from any source: CLI, environment, or Packman)
     if args.libmathdx_path:
+        args.libmathdx_path = resolve_libmathdx_path(args.libmathdx_path)
         if not validate_libmathdx_path(args.libmathdx_path):
             return 1
 
@@ -494,6 +552,9 @@ def main(argv: list[str] | None = None) -> int:
         # build warp.dll
         cpp_sources = [
             "native/warp.cpp",
+            "native/bvh.cpp",
+            "native/bvh_cubql.cpp",
+            "native/scan.cpp",
             "native/apic.cpp",
             "native/alloc_tracker.cpp",
             "native/crt.cpp",
@@ -506,9 +567,11 @@ def main(argv: list[str] | None = None) -> int:
             "native/sort.cpp",
             "native/sparse.cpp",
             "native/volume.cpp",
+            "native/volume_builder.cpp",
             "native/texture.cpp",
             "native/mathdx.cpp",
             "native/coloring.cpp",
+            "native/deterministic.cpp",
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 
@@ -518,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
 
         cuda_sources = [
             "native/bvh.cu",
+            "native/deterministic.cu",
+            "native/bvh_cubql.cu",
             "native/mesh.cu",
             "native/sort.cu",
             "native/hashgrid.cu",
@@ -590,7 +655,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         is_gitlab_ci_windows = os.getenv("GITLAB_CI") is not None and platform.system() == "Windows"
-        is_intel_mac = platform.system() == "Darwin" and platform.machine() == "x86_64"
+        is_intel_mac = platform.system() == "Darwin" and machine_architecture() == "x86_64"
 
         if is_gitlab_ci_windows or is_intel_mac:
             if is_gitlab_ci_windows:
@@ -598,6 +663,46 @@ def main(argv: list[str] | None = None) -> int:
             if is_intel_mac:
                 print("Skipping kernel cache clearing on Intel Mac (binaries built for ARM64)")
         else:
+            # On Linux, an ASan-instrumented warp.so aborts at load time unless the ASan
+            # runtime comes first in the initial library list. The post-build helper
+            # subprocesses below import Warp, so on a --sanitize=address build they must
+            # LD_PRELOAD the runtime or they abort with "ASan runtime does not come first".
+            subprocess_env = os.environ.copy()
+            if args.sanitize == "address" and platform.system() == "Linux":
+                compiler = "clang++" if args.clang_build_toolchain else args.host_compiler
+                # GCC ships libasan.so; Clang ships libclang_rt.asan-<arch>.so.
+                runtime_name = (
+                    f"libclang_rt.asan-{machine_architecture()}.so"
+                    if "clang" in os.path.basename(compiler)
+                    else "libasan.so"
+                )
+                try:
+                    asan_lib = subprocess.run(
+                        [compiler, f"-print-file-name={runtime_name}"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout.strip()
+                except (OSError, subprocess.CalledProcessError) as e:
+                    print(f"Warning: could not query {compiler} for the ASan runtime path: {e}")
+                    asan_lib = ""
+                if asan_lib and asan_lib != runtime_name and os.path.exists(asan_lib):
+                    existing = subprocess_env.get("LD_PRELOAD", "")
+                    subprocess_env["LD_PRELOAD"] = f"{asan_lib}:{existing}" if existing else asan_lib
+                else:
+                    print(
+                        f"Warning: could not locate {runtime_name} via {compiler}; the kernel cache "
+                        "clear and diagnostics may fail to load warp.so"
+                    )
+                # Python/NumPy retain allocations across interpreter shutdown that ASan would
+                # report as leaks, making these utility subprocesses exit non-zero. Disable leak
+                # detection for them only. (verify_asan_link_order is not needed: the preload above
+                # makes the runtime first.)
+                existing_opts = subprocess_env.get("ASAN_OPTIONS", "")
+                subprocess_env["ASAN_OPTIONS"] = (
+                    f"{existing_opts}:detect_leaks=0" if existing_opts else "detect_leaks=0"
+                )
+
             # Clear kernel cache in subprocess (ensures fresh import of updated config.py)
             print("Clearing kernel cache...")
             sys.stdout.flush()
@@ -610,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
                 cwd=base_path,
                 check=False,
+                env=subprocess_env,
             )
             if result.returncode != 0:
                 print(f"Warning: Failed to clear kernel cache (exit code {result.returncode})")
@@ -627,6 +733,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
                 cwd=base_path,
                 check=False,
+                env=subprocess_env,
             )
     except Exception as e:
         print(f"Unable to clear kernel cache: {e}")

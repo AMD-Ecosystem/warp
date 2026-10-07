@@ -3,6 +3,8 @@
 
 import ctypes
 import ctypes.util
+import functools
+import gc
 import importlib.util
 import io
 import os
@@ -13,12 +15,51 @@ import time
 import unittest
 import xml.etree.ElementTree as ET
 
-import numpy as np
 
-import warp as wp
+def _normalize_direct_test_sys_path():
+    """Keep direct test execution from shadowing installed top-level packages.
+
+    Running a test file by path makes Python place that file's directory first
+    on ``sys.path``. For files under ``warp/tests``, that can make test
+    packages such as ``warp/tests/cuda`` shadow unrelated installed packages
+    with the same top-level name. Keep the repository root importable while
+    removing the tests package root from import precedence.
+    """
+    tests_root = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(os.path.dirname(tests_root))
+    normalized_sys_path = {os.path.abspath(path or os.getcwd()) for path in sys.path}
+
+    if repo_root not in normalized_sys_path:
+        sys.path.insert(0, repo_root)
+
+    sys.path[:] = [path for path in sys.path if os.path.abspath(path or os.getcwd()) != tests_root]
+
+
+_normalize_direct_test_sys_path()
+
+import numpy as np  # noqa: E402
+
+import warp as wp  # noqa: E402
 
 pxr = importlib.util.find_spec("pxr")
 USD_AVAILABLE = pxr is not None
+
+
+def make_isolated_kernel(func, **kwargs):
+    """Build a :class:`warp.Kernel` in a module of its own.
+
+    A kernel that fails to build fails its whole module, so a test that builds a
+    deliberately broken kernel has to keep it out of the test file's module.
+    ``@wp.kernel(module="unique")`` covers the decorator form; this covers the
+    kernels tests construct directly, and the cases where ``module="unique"``
+    would surface the failure too early (it hashes, and so builds, the kernel at
+    decoration time). The module name is keyed on the definition site rather than
+    the qualified name alone, so a test that rebinds the same name to several
+    broken kernels still gets one module each.
+    """
+    key = f"{func.__module__}.{func.__qualname__}:{func.__code__.co_firstlineno}"
+    return wp.Kernel(func=func, module=wp.get_module(key), **kwargs)
+
 
 # default test mode (see get_test_devices())
 #   "basic" - only run on CPU and first GPU device
@@ -134,6 +175,89 @@ def get_graph_capture_test_devices(mode: str | None = None):
     return [d for d in get_test_devices(mode=mode) if d.supports_graph_capture]
 
 
+def get_cuda_device_pair_with_peer_access_support(devices=None):
+    """Return the first CUDA pair where ``peer_device`` can access ``target_device`` allocations."""
+
+    if devices is None:
+        devices = wp.get_cuda_devices()
+
+    cuda_devices = [device for device in devices if device.is_cuda]
+    for target_device in cuda_devices:
+        for peer_device in cuda_devices:
+            if target_device != peer_device and wp.is_peer_access_supported(target_device, peer_device):
+                return target_device, peer_device
+
+    return None
+
+
+def get_cuda_device_pair_with_mempool_access_support(devices=None):
+    """Return the first CUDA pair where ``peer_device`` can access ``target_device`` memory pools."""
+
+    if devices is None:
+        devices = wp.get_cuda_devices()
+
+    cuda_devices = [device for device in devices if device.is_cuda]
+    for target_device in cuda_devices:
+        for peer_device in cuda_devices:
+            if target_device != peer_device and wp.is_mempool_access_supported(target_device, peer_device):
+                return target_device, peer_device
+
+    return None
+
+
+def get_test_devices_with_graph_capture_allocation(mode: str | None = None):
+    """Like :func:`get_test_devices`, but drops devices that cannot allocate during graph capture.
+
+    Use this getter to gate tests that allocate inside a graph capture so they skip
+    cleanly on devices without the capability. CUDA requires memory-pool support
+    (``cudaMallocAsync`` is the only capture-safe allocator); CPU/APIC capture
+    allocates through the host allocator (kept valid by APIC region retention) and is
+    always supported. See ``warp._src.context._is_graph_capture_allocation_supported``.
+    """
+    from warp._src.context import _is_graph_capture_allocation_supported  # noqa: PLC0415
+
+    return [d for d in get_test_devices(mode) if _is_graph_capture_allocation_supported(d)]
+
+
+def is_cuda_graph_module_load_supported(device) -> bool:
+    """Return whether modules can be loaded during CUDA graph capture."""
+    driver_version = wp.get_cuda_driver_version()
+    return not device.is_cuda or (driver_version is not None and driver_version >= (12, 3))
+
+
+def get_test_devices_with_cuda_graph_module_load(mode: str | None = None):
+    """Like :func:`get_test_devices`, but drops CUDA devices using drivers older than 12.3.
+
+    CUDA module loading during graph capture requires a driver supporting CUDA
+    12.3 or newer. CPU devices pass through unchanged because CPU graph capture
+    uses APIC recording rather than CUDA driver graph capture.
+    """
+    return [d for d in get_test_devices(mode) if is_cuda_graph_module_load_supported(d)]
+
+
+def get_test_devices_with_graph_capture_allocation_and_cuda_graph_module_load(mode: str | None = None):
+    """Like :func:`get_test_devices_with_graph_capture_allocation`, but also gates CUDA graph module loading."""
+    return [d for d in get_test_devices_with_graph_capture_allocation(mode) if is_cuda_graph_module_load_supported(d)]
+
+
+def get_cuda_test_devices_with_mempool(mode=None):
+    """Like :func:`get_cuda_test_devices`, but drops CUDA devices without memory pool support.
+
+    See :func:`get_test_devices_with_graph_capture_allocation` for context on why mempool
+    support is required for in-capture allocation on CUDA.
+    """
+    return [d for d in get_cuda_test_devices(mode) if d.is_mempool_supported]
+
+
+def get_selected_cuda_test_devices_with_mempool(mode: str | None = None):
+    """Like :func:`get_selected_cuda_test_devices`, but drops CUDA devices without memory pool support.
+
+    See :func:`get_test_devices_with_graph_capture_allocation` for context on why mempool
+    support is required for in-capture allocation on CUDA.
+    """
+    return [d for d in get_selected_cuda_test_devices(mode) if d.is_mempool_supported]
+
+
 class StreamCapture:
     def __init__(self, stream_name):
         self.stream_name = stream_name  # 'stdout' or 'stderr'
@@ -244,18 +368,18 @@ def assert_np_equal(result: np.ndarray, expect: np.ndarray, tol=0.0):
 
 
 # if check_output is True any output to stdout will be treated as an error
-def create_test_func(func, device, check_output, **kwargs):
+def create_test_func(func, device, check_output, device_check=None, **kwargs):
     # pass args to func
+    @functools.wraps(func)
     def test_func(self):
+        if device_check is not None:
+            device_check(self, device)
+
         if check_output:
             with CheckOutput(self):
                 func(self, device, **kwargs)
         else:
             func(self, device, **kwargs)
-
-    # Copy the __unittest_expecting_failure__ attribute from func to test_func
-    if hasattr(func, "__unittest_expecting_failure__"):
-        test_func.__unittest_expecting_failure__ = func.__unittest_expecting_failure__
 
     return test_func
 
@@ -275,9 +399,9 @@ def sanitize_identifier(s):
         return re.sub(r"\W|^(?=\d)", "_", s)
 
 
-def add_function_test(cls, name, func, devices=None, check_output=True, **kwargs):
+def add_function_test(cls, name, func, devices=None, check_output=True, device_check=None, **kwargs):
     if devices is None:
-        setattr(cls, name, create_test_func(func, None, check_output, **kwargs))
+        setattr(cls, name, create_test_func(func, None, check_output, device_check=device_check, **kwargs))
     elif isinstance(devices, list):
         if not devices:
             # No devices to run this test
@@ -287,21 +411,25 @@ def add_function_test(cls, name, func, devices=None, check_output=True, **kwargs
                 setattr(
                     cls,
                     name + "_" + sanitize_identifier(device),
-                    create_test_func(func, device, check_output, **kwargs),
+                    create_test_func(func, device, check_output, device_check=device_check, **kwargs),
                 )
     else:
         setattr(
             cls,
             name + "_" + sanitize_identifier(devices),
-            create_test_func(func, devices, check_output, **kwargs),
+            create_test_func(func, devices, check_output, device_check=device_check, **kwargs),
         )
 
 
-def add_kernel_test(cls, kernel, dim, name=None, expect=None, inputs=None, devices=None):
+def add_kernel_test(cls, kernel, dim, name=None, expect=None, inputs=None, devices=None, inputs_factory=None):
+    if inputs is not None and inputs_factory is not None:
+        raise ValueError("Only one of `inputs` and `inputs_factory` may be provided.")
+
     def test_func(self, device):
         args = []
-        if inputs:
-            args.extend(inputs)
+        test_inputs = inputs_factory(device) if inputs_factory is not None else inputs
+        if test_inputs:
+            args.extend(test_inputs)
 
         if expect:
             # allocate outputs to match results
@@ -310,8 +438,11 @@ def add_kernel_test(cls, kernel, dim, name=None, expect=None, inputs=None, devic
 
             args.append(output)
 
-        # force load so that we don't generate any log output during launch
-        kernel.module.load(device)
+        # Force-load the same module variant that wp.launch() will use so that
+        # we don't generate any log output during launch. CPU launches always
+        # use a block dimension of 1, regardless of the launch default.
+        load_block_dim = 1 if wp.get_device(device).is_cpu else None
+        kernel.module.load(device, block_dim=load_block_dim)
 
         with CheckOutput(self):
             wp.launch(kernel, dim=dim, inputs=args, device=device)
@@ -412,8 +543,6 @@ class ParallelJunitTestResult(unittest.TextTestResult):
         super().stopTest(test)
         # Force garbage collection of CPU-side allocations to reduce peak
         # host RSS in parallel test runs.
-        import gc  # noqa: PLC0415
-
         gc.collect()
 
     def _add_helper(self, test, dots_message, show_all_message):

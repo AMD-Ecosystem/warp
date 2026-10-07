@@ -59,6 +59,8 @@ generated compilation artifacts as Warp does not automatically try to keep the c
 Note that these functions only clear Warp's own cache. The NVIDIA CUDA driver
 maintains a separate compute cache that is not affected by Warp's cache-clearing
 functions (see :ref:`benchmarking-cold-start-compilation`).
+For guidance on reducing startup latency and improving cache reuse, see
+:doc:`execution_and_performance/reducing_compilation_and_startup_time`.
 
 
 .. _Runtime Kernel Creation:
@@ -198,11 +200,21 @@ To index a multi-dimensional array, use the following kernel syntax::
 
 To create an array slice, use the following syntax, where the number of indices is less than the array dimensions::
 
-    # returns an 1d array slice representing a row of the 2d array
+    # returns a 1D array slice representing a row of the 2D array
     row = input[i]
 
+    # start, stop, step, and column may be runtime expressions
+    view = input[start:stop:step, column]
+
 Slice operators can be concatenated, e.g.: ``s = array[i][j][k]``. Slices can be passed to :func:`wp.func <warp.func>` user functions provided
-the function also declares the expected array dimension. Currently, only single-index slicing is supported.
+the function also declares the expected array dimension.
+
+Unlike slices of fixed-size values, the ``start``, ``stop``, and ``step``
+components of a Warp array slice may be runtime expressions. A slice step of
+zero is invalid. A zero known at compile time raises a code-generation error. If
+a runtime step evaluates to zero, Warp reports the error and fails the kernel:
+the process aborts on CPU, while the CUDA kernel traps and reports a launch
+error.
 
 The following construction methods are provided for allocating zero-initialized and empty (non-initialized) arrays:
 
@@ -549,7 +561,7 @@ NumPy does not natively support the bfloat16 format, so Warp stores
 how array contents are displayed when calling :meth:`~warp.array.numpy` or
 printing an array.
 
-Without `ml-dtypes <https://github.com/jax-ml/ml-dtypes>`__,
+Without `ml-dtypes <https://github.com/jax-ml/ml_dtypes>`__,
 :meth:`~warp.array.numpy` and :func:`print` show raw ``uint16`` values:
 
 .. code-block:: python
@@ -1059,8 +1071,9 @@ Indexing and slicing for vectors, matrices, quaternions, and transforms, follow 
 
 Negative indices are wrapped around, such that ``-1`` refers to the last element. Slices always create new copies.
 
-Inside kernels, the ``start / stop / step`` values of a slice must be **compile-time constants**.  Simple element indexing (``v[i]``, ``m[i, j]``) may use run-time
-expressions.
+For these fixed-size types, the ``start / stop / step`` values of a slice must
+be **compile-time constants**. Simple element indexing (``v[i]``, ``m[i, j]``)
+may use runtime expressions.
 
 
 Unpacking
@@ -1283,6 +1296,221 @@ Mapping Functions
 The :func:`wp.map() <warp.map>` function can be used to apply a function to each element of an array.
 
 
+.. _devices:
+
+Devices
+-------
+
+Warp assigns unique string aliases to all supported compute devices in the system.  There is currently a single CPU device exposed as ``"cpu"``.  Each CUDA-capable GPU gets an alias of the form ``"cuda:i"``, where ``i`` is the CUDA device ordinal.  This convention should be familiar to users of other popular frameworks like PyTorch.
+
+It is possible to explicitly target a specific device with each Warp API call using the ``device`` argument::
+
+    a = wp.zeros(n, device="cpu")
+    wp.launch(kernel, dim=a.size, inputs=[a], device="cpu")
+
+    b = wp.zeros(n, device="cuda:0")
+    wp.launch(kernel, dim=b.size, inputs=[b], device="cuda:0")
+
+    c = wp.zeros(n, device="cuda:1")
+    wp.launch(kernel, dim=c.size, inputs=[c], device="cuda:1")
+
+.. note::
+
+    A Warp CUDA device (``"cuda:i"``) corresponds to the primary CUDA context of device ``i``.
+    This is compatible with frameworks like PyTorch and other software that uses the CUDA Runtime API.
+    It makes interoperability easy because GPU resources like memory can be shared with Warp.
+
+
+Warp also provides functions that can be used to query the available devices on the system:
+
+
+Default Device
+##############
+
+To simplify writing code, Warp has the concept of **default device**.  When the ``device`` argument is omitted from a Warp API call, the default device will be used.
+
+Calling :func:`wp.get_device() <warp.get_device>` without an argument
+will return an instance of :class:`warp.Device` for the default device.
+
+During Warp initialization, the default device is set to ``"cuda:0"`` if CUDA is available.  Otherwise, the default device is ``"cpu"``.
+If the default device is changed, :func:`wp.get_preferred_device() <warp.get_preferred_device>` can be used to get
+the *original* default device.
+
+:func:`wp.set_device() <warp.set_device>` can be used to change the default device::
+
+    wp.set_device("cpu")
+    a = wp.zeros(n)
+    wp.launch(kernel, dim=a.size, inputs=[a])
+   
+    wp.set_device("cuda:0")
+    b = wp.zeros(n)
+    wp.launch(kernel, dim=b.size, inputs=[b])
+   
+    wp.set_device("cuda:1")
+    c = wp.zeros(n)
+    wp.launch(kernel, dim=c.size, inputs=[c])
+
+.. note::
+
+    For CUDA devices, :func:`wp.set_device() <warp.set_device>` does two things: It sets the Warp default device and it makes the device's CUDA context current.  This helps to minimize the number of CUDA context switches in blocks of code targeting a single device.
+
+For PyTorch users, this function is similar to :func:`torch.cuda.set_device()`.
+It is still possible to specify a different device in individual API calls, like in this snippet::
+
+    # set default device
+    wp.set_device("cuda:0")
+   
+    # use default device
+    a = wp.zeros(n)
+   
+    # use explicit devices
+    b = wp.empty(n, device="cpu")
+    c = wp.empty(n, device="cuda:1")
+   
+    # use default device
+    wp.launch(kernel, dim=a.size, inputs=[a])
+   
+    wp.copy(b, a)
+    wp.copy(c, a)
+
+
+Scoped Devices
+##############
+
+Another way to manage the default device is using :class:`wp.ScopedDevice <ScopedDevice>` objects.
+They can be arbitrarily nested and restore the previous default device on exit::
+
+    with wp.ScopedDevice("cpu"):
+        # alloc and launch on "cpu"
+        a = wp.zeros(n)
+        wp.launch(kernel, dim=a.size, inputs=[a])
+ 
+    with wp.ScopedDevice("cuda:0"):
+        # alloc on "cuda:0"
+        b = wp.zeros(n)
+   
+        with wp.ScopedDevice("cuda:1"):
+            # alloc and launch on "cuda:1"
+            c = wp.zeros(n)
+            wp.launch(kernel, dim=c.size, inputs=[c])
+   
+        # launch on "cuda:0"
+        wp.launch(kernel, dim=b.size, inputs=[b])
+
+
+Example: Using :class:`wp.ScopedDevice <ScopedDevice>` with multiple GPUs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following example shows how to allocate arrays and launch kernels on all available CUDA devices.
+
+.. code:: python
+
+    import warp as wp
+
+
+    @wp.kernel
+    def inc(a: wp.array[float]):
+        tid = wp.tid()
+        a[tid] = a[tid] + 1.0
+
+
+    # get all CUDA devices
+    devices = wp.get_cuda_devices()
+    device_count = len(devices)
+
+    # number of launches
+    iters = 1000
+
+    # list of arrays, one per device
+    arrs = []
+
+    # loop over all devices
+    for device in devices:
+        # use a ScopedDevice to set the target device
+        with wp.ScopedDevice(device):
+            # allocate array
+            a = wp.zeros(250 * 1024 * 1024, dtype=float)
+            arrs.append(a)
+
+            # launch kernels
+            for _ in range(iters):
+                wp.launch(inc, dim=a.size, inputs=[a])
+
+    # synchronize all devices
+    wp.synchronize()
+
+    # print results
+    for i in range(device_count):
+        print(f"{arrs[i].device} -> {arrs[i].numpy()}")
+
+
+Current CUDA Device
+###################
+
+Warp uses the device alias ``"cuda"`` to target the current CUDA device.  This allows external code to manage the CUDA device on which to execute Warp scripts.  It is analogous to the PyTorch ``"cuda"`` device, which should be familiar to Torch users and simplify interoperation.
+
+In this snippet, we use PyTorch to manage the current CUDA device and invoke a Warp kernel on that device::
+
+    def example_function():
+        # create a Torch tensor on the current CUDA device
+        t = torch.arange(10, dtype=torch.float32, device="cuda")
+
+        a = wp.from_torch(t)
+
+        # launch a Warp kernel on the current CUDA device
+        wp.launch(kernel, dim=a.size, inputs=[a], device="cuda")
+
+    # use Torch to set the current CUDA device and run example_function() on that device
+    torch.cuda.set_device(0)
+    example_function()
+
+    # use Torch to change the current CUDA device and re-run example_function() on that device
+    torch.cuda.set_device(1)
+    example_function()
+
+.. note::
+
+    Using the device alias ``"cuda"`` can be problematic if the code runs in an environment where another part of the code can unpredictably change the CUDA context.  Using an explicit CUDA device like ``"cuda:i"`` is recommended to avoid such issues.
+
+Device Synchronization
+######################
+
+CUDA kernel launches and memory operations can execute asynchronously. For the
+choice between device, stream, and event synchronization—and the performance
+cost of each—see :ref:`synchronization_guidance`.
+
+
+Custom CUDA Contexts
+####################
+
+Warp is designed to work with arbitrary CUDA contexts so it can easily integrate into different workflows.
+
+Applications built on the CUDA Runtime API target the *primary context* of each device.  The Runtime API hides CUDA context management under the hood.  In Warp, device ``"cuda:i"`` represents the primary context of device ``i``, which aligns with the CUDA Runtime API.
+
+Applications built on the CUDA Driver API work with CUDA contexts directly and can create custom CUDA contexts on any device.  Custom CUDA contexts can be created with specific affinity or interop features that benefit the application.  Warp can work with these CUDA contexts as well.
+
+The special device alias ``"cuda"`` can be used to target the current CUDA context, whether this is a primary or custom context.
+
+In addition, Warp allows registering new device aliases for custom CUDA contexts using
+:func:`wp.map_cuda_device() <map_cuda_device>` so that they can be explicitly targeted by name.
+If the ``CUcontext`` pointer is available, it can be used to create a new device alias like this::
+
+    wp.map_cuda_device("foo", ctypes.c_void_p(context_ptr))
+
+Alternatively, if the custom CUDA context was made current by the application, the pointer can be omitted::
+
+    wp.map_cuda_device("foo")
+
+In either case, mapping the custom CUDA context allows us to target the context directly using the assigned alias::
+
+    with wp.ScopedDevice("foo"):
+        a = wp.zeros(n)
+        wp.launch(kernel, dim=a.size, inputs=[a])
+
+For allocation choices and direct access across CPU and CUDA devices, including
+CUDA peer access, see :doc:`execution_and_performance/memory_management`.
+
+
 Streams
 -------
 
@@ -1306,16 +1534,24 @@ information on how to use events for measuring GPU performance.
 Graphs
 -----------
 
-Launching kernels from Python introduces significant additional overhead compared to C++ or native programs.
-To address this, Warp exposes the concept of `CUDA graphs <https://developer.nvidia.com/blog/cuda-graphs/>`_
-to allow recording large batches of kernels and replaying them with very little CPU overhead.
-The same :func:`wp.capture_begin() <warp.capture_begin>` / :func:`wp.capture_end() <warp.capture_end>` /
-:func:`wp.capture_launch() <warp.capture_launch>` API also supports recording on CPU devices and
-serializing captured graphs to a file for later replay from Python or a standalone C++ program (see
-:ref:`cpu_graphs` and :ref:`apic_save_load` below).
+Issuing Warp operations one at a time from Python adds host overhead, especially
+for inexpensive kernels. Warp's graph capture feature records a sequence of
+supported operations and replays it with one
+:func:`wp.capture_launch() <warp.capture_launch>` call.
 
-To record a series of kernel launches use the :func:`wp.capture_begin() <warp.capture_begin>` and
-:func:`wp.capture_end() <warp.capture_end>` API as follows:
+On CUDA devices, live capture uses `CUDA graphs
+<https://developer.nvidia.com/blog/cuda-graphs/>`_. On CPU devices, Warp
+records operations in an API Capture (APIC) operation stream and replays that
+stream in C++. Both paths use the same
+:func:`wp.capture_begin() <warp.capture_begin>` /
+:func:`wp.capture_end() <warp.capture_end>` /
+:func:`wp.capture_launch() <warp.capture_launch>` API. APIC can also serialize
+supported CPU or CUDA graphs for later replay from Python or a standalone C++
+program; see :ref:`cpu_graphs` and :ref:`apic_save_load`.
+
+To record a sequence of operations, use
+:func:`wp.capture_begin() <warp.capture_begin>` and
+:func:`wp.capture_end() <warp.capture_end>` as follows:
 
 .. code:: python
 
@@ -1350,9 +1586,25 @@ ensure that :func:`wp.capture_end <warp.capture_end>` is called regardless of ex
 
     wp.capture_launch(capture.graph)
 
-Note that only launch calls are recorded in the graph; any Python executed outside of the kernel code will not be recorded.
-Typically it is only beneficial to use CUDA graphs when the graph will be reused or launched multiple times, as
-there is a graph-creation overhead.
+CUDA graph capture also accepts a ``capture_mode`` argument, which controls how strictly CUDA rejects capture-unsafe
+runtime API calls while capture is active. Warp defaults to ``wp.CaptureMode.THREAD_LOCAL``, matching its historical
+behavior. When composing with libraries that may perform lazy CUDA runtime calls during capture, such as context or
+allocator initialization, use ``wp.CaptureMode.RELAXED``:
+
+.. code:: python
+
+    with wp.ScopedCapture(device="cuda", capture_mode=wp.CaptureMode.RELAXED) as capture:
+        # record launches
+        for i in range(100):
+            wp.launch(kernel=compute1, inputs=[a, b], device="cuda")
+
+The ``capture_mode`` argument applies only to CUDA graph capture and is ignored for CPU graph recording.
+
+Graph capture records supported Warp operations issued while capture is active;
+it does not record arbitrary Python execution. The supported operation set
+depends on the capture path and is described in :ref:`cpu_graphs` and
+:ref:`apic_save_load`. Capture has setup overhead, so it is generally most
+useful when the graph will be launched more than once.
 
 Conditional Execution
 #####################
@@ -1388,8 +1640,9 @@ The condition value can be updated by kernels launched prior to ``capture_if()``
     cond.fill_(0)
     wp.capture_launch(capture.graph)
 
-The ``on_true`` and ``on_false`` callbacks can be previously captured graph objects or Python callback functions.
-These callbacks are captured as child graphs of the enclosing graph.
+For CUDA graph capture with ``apic=False``, ``on_true`` and ``on_false`` can
+be previously captured graph objects or Python callback functions. Python
+callbacks are captured as child graphs of the enclosing graph.
 It's possible to specify only one or both callbacks, as needed.
 When the parent graph is launched, the correct child graph is executed based on the value of the condition.
 This is done efficiently on the device without involving the CPU. 
@@ -1517,7 +1770,12 @@ When using Python callback functions, any extra keyword arguments to :func:`wp.c
 
         wp.launch(bar, ...)
 
-The ``while_body`` callback will be executed as long as the condition is non-zero. The callback is responsible for updating the condition value so that the loop eventually terminates. The ``while_body`` argument can be a previously captured graph or a Python callback function. Here is an example that will run some number of iterations, using the condition value as a counter:
+The ``while_body`` callback will be executed as long as the condition is
+non-zero. The callback is responsible for updating the condition value so that
+the loop eventually terminates. For CUDA graph capture with ``apic=False``,
+``while_body`` can be a previously captured graph or a Python callback
+function. Here is an example that will run some number of iterations, using the
+condition value as a counter:
 
 .. code:: python
 
@@ -1566,10 +1824,20 @@ The ``while_body`` callback will be executed as long as the condition is non-zer
 
 
 .. note::
-    Conditional graph node support is only available if Warp is built using CUDA Toolkit 12.4+ and the NVIDIA driver supports CUDA 12.4+.
+    CUDA graph conditional node support is only available if Warp is built using
+    CUDA Toolkit 12.4+ and the NVIDIA driver supports CUDA 12.4+. CPU graph
+    capture records :func:`wp.capture_if <warp.capture_if>` and
+    :func:`wp.capture_while <warp.capture_while>` through APIC and does not use
+    CUDA graph conditional nodes.
 
 .. note::
-    Due to a current CUDA limitation, graphs with conditional nodes cannot be used as child graphs. It means that it's not possible to create nested conditional constructs using previously captured graphs. If nesting is required, using Python callback functions is the way to go.
+    Due to a current CUDA limitation, graphs with conditional nodes cannot be
+    used as child graphs. It means that it's not possible to create nested
+    conditional constructs using previously captured graphs. If nesting is
+    required, use Python callback functions. APIC recording—all CPU captures
+    and CUDA captures with ``apic=True``—also requires Python callbacks for
+    ``capture_if()`` / ``capture_while()`` bodies; passing previously captured
+    :class:`Graph` objects is not yet implemented.
 
 .. note::
     :func:`wp.capture_if <warp.capture_if>` and :func:`wp.capture_while <warp.capture_while>` will work even without graph capture on any device. If there is no active capture, the condition will be evaluated on the CPU and the correct branch will be executed immediately. This makes it possible to write code that works similarly with and without graph capture.
@@ -1585,11 +1853,11 @@ CPU Graphs
     CPU graph capture is experimental. The recorded operation set, file format, and
     Python and C API are subject to change without a formal deprecation cycle.
 
-Graph capture works on CPU devices using exactly the same API as the CUDA path.
-Operations recorded between :func:`wp.capture_begin() <warp.capture_begin>` and
+CPU graph capture uses the same core API as CUDA graph capture. Operations
+recorded between :func:`wp.capture_begin() <warp.capture_begin>` and
 :func:`wp.capture_end() <warp.capture_end>` are deferred until
 :func:`wp.capture_launch() <warp.capture_launch>` is called, at which point Warp
-replays them in a tight native loop. This eliminates the per-kernel Python
+replays them in a C++ loop. This eliminates the per-kernel Python
 dispatch overhead that otherwise dominates CPU launches:
 
 .. testcode::
@@ -1611,36 +1879,115 @@ dispatch overhead that otherwise dominates CPU launches:
         for _ in range(steps):
             wp.launch(my_kernel, dim=N, inputs=[a, b], device="cpu")
 
-    # Replay the entire batch with one native call into Warp
+    # Replay the entire batch with one call into Warp
     wp.capture_launch(capture.graph)
 
-The set of operations currently recorded on CPU mirrors the CUDA path: kernel
-launches (:func:`wp.launch() <warp.launch>`, :func:`wp.launch_tiled() <warp.launch_tiled>`),
-memory copies (:func:`wp.copy() <warp.copy>`), and zero-initialization
-(:meth:`array.zero_() <warp.array.zero_>`). Other operations are not yet
-recorded.
+CPU graph capture currently supports:
 
-Current limitations of CPU graph capture:
+- Forward and backward kernel launches
+  (:func:`wp.launch() <warp.launch>`, :func:`wp.launch_tiled() <warp.launch_tiled>`,
+  and the adjoint launches emitted by :class:`wp.Tape <warp.Tape>` /
+  :meth:`Tape.backward() <warp.Tape.backward>`).
+- Reusable launches created with ``wp.launch(..., record_cmd=True)`` when they
+  are replayed with :meth:`Launch.launch() <warp.Launch.launch>`.
+- Memory copies (:func:`wp.copy() <warp.copy>`) and zero-initialization
+  (:meth:`array.zero_() <warp.array.zero_>`), plus contiguous
+  :meth:`array.fill_() <warp.array.fill_>`.
+- Host library helpers including
+  :func:`wp.utils.array_sum() <warp.utils.array_sum>`,
+  :func:`wp.utils.array_inner() <warp.utils.array_inner>`,
+  :func:`wp.utils.array_scan() <warp.utils.array_scan>`,
+  :func:`wp.utils.radix_sort_pairs() <warp.utils.radix_sort_pairs>`,
+  :func:`wp.utils.segmented_sort_pairs() <warp.utils.segmented_sort_pairs>`,
+  :func:`wp.utils.runlength_encode() <warp.utils.runlength_encode>`, and the
+  ``warp.sparse`` BSR ``from_triplets`` / ``transpose`` topology builders.
+- Bounding-volume-hierarchy updates (:meth:`wp.Bvh.refit() <warp.Bvh.refit>` and
+  :meth:`wp.Bvh.rebuild() <warp.Bvh.rebuild>`), re-run on replay against the
+  current ``lowers`` / ``uppers`` so a captured graph queries the updated tree.
+  For CPU graphs, these operations are live-only and cannot be saved (see the
+  limitations below).
+- Live CPU graphs record :meth:`HashGrid.build() <warp.HashGrid.build>` in
+  operation order. Each replay reads the current contents of the normalized
+  point and optional group arrays, and the first replay may allocate or grow
+  the grid buffers.
+- Conditional graph nodes (:func:`wp.capture_if() <warp.capture_if>` and
+  :func:`wp.capture_while() <warp.capture_while>`). The condition is re-evaluated
+  on every replay, so a captured ``while`` loop can iterate a different number
+  of times each call.
 
-- :meth:`array.fill_() <warp.array.fill_>` is not recorded on CPU and is silently
-  dropped from the captured graph. Use :meth:`array.zero_() <warp.array.zero_>` or
-  a kernel launch instead.
-- Conditional graph nodes (:func:`wp.capture_if() <warp.capture_if>`,
-  :func:`wp.capture_while() <warp.capture_while>`) are CUDA-only and have no CPU
-  graph counterpart. They still work outside graph capture on CPU, evaluating the
-  condition immediately.
-- Nested captures are rejected on both CPU and CUDA. Only one capture may be
-  active at a time on a given thread.
-- Arrays used during capture must remain alive for the lifetime of the captured
-  graph. Reusing a freed CPU pointer during capture leads to undefined behavior;
-  CUDA capture defers frees automatically while a capture is in progress, but the
-  CPU path does not.
+The following kernel patterns are also supported under capture: tile primitives
+(``wp.tile_zeros``, ``wp.tile``, ``wp.untile``, tile reductions and scans),
+kernels with scalar parameters of any size, and empty / zero-length array
+arguments.
+
+Memory allocations made during CPU capture, including temporary arrays borrowed
+by ``warp.fem`` internals, are retained for the lifetime of the graph and reused
+on replay. ``Device.is_capturing`` reports active CPU graph capture.
+
+Important CPU graph behavior and current limitations:
+
+- :func:`wp.utils.array_scan() <warp.utils.array_scan>` records ``int32``, ``float32``,
+  ``int64``, and ``float64`` scalar and vector scans -- including positively-strided
+  (non-contiguous) 1D arrays -- into the CPU graph's operation stream. Non-empty scans
+  with negative strides raise :exc:`NotImplementedError` inside a CPU
+  :class:`ScopedCapture`; run them outside the captured region.
+- :func:`wp.utils.array_sum() <warp.utils.array_sum>` and
+  :func:`wp.utils.array_inner() <warp.utils.array_inner>` require an explicit
+  ``out`` array for non-empty calls during CPU graph capture. Explicit counts, composite dtypes,
+  and positive-stride axis reductions are recorded; negative strides raise
+  :exc:`NotImplementedError`, and negative counts raise :exc:`RuntimeError`.
+  Counts and reduction strides must fit a signed 32-bit integer, and participating
+  addresses and layout strides must be aligned to the reduction's scalar type.
+- :func:`wp.utils.runlength_encode() <warp.utils.runlength_encode>` requires an explicit
+  ``run_count`` array during CPU graph capture; the host-return form (``run_count=None``)
+  raises :exc:`NotImplementedError`, because its capture-time host integer cannot
+  represent the replay-time result.
+- Non-contiguous :func:`wp.copy() <warp.copy>`, non-contiguous
+  :meth:`array.fill_() <warp.array.fill_>`, and fills on
+  :class:`wp.indexedarray <warp.indexedarray>` / ``wp.fabricarray`` raise
+  :exc:`NotImplementedError` inside a CPU :class:`ScopedCapture`.
+- Reusable launches with array parameters must be updated through Warp-level
+  setters such as :meth:`Launch.set_param_at_index() <warp.Launch.set_param_at_index>`.
+  Raw ctype array parameters passed through
+  :meth:`Launch.set_param_at_index_from_ctype() <warp.Launch.set_param_at_index_from_ctype>`
+  cannot be recorded because APIC needs the original :class:`warp.array`
+  object to preserve its replay-time memory reference.
+- Kernel parameters of type ``wp.fixedarray``, ``wp.fabricarray``, or
+  ``wp.indexedfabricarray`` cannot yet be recorded by APIC.
+- :meth:`BsrMatrix.nnz_sync() <warp.sparse.BsrMatrix.nnz_sync>` cannot read the
+  result of a topology update recorded earlier in the same CPU capture. Read the
+  count after replay, or avoid the readback inside the captured region.
+- :meth:`BsrMatrix.status_sync() <warp.sparse.BsrMatrix.status_sync>` cannot read
+  the sparse status during a live CUDA graph capture (it requires a device-to-host
+  readback) or during CPU graph capture (a recorded status update is applied only
+  on replay). Read the status after replay instead.
+- :meth:`wp.Bvh.refit() <warp.Bvh.refit>` and
+  :meth:`wp.Bvh.rebuild() <warp.Bvh.rebuild>` have APIC records only for live
+  CPU graphs. Their BVH handle is process-local, so
+  :func:`wp.capture_save() <warp.capture_save>` rejects a graph that records
+  either operation.
+- Recording is scoped to the capture's device: a host (CPU) helper op invoked while a CUDA
+  graph capture is active executes immediately instead of being recorded into the CUDA graph,
+  and vice versa.
+- Only one APIC-backed capture—any CPU capture or a CUDA capture with
+  ``apic=True``—may be active in a process. CUDA captures with ``apic=False``
+  follow CUDA stream and capture-mode rules.
+- A captured CPU graph replays correctly even after the caller releases its
+  own references to the Warp arrays used during capture. You do not need to
+  keep arrays passed to captured kernel launches or
+  :func:`wp.copy() <warp.copy>` operations alive for the graph to run, and an
+  array view used as a kernel argument may be released once capture ends.
+- This guarantee covers only memory Warp owns. It does not extend the lifetime
+  of an external allocation passed to ``wp.array(ptr=...)`` without a
+  ``deleter``: the caller still owns that memory and must keep it alive, at the
+  same address, until the graph is destroyed. Freeing or reusing it sooner is
+  undefined behavior.
 
 
 .. _apic_save_load:
 
-Saving and Loading Graphs
-#########################
+API Capture: Saving and Loading Graphs
+######################################
 
 .. admonition:: Experimental
 
@@ -1648,23 +1995,79 @@ Saving and Loading Graphs
     :func:`wp.capture_save() <warp.capture_save>` / :func:`wp.capture_load() <warp.capture_load>`
     surface, the C ``wp_apic_*`` API, and the recorded operation set are all
     subject to change without a formal deprecation cycle. ``.wrp`` files written
-    by one version of Warp may not be loadable by another.
+    by one version of Warp may not be loadable by another. The current writer
+    emits format version 15, and the reader accepts versions 13 through 15.
 
-API Capture lets you serialize a captured graph to disk and load it back later, either
-from another Python program, or from a standalone C++ application that links only
-against the Warp native library. This is useful for shipping a precomputed
+The APIC operation stream lets Warp serialize a supported captured graph to
+disk and load it back later from another Python program or a standalone C++
+application without a Python runtime. This is useful for shipping a precomputed
 simulation pipeline as part of a binary, or for amortizing capture cost across
-many runs.
+many runs. The standalone dependencies for CUDA and CPU replay are described
+below.
 
 Capturing for serialization
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To make a captured graph eligible for saving, pass ``apic=True`` to
 :func:`wp.capture_begin() <warp.capture_begin>` (or :class:`wp.ScopedCapture <warp.ScopedCapture>`).
-On CUDA this enables API Capture byte-stream recording alongside the native CUDA graph
-capture; on CPU the byte stream is always recorded (it is the only replay
-mechanism), and ``apic=True`` simply unlocks
+On CUDA this enables APIC operation-stream recording alongside CUDA graph
+capture; on CPU the operation stream is always recorded (it is the only replay
+mechanism), and ``apic=True`` simply enables
 :func:`wp.capture_save() <warp.capture_save>`.
+
+On CUDA, ``apic=True`` records the following supported operations so saved
+graphs replay them from current inputs: kernel launches (forward, adjoint, and reusable
+``record_cmd=True`` launches), contiguous same-device memory copies and memsets, contiguous
+:meth:`array.fill_() <warp.array.fill_>`,
+:func:`wp.utils.array_sum() <warp.utils.array_sum>`,
+:func:`wp.utils.array_inner() <warp.utils.array_inner>`,
+:func:`wp.utils.array_scan() <warp.utils.array_scan>`,
+:func:`wp.utils.radix_sort_pairs() <warp.utils.radix_sort_pairs>`,
+:func:`wp.utils.segmented_sort_pairs() <warp.utils.segmented_sort_pairs>`,
+:func:`wp.utils.runlength_encode() <warp.utils.runlength_encode>` (with an explicit
+``run_count``), :func:`wp.sparse.bsr_from_triplets() <warp.sparse.bsr_from_triplets>`,
+:func:`wp.sparse.bsr_set_from_triplets() <warp.sparse.bsr_set_from_triplets>` with compact or padded topology,
+:func:`wp.sparse.bsr_assign() <warp.sparse.bsr_assign>`,
+:func:`wp.sparse.bsr_axpy() <warp.sparse.bsr_axpy>`,
+:func:`wp.sparse.bsr_mm() <warp.sparse.bsr_mm>` when no host count readback is required,
+:func:`wp.sparse.bsr_set_transpose() <warp.sparse.bsr_set_transpose>`, and
+:func:`wp.capture_if() <warp.capture_if>` / :func:`wp.capture_while() <warp.capture_while>`
+conditionals. Unlike the CPU path, CUDA host code for these helper operations
+issues CUDA operations while CUDA stream capture is active so the driver
+records graph nodes. No GPU reduction executes during capture; GPU work begins
+only when the graph is launched.
+
+The graph-capturable :func:`wp.sparse.bsr_mm() <warp.sparse.bsr_mm>` forms are
+also saveable with APIC: use ``topology="masked"``, ``reuse_topology=True``,
+``max_new_nnz``, or padded topology with supplied work arrays. The default compact
+path without a reusable topology or an explicit bound requires a host count
+readback and remains unavailable during graph capture.
+
+During a matching-device CUDA ``apic=True`` capture, non-empty calls to
+:func:`wp.utils.array_sum() <warp.utils.array_sum>` and
+:func:`wp.utils.array_inner() <warp.utils.array_inner>` require an explicit
+``out`` array. Explicit counts, composite dtypes, and positive-stride axis reductions are
+recorded. A negative count raises :exc:`RuntimeError` in that capture, and any negative input
+or output stride raises :exc:`NotImplementedError`, including for a zero-count call. Counts and
+reduction strides must fit a signed 32-bit integer, and participating addresses and layout
+strides must be aligned to the reduction's scalar type.
+
+A few operations cannot be captured for save/load on CUDA and raise
+:exc:`NotImplementedError` during an ``apic=True`` capture; build these outside the captured
+region:
+
+- :meth:`HashGrid.build() <warp.HashGrid.build>`, because ``HashGrid``
+  resources and their process-local IDs cannot yet be serialized. Use
+  ``apic=False`` for live CUDA graph capture.
+- Non-contiguous :meth:`array.fill_() <warp.array.fill_>`, indexed/Fabric ``fill_()``, and
+  contiguous fills whose value is larger than 3968 bytes.
+- The host-return form of :func:`wp.utils.runlength_encode() <warp.utils.runlength_encode>`
+  (``run_count=None``).
+- :func:`wp.copy() <warp.copy>` other than a contiguous same-device copy: cross-device copies
+  (host-to-device, device-to-host, and peer-to-peer) and non-contiguous (strided / indexed /
+  Fabric) copies. Only contiguous same-device copies are recorded; the rest raise so a saved
+  graph cannot silently omit them (device-to-host save/load additionally needs a
+  host-destination region model that does not exist yet).
 
 .. testsetup:: apic_save
 
@@ -1715,11 +2118,31 @@ This writes:
   (``.cubin`` / ``.ptx`` for CUDA, ``.o`` for CPU) referenced by the operation
   stream.
 
+For a graph with recorded kernels, the ``.wrp`` file and its companion
+``_modules`` directory are one artifact. Keep their relative names and
+distribute or move them together; the graph cannot be loaded from either part
+alone.
+
+.. warning::
+
+    Load only ``.wrp`` files and companion module directories from trusted
+    sources. The experimental loader is not hardened for untrusted artifacts,
+    and loading a graph also loads its compiled kernel binaries into the
+    process.
+
 The ``inputs`` and ``outputs`` arguments associate human-readable names with
 memory regions of the captured arrays. Those names are used at load time to
 update inputs and read outputs from the loaded graph (see below). The same array
 may appear in both ``inputs`` and ``outputs`` (e.g. for in-place operations).
 Both names will refer to the same memory region.
+
+A binding names the array's entire base allocation, not a view or slice offset.
+:meth:`Graph.set_param() <warp.Graph.set_param>` and
+:meth:`Graph.get_param() <warp.Graph.get_param>` require an array on the graph's
+device whose byte capacity exactly matches the serialized region size. The
+binding does not enforce the original dtype or shape, so the caller remains
+responsible for using compatible data. :attr:`Graph.params <warp.Graph.params>`
+exposes the required size of every binding.
 
 Loading and replaying
 ^^^^^^^^^^^^^^^^^^^^^
@@ -1743,12 +2166,24 @@ data into named memory regions with ``set_param``; outputs are read back with
     wp.capture_launch(graph)
     graph.get_param("results", output_array)
 
-A ``.wrp`` file captured on a CUDA device can be loaded on a CUDA device (the
-file is built against a specific compute architecture for ``.cubin``, or any
-architecture supported by the bundled PTX); a file captured on a CPU device can
-be loaded on a CPU device. The ``device`` passed to
-:func:`wp.capture_load() <warp.capture_load>` must match the device family the
-graph was captured on.
+For a loaded CUDA graph, the first
+:func:`wp.capture_launch() <warp.capture_launch>` lazily reconstructs and
+instantiates the CUDA graph. Later launches reuse that executable.
+
+Only loaded graphs expose parameter bindings;
+:attr:`Graph.is_loaded <warp.Graph.is_loaded>` distinguishes them from live
+graphs returned by :func:`wp.capture_end() <warp.capture_end>`.
+:meth:`Graph.get_param_ptr() <warp.Graph.get_param_ptr>` returns the graph-owned
+address of a binding (a host address for CPU graphs or a device address for CUDA
+graphs), which remains valid only until the graph is destroyed.
+
+A ``.wrp`` file captured on a CUDA device must be loaded on a CUDA device with
+a compatible companion module; a file captured on a CPU device must be loaded
+on a CPU device. The ``device`` passed to
+:func:`wp.capture_load() <warp.capture_load>` must match the captured device
+family. This is currently a caller requirement: the experimental loader does
+not reliably diagnose a mismatch when it first opens the file. Architecture and
+platform constraints are listed under the current limitations below.
 
 Standalone C++ replay
 ^^^^^^^^^^^^^^^^^^^^^
@@ -1760,24 +2195,24 @@ declared in `warp/native/apic.h <https://github.com/NVIDIA/warp/blob/main/warp/n
 .. code:: c
 
     // Load a .wrp file. device_type: 0 = CUDA, 1 = CPU.
-    // For CUDA, context is a CUcontext; for CPU it must be NULL.
-    APICGraph wp_apic_load_graph(void* context, const char* path, int device_type);
+    // For CUDA, context is a CUcontext; for CPU it is ignored (pass NULL).
+    APICGraph* wp_apic_load_graph(void* context, const char* path, int device_type);
 
     // Update or read named parameter regions on the loaded graph.
-    bool wp_apic_set_param(APICGraph graph, const char* name,
+    bool wp_apic_set_param(APICGraph* graph, const char* name,
                            const void* data, size_t size);
-    bool wp_apic_get_param(APICGraph graph, const char* name,
+    bool wp_apic_get_param(APICGraph* graph, const char* name,
                            void* data, size_t size);
 
     // CUDA replay: get the CUDA graph executable (built lazily on first call)
     // and launch it via cudaGraphLaunch().
-    void* wp_apic_get_cuda_graph_exec(APICGraph graph);
+    void* wp_apic_get_cuda_graph_exec(APICGraph* graph);
 
     // CPU replay: walk the recorded operation stream and execute it directly.
-    bool wp_apic_cpu_replay_graph(APICGraph graph);
+    bool wp_apic_cpu_replay_graph(APICGraph* graph);
 
     // Release the loaded graph and its associated allocations.
-    void wp_apic_destroy_graph(APICGraph graph);
+    void wp_apic_destroy_graph(APICGraph* graph);
 
 Two reference C++ examples ship with Warp under ``warp/examples/cpp/``. Both
 implement the same interactive 2-D wave simulation visualized with GLFW/OpenGL,
@@ -1790,8 +2225,9 @@ CUDA replay (``02_apic_visualization``)
 
 Source: `warp/examples/cpp/02_apic_visualization <https://github.com/NVIDIA/warp/tree/main/warp/examples/cpp/02_apic_visualization>`_
 
-This example captures a full simulation frame (one displacement kernel followed
-by 16 wave-equation integration substeps) as a single CUDA graph. C++ then
+This example records and saves a full simulation frame (one displacement kernel
+followed by 16 wave-equation integration substeps) as an APIC operation stream.
+The C++ loader uses that representation to reconstruct a CUDA graph, then
 launches the entire frame with one ``cudaGraphLaunch()`` per rendered frame:
 
 .. code:: cpp
@@ -1800,7 +2236,7 @@ launches the entire frame with one ``cudaGraphLaunch()`` per rendered frame:
     #include "warp.h"  // Warp C API
     #include "apic.h"  // APIC graph loading and execution
 
-    APICGraph graph = wp_apic_load_graph(context, "generated/wave_sim", 0);
+    APICGraph* graph = wp_apic_load_graph(context, "generated/wave_sim", 0);
 
     // Build the executable on first call.
     cudaGraphExec_t exec = (cudaGraphExec_t)wp_apic_get_cuda_graph_exec(graph);
@@ -1844,7 +2280,7 @@ CPU device. ``main.cpp`` does not link against CUDA at all. Replay goes through
     #include "apic.h"  // APIC graph loading and execution
     #include "warp.h"  // Warp C API
 
-    APICGraph graph = wp_apic_load_graph(nullptr, "generated/wave_sim", 1);
+    APICGraph* graph = wp_apic_load_graph(nullptr, "generated/wave_sim", 1);
 
     // ... resolve CPU kernel function pointers (see below) ...
 
@@ -1869,21 +2305,28 @@ resolved from the ``.o`` files in the companion ``_modules/`` directory by
 loading the ``warp-clang`` library at runtime and calling its ``wp_load_obj`` /
 ``wp_lookup`` entry points, then registering each pointer with the loaded graph
 via ``wp_apic_register_loaded_cpu_kernel``. The example walks every kernel
-returned by ``wp_apic_get_num_kernels`` and ``wp_apic_get_kernel_key`` and does
-this resolution once at startup. The C API surface for this lookup is:
+returned by ``wp_apic_get_num_kernels`` and does this resolution once at
+startup. Kernel metadata includes both the kernel key and module hash so
+same-key kernels from distinct ``module="unique"`` modules resolve to the
+correct object file and function pointer. The C API surface for this lookup is:
 
 .. code:: c
 
-    int         wp_apic_get_num_kernels(APICGraph graph);
-    const char* wp_apic_get_kernel_key(APICGraph graph, int index);
-    const char* wp_apic_get_kernel_forward_name(APICGraph graph, const char* key);
-    const char* wp_apic_get_kernel_backward_name(APICGraph graph, const char* key);
-    void        wp_apic_register_loaded_cpu_kernel(APICGraph graph, const char* key,
+    int         wp_apic_get_num_kernels(APICGraph* graph);
+    const char* wp_apic_get_kernel_key(APICGraph* graph, int index);
+    const char* wp_apic_get_kernel_module_hash(APICGraph* graph, int index);
+    const char* wp_apic_get_kernel_module_binary_filename(APICGraph* graph, int index);
+    const char* wp_apic_get_kernel_forward_name(APICGraph* graph, int index);
+    const char* wp_apic_get_kernel_backward_name(APICGraph* graph, int index);
+    void        wp_apic_register_loaded_cpu_kernel(APICGraph* graph, const char* key,
+                                                   const char* module_hash,
                                                    void* forward_fn, void* backward_fn);
 
-Loading the ``.wrp`` file itself currently requires a CUDA-enabled build of the
-Warp native library, but graph replay (``wp_apic_cpu_replay_graph``) has no
-CUDA runtime dependency.
+Loading a CPU ``.wrp`` graph uses the pure-C++ APIC loader in the Warp native
+library and does not require a CUDA-enabled build. CPU replay
+(``wp_apic_cpu_replay_graph``) still requires the warp-clang backend and the
+companion ``_modules`` directory described above. Loading a CUDA ``.wrp`` graph
+requires a CUDA-enabled build.
 
 Building and running
 """"""""""""""""""""
@@ -1910,22 +2353,31 @@ options, controls, and platform-specific notes.
 
 Current limitations of API Capture:
 
-- The recorded operation set matches the CPU graph set: kernel launches,
-  :func:`wp.copy() <warp.copy>`, and :meth:`array.zero_() <warp.array.zero_>`.
-  :meth:`array.fill_() <warp.array.fill_>` is recorded on CUDA (it dispatches a
-  kernel that the CUDA driver captures) but not on CPU.
 - Only :class:`wp.Mesh <warp.Mesh>` object handles are serialized.
-  :class:`wp.Volume <warp.Volume>` and :class:`wp.Bvh <warp.Bvh>` handles are not
-  yet supported.
-- ``.wrp`` files are not portable across CUDA compute architectures unless the
-  capture was built with PTX output (set ``warp.config.cuda_output = "ptx"``
-  before capture). Multi-GPU and cross-architecture loading are not yet
-  supported.
-- Loading a ``.wrp`` file currently requires a CUDA-enabled build of the Warp
-  native library even for CPU graphs, because the parser still lives in the CUDA
-  source. Replay itself is CPU-only and has no CUDA dependency.
-- Conditional and loop graph nodes, stream events, and texture array copies are
-  not recorded.
+  :class:`wp.Volume <warp.Volume>`, :class:`wp.Bvh <warp.Bvh>`, and
+  :class:`wp.HashGrid <warp.HashGrid>` handles are not yet supported.
+- Kernel arguments of type ``wp.fixedarray``, ``wp.fabricarray``, and
+  ``wp.indexedfabricarray`` cannot yet be recorded by APIC.
+- ``HashGrid.build()`` is supported by live CPU graphs captured with
+  ``apic=False``. It is not supported by saveable captures because ``HashGrid``
+  resources and their process-local IDs cannot yet be serialized. Calling
+  ``HashGrid.build()`` with ``apic=True`` raises :class:`NotImplementedError`.
+  Pre-reserving is optional for CPU replay but avoids allocation on the first
+  launch. If used, call ``HashGrid.reserve()`` before capture; reserve calls
+  inside CPU capture are rejected.
+- A CUBIN companion is specific to its compiled CUDA architecture. PTX may be
+  JIT-compiled on architectures supported by its target and the installed
+  driver, but PTX is not an unconditional cross-architecture guarantee. One
+  APIC graph cannot span multiple GPUs.
+- Loading CPU ``.wrp`` graphs requires the warp-clang backend and the companion
+  ``_modules`` directory with compatible CPU kernel object files. Those
+  ``.o`` files are tied to their platform, architecture, compiler ABI, and Warp
+  runtime. CPU loading does not require a CUDA-enabled Warp native library;
+  loading CUDA ``.wrp`` graphs does.
+- Both CPU and CUDA ``.wrp`` graph replay support APIC-recorded
+  :func:`wp.capture_if() <warp.capture_if>` and
+  :func:`wp.capture_while() <warp.capture_while>` conditionals and loops. Stream
+  events and texture array copies are not recorded.
 
 
 Spatial Computing Primitives
@@ -1956,33 +2408,82 @@ Warp provides a :class:`wp.Mesh <warp.Mesh>` class to manage triangle mesh data.
 .. note::
     Mesh objects maintain references to their input geometry buffers. All buffers should live on the same device.
 
-Meshes can be passed to kernels using their ``id`` attribute, which is ``uint64`` value that uniquely identifies the mesh.
-Once inside a kernel, you can perform geometric queries against the mesh such as ray-casts or closest-point lookups::
+Meshes can be passed to kernels using their ``id`` attribute, which is a ``uint64`` value that uniquely identifies
+the mesh.
+Once inside a kernel, you can perform geometric queries against the mesh such as ray-casts or closest-point lookups.
+For example, the result object returned by :func:`wp.mesh_query_point() <warp._src.lang.mesh_query_point>` stores the
+hit face and barycentric coordinates, which can be passed to
+:func:`wp.mesh_eval_position() <warp._src.lang.mesh_eval_position>`:
+
+.. testcode::
+    :skipif: wp.get_cuda_device_count() == 0
+
+    points = wp.array(
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        dtype=wp.vec3,
+        device="cuda:0",
+    )
+    indices = wp.array([0, 1, 2], dtype=int, device="cuda:0")
+    mesh = wp.Mesh(points=points, indices=indices)
+    query_points = wp.array([(0.25, 0.25, 0.5)], dtype=wp.vec3, device="cuda:0")
+    closest = wp.empty_like(query_points)
 
     @wp.kernel
-    def raycast(mesh: wp.uint64,
-                ray_origin: wp.array[wp.vec3],
-                ray_dir: wp.array[wp.vec3],
-                ray_hit: wp.array[wp.vec3]):
-
+    def closest_point_example(mesh: wp.uint64, query_points: wp.array[wp.vec3], closest: wp.array[wp.vec3]):
         tid = wp.tid()
+        query = wp.mesh_query_point(mesh, query_points[tid], max_dist=10.0)
+        if query.result:
+            closest[tid] = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
 
-        t = float(0.0)      # hit distance along ray
-        u = float(0.0)      # hit face barycentric u
-        v = float(0.0)      # hit face barycentric v
-        sign = float(0.0)   # hit face sign
-        n = wp.vec3()       # hit face normal
-        f = int(0)          # hit face index
+    wp.launch(
+        closest_point_example,
+        dim=query_points.shape,
+        inputs=[mesh.id, query_points],
+        outputs=[closest],
+        device="cuda:0",
+    )
+    print(np.round(closest.numpy(), 3))
 
-        color = wp.vec3()
+.. testoutput::
+    :skipif: wp.get_cuda_device_count() == 0
 
-        # ray cast against the mesh
-        if wp.mesh_query_ray(mesh, ray_origin[tid], ray_dir[tid], 1.e+6, t, u, v, sign, n, f):
+    [[0.25 0.25 0.  ]]
 
-            # if we got a hit then set color to the face normal
-            color = n*0.5 + wp.vec3(0.5, 0.5, 0.5)
+The result object returned by :func:`wp.mesh_query_ray() <warp._src.lang.mesh_query_ray>` exposes the hit distance,
+face normal, face index, and barycentric coordinates:
 
-        ray_hit[tid] = color
+.. testcode::
+    :skipif: wp.get_cuda_device_count() == 0
+
+    ray_origins = wp.array([(0.25, 0.25, 1.0)], dtype=wp.vec3, device="cuda:0")
+    ray_dirs = wp.array([(0.0, 0.0, -1.0)], dtype=wp.vec3, device="cuda:0")
+    hit_normals = wp.zeros_like(ray_origins)
+
+    @wp.kernel
+    def raycast_example(
+        mesh: wp.uint64,
+        ray_origins: wp.array[wp.vec3],
+        ray_dirs: wp.array[wp.vec3],
+        hit_normals: wp.array[wp.vec3],
+    ):
+        tid = wp.tid()
+        query = wp.mesh_query_ray(mesh, ray_origins[tid], ray_dirs[tid], max_t=10.0)
+        if query.result:
+            hit_normals[tid] = query.normal
+
+    wp.launch(
+        raycast_example,
+        dim=ray_origins.shape,
+        inputs=[mesh.id, ray_origins, ray_dirs],
+        outputs=[hit_normals],
+        device="cuda:0",
+    )
+    print(hit_normals.numpy())
+
+.. testoutput::
+    :skipif: wp.get_cuda_device_count() == 0
+
+    [[0. 0. 1.]]
 
 
 Users may update mesh vertex positions at runtime simply by modifying the points buffer.
@@ -1998,45 +2499,63 @@ Hash Grids
 
 Many particle-based simulation methods such as the Discrete Element Method (DEM), or Smoothed Particle Hydrodynamics (SPH), involve iterating over spatial neighbors to compute force interactions. Hash grids are a well-established data structure to accelerate these nearest neighbor queries, and particularly well-suited to the GPU.
 
-To support spatial neighbor queries Warp provides a ``HashGrid`` object that may be created as follows::
+To support spatial neighbor queries Warp provides a ``HashGrid`` object. ``p`` is an array of
+:class:`wp.vec3 <warp.vec3>` point positions, and ``r`` is the radius to use when building the grid:
 
-    grid = wp.HashGrid(dim_x=128, dim_y=128, dim_z=128, device="cuda")
+.. testcode::
+    :skipif: wp.get_cuda_device_count() == 0
 
+    p = wp.array(
+        [(0.0, 0.0, 0.0), (0.4, 0.0, 0.0), (2.0, 0.0, 0.0)],
+        dtype=wp.vec3,
+        device="cuda:0",
+    )
+    r = 0.5
+    grid = wp.HashGrid(dim_x=8, dim_y=8, dim_z=8, device="cuda:0")
     grid.build(points=p, radius=r)
 
-``p`` is an array of :class:`wp.vec3 <warp.vec3>` point positions, and ``r`` is the radius to use when building the grid.
-Neighbors can then be iterated over inside the kernel code using :func:`wp.hash_grid_query() <warp._src.lang.hash_grid_query>`
-and :func:`wp.hash_grid_query_next() <warp._src.lang.hash_grid_query_next>` as follows:
+Neighbors can then be iterated over inside the kernel code using
+:func:`wp.hash_grid_query() <warp._src.lang.hash_grid_query>`:
 
-.. code:: python
+.. testcode::
+    :skipif: wp.get_cuda_device_count() == 0
+
+    neighbor_count = wp.zeros(p.shape[0], dtype=int, device="cuda:0")
 
     @wp.kernel
-    def sum(grid : wp.uint64,
-            points: wp.array[wp.vec3],
-            output: wp.array[wp.vec3],
-            radius: float):
-
+    def count_neighbors_example(
+        grid: wp.uint64,
+        points: wp.array[wp.vec3],
+        radius: float,
+        neighbor_count: wp.array[int],
+    ):
         tid = wp.tid()
+        point = points[tid]
+        count = int(0)
 
-        # query point
-        p = points[tid]
+        for index in wp.hash_grid_query(grid, point, radius):
+            if index != tid and wp.length(points[index] - point) <= radius:
+                count += 1
 
-        # create grid query around point
-        query = wp.hash_grid_query(grid, p, radius)
-        index = int(0)
+        neighbor_count[tid] = count
 
-        sum = wp.vec3()
+    wp.launch(
+        count_neighbors_example,
+        dim=p.shape,
+        inputs=[grid.id, p, r],
+        outputs=[neighbor_count],
+        device="cuda:0",
+    )
+    print(neighbor_count.numpy())
 
-        while(wp.hash_grid_query_next(query, index)):
+.. testoutput::
+    :skipif: wp.get_cuda_device_count() == 0
 
-            neighbor = points[index]
+    [1 1 0]
 
-            # compute distance to neighbor point
-            dist = wp.length(p-neighbor)
-            if (dist <= radius):
-                sum += neighbor
-
-        output[tid] = sum
+Helper functions that take hash grid query objects should annotate the query argument with the matching grid coordinate
+precision, for example ``wp.HashGridQuery[wp.float64]``. The unparameterized ``wp.HashGridQuery`` denotes the default
+``wp.float32`` query type.
 
 .. note::
     The ``HashGrid`` query will give back all points in *cells* that fall inside the query radius.
@@ -2046,6 +2565,70 @@ and :func:`wp.hash_grid_query_next() <warp._src.lang.hash_grid_query_next>` as f
     check/compute the distance twice.
 
 
+Grouped Hash Grids
+^^^^^^^^^^^^^^^^^^
+
+Hash grids can also be built with point groups. Grouping is useful when a single grid stores particles from multiple
+independent environments, worlds, or batches. Points from different groups may occupy identical coordinates, but grouped
+queries only traverse the buckets for the requested group, avoiding cross-group candidate iteration and user-side
+filtering.
+
+Pass a contiguous ``wp.int32`` array with one group id per point to :meth:`HashGrid.build() <warp.HashGrid.build>`:
+
+.. code:: python
+
+    points = wp.array(
+        [
+            (0.0, 0.0, 0.0),
+            (0.4, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.4, 0.0, 0.0),
+        ],
+        dtype=wp.vec3,
+        device="cuda:0",
+    )
+    groups = wp.array([0, 0, 1, 1], dtype=wp.int32, device="cuda:0")
+
+    grid = wp.HashGrid(dim_x=8, dim_y=8, dim_z=8, device="cuda:0")
+    grid.build(points=points, radius=0.5, groups=groups)
+
+Inside kernels, pass the desired group id directly to :func:`wp.hash_grid_query() <warp._src.lang.hash_grid_query>`:
+
+.. code:: python
+
+    @wp.kernel
+    def count_group_neighbors(
+        grid: wp.uint64,
+        points: wp.array[wp.vec3],
+        groups: wp.array[wp.int32],
+        radius: float,
+        neighbor_count: wp.array[int],
+    ):
+        tid = wp.tid()
+        point = points[tid]
+        group = groups[tid]
+        count = int(0)
+
+        for index in wp.hash_grid_query(grid, point, radius, group):
+            if index != tid and wp.length(points[index] - point) <= radius:
+                count += 1
+
+        neighbor_count[tid] = count
+
+If the group argument is omitted, the query visits all groups. Unlike grouped BVH queries, grouped hash-grid queries do
+not use a group-root helper such as :func:`wp.bvh_get_group_root() <warp._src.lang.bvh_get_group_root>`; the group id is
+the query selector.
+
+Group ids may be arbitrary ``int32`` values. Rebuilds read the ``groups`` array directly on the device and never copy
+group data back to the host, so grouped rebuilds are asynchronous like ungrouped ones, and group assignments may
+change between rebuilds, including inside replayed CUDA graphs. The grid does not keep any host-side record of the
+group ids in use, so no warm-up rebuild is needed after changing them.
+
+To record a grouped rebuild inside a CUDA graph without a prior warm-up build, reserve the grouped buffers up front
+with :meth:`grid.reserve(num_points, with_groups=True) <warp.HashGrid.reserve>`.
+
+
+.. _volume_sampling:
 
 Volumes
 #######
@@ -2053,19 +2636,24 @@ Volumes
 Sparse volumes are incredibly useful for representing grid data over large domains, such as signed distance fields
 (SDFs) for complex objects, or velocities for large-scale fluid flow. Warp supports reading sparse volumetric grids
 stored using the `NanoVDB <https://developer.nvidia.com/nanovdb>`_ standard. Users can access voxels directly
-or use built-in closest-point or trilinear interpolation to sample grid data from world or local space.
+or use built-in nearest-neighbor or trilinear interpolation to sample grid data from world or index space.
 
 Volume objects can be created directly from Warp arrays containing a NanoVDB grid, from the contents of a
 standard ``.nvdb`` file using :func:`load_from_nvdb() <warp.Volume.load_from_nvdb>`,
 from an uncompressed in-memory buffer using :func:`load_from_address() <warp.Volume.load_from_address>`,
 or from a dense 3D NumPy array using :func:`load_from_numpy() <warp.Volume.load_from_numpy>`.
 
-Volumes can also be created using :meth:`allocate() <warp.Volume.allocate>`, 
-:meth:`allocate_by_tiles() <warp.Volume.allocate_by_tiles>` or :meth:`allocate_by_voxels() <warp.Volume.allocate_by_voxels>`. 
+Volumes can also be created using :meth:`allocate() <warp.Volume.allocate>`,
+:meth:`allocate_by_tiles() <warp.Volume.allocate_by_tiles>` or :meth:`allocate_by_voxels() <warp.Volume.allocate_by_voxels>`.
 The values for a Volume object can be modified in a Warp kernel using :func:`wp.volume_store() <warp._src.lang.volume_store>`.
 
 .. note::
-    Warp does not currently support modifying the topology of sparse volumes at runtime.
+    Volumes created with ``rebuildable=True`` or explicit capacity arguments reserve persistent storage and can update
+    their sparse topology in place with :meth:`Volume.rebuild() <warp.Volume.rebuild>`. Allocation and rebuild of these
+    volumes can be captured in CUDA graphs when CUDA memory-pool allocation is supported and enabled. Exact,
+    non-rebuildable volume allocation and active-topology queries such as
+    :meth:`Volume.get_active_stats() <warp.Volume.get_active_stats>` require device synchronization and must occur
+    outside CUDA graph capture.
 
 Below we give an example of creating a Volume object from an existing NanoVDB file::
 
@@ -2095,7 +2683,7 @@ To sample the volume inside a kernel we pass a reference to it by ID, and use th
         # load sample point in world-space
         p = points[tid]
 
-        # transform position to the volume's local-space
+        # transform position to the volume's index space
         q = wp.volume_world_to_index(volume, p)
 
         # sample volume with trilinear interpolation
@@ -2117,7 +2705,7 @@ to values in arbitrarily shaped arrays::
         # load sample point in world-space
         p = points[tid]
 
-        # transform position to the volume's local-space
+        # transform position to the volume's index space
         q = wp.volume_world_to_index(volume, p)
 
         # sample volume with trilinear interpolation
@@ -2331,6 +2919,12 @@ Always maintain references to spatial computing primitive objects
 (like :class:`wp.HashGrid <warp.HashGrid>`, :class:`wp.Bvh <warp.Bvh>`, etc.) rather than just their ID values.
 This is especially important in loops, functions, and temporary variables where object scope might be unclear.
 
+When a graph captures a :class:`wp.HashGrid <warp.HashGrid>` ID, the caller must
+keep the ``HashGrid`` alive until every graph that captures its ID is destroyed.
+This caller-ownership contract is the same for live CPU and CUDA graphs. The
+graph retains the array inputs captured by ``HashGrid.build()``, including
+normalized views and their backing allocations.
+
 Marching Cubes
 --------------
 
@@ -2338,21 +2932,31 @@ The :class:`wp.MarchingCubes <warp.MarchingCubes>` class can be used to extract 
 isosurface of a 3-D scalar field. The resulting triangle mesh can be saved to a USD
 file using the :class:`warp.render.UsdRenderer`.
 
-.. code-block:: python
+.. testcode::
+    :skipif: wp.get_cuda_device_count() == 0
 
-    import warp as wp
+    @wp.kernel
+    def make_sphere_sdf(field: wp.array3d[float], center: wp.vec3, radius: float):
+        i, j, k = wp.tid()
+        p = wp.vec3(float(i), float(j), float(k))
+        field[i, j, k] = wp.length(p - center) - radius
 
-    # Create a 3D scalar field
-    field = wp.zeros((64, 64, 64), dtype=wp.float32, device="cuda:0")
-    # ... populate field with SDF or density values ...
-
-    # Extract isosurface
-    mc = wp.MarchingCubes(nx=64, ny=64, nz=64)
+    dim = 16
+    field = wp.zeros((dim, dim, dim), dtype=float, device="cuda:0")
+    wp.launch(make_sphere_sdf, dim=field.shape, inputs=[field, wp.vec3(8.0, 8.0, 8.0), 4.0], device="cuda:0")
+    mc = wp.MarchingCubes(nx=dim, ny=dim, nz=dim)
     mc.surface(field, threshold=0.0)
+    print(mc.verts.shape[0] > 0)
+    print(mc.indices.shape[0] % 3 == 0)
 
-    # Access the resulting mesh
-    vertices = mc.verts   # wp.array of vec3f
-    indices = mc.indices  # wp.array of int32
+.. testoutput::
+    :skipif: wp.get_cuda_device_count() == 0
+
+    True
+    True
+
+The resulting mesh is stored in ``mc.verts`` as a :class:`wp.array <warp.array>` of
+:class:`wp.vec3 <warp.vec3>` vertices and in ``mc.indices`` as a flat :class:`wp.int32 <warp.int32>` index array.
 
 See :github:`warp/examples/core/example_marching_cubes.py` for a complete usage example.
 
@@ -2422,7 +3026,7 @@ This results in a printout at runtime to the standard output stream like:
 
     grid build took 0.06 ms
 
-See :doc:`../deep_dive/profiling` documentation for more information.
+See :doc:`execution_and_performance/profiling` documentation for more information.
 
 
 Allocation Tracking
@@ -2523,7 +3127,7 @@ Some basic requirements for using IPC include:
 
 * Linux operating system (note however that integrated devices like NVIDIA
   Jetson do not support CUDA IPC)
-* The array must be allocated on a GPU device using the default memory allocator (see :doc:`../deep_dive/allocators`)
+* The array must be allocated on a GPU device using the default memory allocator (see :doc:`execution_and_performance/memory_management`)
 
   The :class:`wp.ScopedMempool <warp.ScopedMempool>` context manager is useful for temporarily disabling
   memory pools for the purpose of allocating arrays that can be shared using IPC.
@@ -2561,6 +3165,8 @@ is called. Therefore, LTOs are stored in a cache that is independent of a given 
 and will remain cached even if :func:`wp.clear_kernel_cache() <warp.clear_kernel_cache>` is called.
 :func:`wp.clear_lto_cache() <warp.clear_lto_cache>` can be used to clear the LTO cache.
 
+
+.. _random_number_generation:
 
 Random Number Generation
 ------------------------
@@ -2617,6 +3223,8 @@ numbers, e.g.:
 .. testoutput::
 
     [0.86597514 0.1859147 ]
+
+.. _avoiding_correlated_sequences:
 
 Avoiding Correlated Sequences
 #############################

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # ruff: noqa: PLC0415
 
@@ -19,10 +7,11 @@ import importlib.util
 import os
 
 import numpy as np
-from asv_runner.benchmarks.mark import skip_benchmark_if
+from asv_runner.benchmarks.mark import skip_benchmark_if, skip_for_params
 
 import warp as wp
-import warp.examples
+
+from .benchmarks_utils import get_asset_directory
 
 pxr = importlib.util.find_spec("pxr")
 USD_AVAILABLE = pxr is not None
@@ -51,6 +40,7 @@ class BvhBuild:
 
     repeat = 100
     number = 5
+    warmup_time = 0.5
 
     assets = ["bunny", "bear", "rocks"]
 
@@ -62,7 +52,7 @@ class BvhBuild:
         # Load and parse USD assets once, compute AABBs, cache as numpy arrays
         asset_data = {}
         for asset_name in self.assets:
-            asset_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), f"{asset_name}.usd"))
+            asset_stage = Usd.Stage.Open(os.path.join(get_asset_directory(), f"{asset_name}.usd"))
             mesh_geom = UsdGeom.Mesh(asset_stage.GetPrimAtPath(f"/root/{asset_name}"))
 
             points_np = np.array(mesh_geom.GetPointsAttr().Get())
@@ -103,7 +93,10 @@ class BvhBuild:
         self.uppers = wp.array(uppers_np, dtype=wp.vec3, device=self.device)
         wp.synchronize_device(self.device)
 
+    # This small median build exhibits host-dependent timing modes in CI while
+    # duplicating median coverage provided by the larger assets.
     @skip_benchmark_if(USD_AVAILABLE is False)
+    @skip_for_params([("median", "bear")])
     def time_build(self, asset_data, method, asset):
         _bvh = wp.Bvh(self.lowers, self.uppers, constructor=method)
         wp.synchronize_device(self.device)

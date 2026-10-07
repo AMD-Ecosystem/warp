@@ -22,6 +22,13 @@ enable_testing()
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
 
+# Find OpenGL (optional — skip this example on headless CI systems)
+find_package(OpenGL QUIET)
+if(NOT OPENGL_FOUND)
+    message(STATUS "OpenGL not found — skipping 02_apic_visualization")
+    return()
+endif()
+
 # Find Warp native directory
 # Default: assume repository checkout (examples are in warp/examples/cpp/)
 if(NOT DEFINED WARP_NATIVE_DIR)
@@ -67,13 +74,6 @@ set_target_properties(warp::runtime PROPERTIES
     IMPORTED_LOCATION "${WARP_LIB}"
     IMPORTED_NO_SONAME TRUE
 )
-
-# Find OpenGL (optional — skip this example on headless CI systems)
-find_package(OpenGL QUIET)
-if(NOT OPENGL_FOUND)
-    message(STATUS "OpenGL not found — skipping 02_apic_visualization")
-    return()
-endif()
 
 # Fetch GLFW and GLAD
 include(FetchContent)

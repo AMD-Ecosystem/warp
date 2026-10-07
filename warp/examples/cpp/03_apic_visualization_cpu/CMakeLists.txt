@@ -6,6 +6,13 @@ project(apic_visualization_cpu CXX C)
 
 enable_testing()
 
+# Find OpenGL (optional — skip this example on headless CI systems)
+find_package(OpenGL QUIET)
+if(NOT OPENGL_FOUND)
+    message(STATUS "OpenGL not found — skipping 03_apic_visualization_cpu")
+    return()
+endif()
+
 # Find Warp native directory
 if(NOT DEFINED WARP_NATIVE_DIR)
     set(WARP_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../native")
@@ -47,13 +54,6 @@ set_target_properties(warp::runtime PROPERTIES
     IMPORTED_LOCATION "${WARP_LIB}"
     IMPORTED_NO_SONAME TRUE
 )
-
-# Find OpenGL (optional — skip this example on headless CI systems)
-find_package(OpenGL QUIET)
-if(NOT OPENGL_FOUND)
-    message(STATUS "OpenGL not found — skipping 03_apic_visualization_cpu")
-    return()
-endif()
 
 # Fetch GLFW and GLAD
 include(FetchContent)

@@ -41,26 +41,123 @@ In addition, formatted C-style printing for *scalar types* is available through 
 
         wp.printf("A float value %f, an int value: %d\n", x, i)
 
-Verbose Mode and Printing Launches
-----------------------------------
+Diagnostics and Logging
+-----------------------
 
 For complex applications, it can be difficult to understand the order-of-operations that lead to a bug. To help diagnose
 these issues, Warp supports a simple option to print out all launches and arguments to the console::
 
     wp.config.print_launches = True
 
-Verbose mode can also be enabled with::
+Log Level
+^^^^^^^^^
 
-    wp.config.verbose = True
+Warp emits informational, warning, and error messages through its own logging
+infrastructure. The verbosity is controlled by a single global threshold:
 
-In verbose mode, additional messages will be printed to standard output regarding program progress and
-code generation, such as when operations may be non-differentiable.
+.. code-block:: python
 
-Verbose *warnings* can be enabled with::
+    wp.config.log_level = wp.LOG_DEBUG    # most verbose: codegen details, module loads
+    wp.config.log_level = wp.LOG_INFO     # default: init banner, compile timings
+    wp.config.log_level = wp.LOG_WARNING  # warnings and errors only
+    wp.config.log_level = wp.LOG_ERROR    # errors only
+
+Messages below the threshold are suppressed. Errors always emit regardless of
+the level.
+
+At ``wp.LOG_DEBUG``, additional messages are printed to standard output
+regarding program progress and code generation, such as when operations may be
+non-differentiable.
+
+.. note::
+    The legacy ``wp.config.verbose`` and ``wp.config.quiet`` flags are
+    deprecated. Migrate to ``wp.config.log_level``:
+
+    - ``wp.config.verbose = True`` → ``wp.config.log_level = wp.LOG_DEBUG``
+    - ``wp.config.quiet = True`` → ``wp.config.log_level = wp.LOG_WARNING``
+
+    Reading or setting either deprecated flag emits a one-time
+    ``DeprecationWarning``. During the deprecation window the flag is still
+    honored alongside ``log_level``, so existing code keeps working. Remove the
+    flag once your code sets ``log_level`` directly.
+
+    ``wp.config.verbose_warnings`` is not deprecated. It is an orthogonal
+    formatting flag that controls whether warning messages include the source
+    location and has no ``log_level`` equivalent.
+
+Verbose Warnings
+^^^^^^^^^^^^^^^^
+
+To include the source location in each ``Warp UserWarning`` message, enable::
 
     wp.config.verbose_warnings = True
 
-This can be useful in identifying where a particular ``Warp UserWarning`` message is being emitted from.
+This can be useful in identifying where a particular warning is being emitted from.
+
+Custom Loggers
+^^^^^^^^^^^^^^
+
+By default Warp routes diagnostics through a built-in logger that writes
+debug and info messages to ``sys.stdout``, errors to ``sys.stderr``, and
+routes warnings through Python's :mod:`warnings` filter machinery so that
+``-W`` flags and :func:`warnings.simplefilter` work as expected.
+
+Frameworks that want to capture Warp's output can supply a custom logger.
+:class:`wp.Logger <warp.Logger>` is a runtime-checkable :class:`~typing.Protocol`,
+so any object with the four methods below works. There is no need to inherit
+from a Warp base class; framework integrators typically wrap an existing
+logger in a small adapter:
+
+.. code-block:: python
+
+    class MyLogger:
+        def debug(self, message): ...
+        def info(self, message): ...
+        def warning(self, message, category=None, stacklevel=1): ...
+        def error(self, message): ...
+
+    wp.set_logger(MyLogger())
+
+The ``warning`` method must accept the ``category`` and ``stacklevel`` keyword
+arguments even if the adapter ignores them: the internal emitter passes them
+by name, so an adapter without those parameters raises ``TypeError`` at the
+first warning. The built-in default logger uses them to integrate with
+Python's :mod:`warnings` filter machinery.
+
+To forward Warp's diagnostics into an existing :mod:`logging` pipeline, wrap
+:class:`logging.Logger` in a small adapter:
+
+.. code-block:: python
+
+    import logging
+    import warp as wp
+
+    app_logger = logging.getLogger("myapp.warp")
+
+    class StdlibAdapter:
+        def debug(self, message): app_logger.debug(message)
+        def info(self, message): app_logger.info(message)
+        def warning(self, message, category=None, stacklevel=1): app_logger.warning(message)
+        def error(self, message): app_logger.error(message)
+
+    wp.set_logger(StdlibAdapter())
+
+This routes all of Warp's output through stdlib :mod:`logging` (and any
+handlers, filters, or formatters configured on it). Note that this loses
+the default logger's integration with Python's :mod:`warnings` filter
+machinery (e.g. ``-W`` flags, :func:`warnings.filterwarnings`); the adapter
+emits warnings as plain log records instead.
+
+To temporarily install a logger, use :class:`wp.ScopedLogger <warp.ScopedLogger>`,
+which restores the previous logger on context exit:
+
+.. code-block:: python
+
+    with wp.ScopedLogger(my_capture_logger):
+        wp.launch(my_kernel, ...)  # diagnostics flow to my_capture_logger
+
+Pass ``None`` to ``wp.set_logger()`` or ``wp.ScopedLogger()`` to restore
+Warp's built-in default logger.
 
 .. _debug-mode:
 
@@ -70,7 +167,6 @@ Debug Mode Compilation
 In debug mode, Warp kernels will perform the following additional checks:
 
 * Raise an assertion if there is an array access outside the defined shape.
-* Warn if :func:`wp.tid() <warp._src.lang.tid>` will return an overflowed value on large grids.
 * (GPU-only) Warn if the CUDA grid dimensions have been capped due to an overflowed number of blocks.
 * (GPU-only) Generate line-number information for device code.
 
@@ -185,6 +281,45 @@ If a bug with Warp's kernel caching logic is suspected, kernel caching can be di
 
     wp.config.cache_kernels = False
 
+Cross-Device Array Access
+-------------------------
+
+A cross-device launch runs a kernel on one device with an array allocated on
+another. If the launch device cannot access the array, a CPU kernel may fail
+with a segmentation fault (``SIGSEGV``), or CUDA may report error 700
+(``an illegal memory access was encountered``). The default
+``wp.config.LaunchArrayAccessMode.RELAXED`` mode does not check array
+accessibility before a kernel runs.
+
+Whether a cross-device launch is valid depends on which device accesses the
+array and how the array was allocated. System capabilities and access settings
+also matter, so the same launch may work on one system and fail on another. Use
+:func:`wp.can_access(device, array) <warp.can_access>` to check a specific
+allocation. See :ref:`cross_device_memory_access` for the full access model and
+platform-specific examples.
+
+To diagnose a suspected cross-device array access failure without rejecting
+supported access, enable checked validation:
+
+.. code-block:: python
+
+    wp.config.launch_array_access_mode = wp.config.LaunchArrayAccessMode.CHECKED
+
+``CHECKED`` raises a ``RuntimeError`` before execution when Warp can determine
+that an array is inaccessible. If Warp cannot verify a custom or externally
+managed allocation, it emits a warning and allows the launch to proceed.
+
+Use ``STRICT`` to require every Warp array argument to be allocated on the
+launch device. It also rejects cross-device allocations that the hardware
+could access:
+
+.. code-block:: python
+
+    wp.config.launch_array_access_mode = wp.config.LaunchArrayAccessMode.STRICT
+
+See :ref:`launch_array_access_checks` for the complete behavior, limitations,
+and performance considerations.
+
 CUDA Error Verification
 -----------------------
 
@@ -224,3 +359,39 @@ be used to detect subtle memory-access issues in Warp applications, e.g.
     compute-sanitizer --tool initcheck python sim.py
 
 The Compute Sanitizer suite is available through the `CUDA Toolkit <https://developer.nvidia.com/cuda-toolkit>`__.
+
+CPU Memory Error Detection with AddressSanitizer
+------------------------------------------------
+
+`AddressSanitizer <https://clang.llvm.org/docs/AddressSanitizer.html>`__ (ASan) can detect
+out-of-bounds accesses, use-after-free, and similar memory errors in JIT-compiled CPU kernels.
+Build Warp's native libraries with the sanitizer enabled:
+
+.. code-block:: sh
+
+    python build_lib.py --sanitize=address
+
+When ``warp-clang`` is built this way, Warp automatically instruments CPU kernels with
+``-fsanitize=address`` and resolves their sanitizer callbacks against the host's single
+in-process ASan runtime. An out-of-bounds access into a :class:`wp.array <warp.array>` is then
+reported as a ``heap-buffer-overflow``, including the allocation site.
+
+The ASan runtime must be initialized before Warp's libraries load, so set the environment
+**before** ``import warp``:
+
+- **Linux**: preload the ASan runtime so it initializes first and its symbols are globally
+  visible to the JIT:
+
+  .. code-block:: sh
+
+      LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=verify_asan_link_order=0 python sim.py
+
+- **Windows**: ensure ``clang_rt.asan_dynamic-x86_64.dll`` (shipped with the Visual Studio
+  toolchain) is on ``PATH``.
+
+- **macOS**: usually works via ``@rpath`` to the Clang ASan runtime shipped with Xcode.
+
+.. note:: Run kernels in release mode when hunting out-of-bounds array accesses with ASan.
+   In :ref:`debug-mode`, Warp's own ``assert``-based bounds check aborts first; ASan
+   instrumentation is applied regardless of mode. Global-buffer-overflow on a kernel's own
+   static variables is not detected, because the JIT does not run kernel module constructors.

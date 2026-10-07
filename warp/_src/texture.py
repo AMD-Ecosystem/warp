@@ -26,6 +26,7 @@ from warp._src.types import (
     is_array,
     type_is_vector,
     type_length,
+    type_repr,
     type_scalar_type,
     type_size_in_bytes,
     uint8,
@@ -37,6 +38,7 @@ from warp._src.types import (
 # in __init__ methods to avoid circular imports
 
 _SUPPORTED_TEXTURE_DTYPES = (uint8, uint16, uint32, int8, int16, int32, float16, float32)
+_MAX_TEXTURE_MIP_LEVELS = 16
 
 
 class TextureFilterMode(enum.IntEnum):
@@ -165,6 +167,8 @@ class Texture:
     Supports ``wp.uint8``, ``wp.uint16``, ``wp.uint32``, ``wp.int8``, ``wp.int16``, ``wp.int32``,
     ``wp.float16``, and ``wp.float32`` data types. Unsigned integer textures are read as normalized
     floats in [0, 1]; signed integer textures are normalized to [-1, 1]; float types are returned as-is.
+    On CUDA devices, normalized integer sampling is supported only for 8- and 16-bit formats.
+    Use an 8- or 16-bit integer or floating-point format when sampling textures on CUDA.
 
     This class should not be instantiated directly. A specific subclass should be used instead
     (:class:`Texture1D`, :class:`Texture2D`, or :class:`Texture3D`).
@@ -189,6 +193,7 @@ class Texture:
         instance = super().__new__(cls)
         instance._array_handle = 0
         instance._array_owner = False
+        instance._is_mipmapped = False
         instance._tex_handle = 0
         instance._surface_handle = 0
         return instance
@@ -208,6 +213,8 @@ class Texture:
         address_mode_v: TextureAddressMode | None = None,
         address_mode_w: TextureAddressMode | None = None,
         normalized_coords: bool = True,
+        num_mip_levels: int = 1,
+        mip_filter_mode: TextureFilterMode = TextureFilterMode.LINEAR,
         device: DeviceLike = None,
         surface_access: bool = False,
         cuda_array: int = 0,
@@ -239,7 +246,16 @@ class Texture:
             address_mode_w: Per-axis address mode for W (3D only). Overrides
                 ``address_mode`` if specified.
             normalized_coords: If ``True``, coordinates are in ``[0, 1]``
-                range. If ``False``, coordinates are in texel space.
+                range. If ``False``, coordinates are in texel space. Mipmapped
+                textures on a CUDA device require ``normalized_coords=True``.
+            num_mip_levels: Number of mipmap levels to allocate. Use ``1`` (default)
+                to disable mipmapping. Use ``0`` to allocate the full mip chain
+                down to a 1x1 (or 1x1x1) base level. When ``data`` is provided and
+                ``num_mip_levels != 1``, Warp auto-generates the lower mip levels
+                using a 2x box filter. Requires ``data`` on construction; mipmap
+                contents are immutable afterwards.
+            mip_filter_mode: Filter mode used to blend between mip levels when
+                sampling with a non-integer LOD, see :class:`TextureFilterMode`.
             device: Device on which to create the texture.
             surface_access: If ``True`` and ``device`` is CUDA, allocates the backing
                 CUDA array with surface load/store support so :attr:`cuda_surface`
@@ -338,6 +354,21 @@ class Texture:
         dtype = self._canonicalize_dtype(dtype)
         dtype_code = self._dtype_to_code(dtype)
 
+        # resolve and validate mipmap configuration
+        base_shape = (width, height if ndim > 1 else 1, depth if ndim > 2 else 1)
+        mip_shapes = self._compute_mip_shapes(base_shape, ndim, num_mip_levels)
+        resolved_num_mip_levels = len(mip_shapes)
+        is_mipmapped = resolved_num_mip_levels > 1
+
+        if is_mipmapped and cuda_array:
+            raise ValueError("Mipmapped textures cannot wrap an external cuda_array")
+        if is_mipmapped and data is None:
+            raise ValueError("Mipmapped textures require data to be provided at construction")
+        if is_mipmapped and surface_access:
+            raise ValueError("surface_access is not supported for mipmapped textures")
+        if is_mipmapped and device.is_cuda and not normalized_coords:
+            raise ValueError("Mipmapped textures on a CUDA device require normalized_coords=True")
+
         self.device = device
         self._width = width
         self._height = height if ndim > 1 else 1
@@ -347,6 +378,10 @@ class Texture:
         self._dtype = dtype
         self._dtype_code = dtype_code
         self._filter_mode = filter_mode
+        self._mip_filter_mode = mip_filter_mode
+        self._num_mip_levels = resolved_num_mip_levels
+        self._mip_shapes = mip_shapes
+        self._is_mipmapped = is_mipmapped
         self._address_mode_u = address_mode_u
         self._address_mode_v = address_mode_v
         self._address_mode_w = address_mode_w
@@ -366,6 +401,7 @@ class Texture:
                     num_channels,
                     dtype_code,
                     surface_access,
+                    resolved_num_mip_levels,
                 )
                 if not self._array_handle:
                     raise RuntimeError(f"Failed to create CUDA texture: {self._runtime.get_error_string()}")
@@ -377,32 +413,44 @@ class Texture:
                 self._array_handle,
                 ndim,
                 filter_mode,
+                mip_filter_mode,
                 c_address_modes,
                 normalized_coords,
+                resolved_num_mip_levels,
             )
             if not self._tex_handle:
                 raise RuntimeError(f"Failed to create CUDA texture object: {self._runtime.get_error_string()}")
         else:
             # create CPU texture
-            c_shape = (ctypes.c_int * 3)(width, height, depth)
+            c_mip_widths = (ctypes.c_int * resolved_num_mip_levels)(*(s[0] for s in mip_shapes))
+            c_mip_heights = (ctypes.c_int * resolved_num_mip_levels)(*(s[1] for s in mip_shapes))
+            c_mip_depths = (ctypes.c_int * resolved_num_mip_levels)(*(s[2] for s in mip_shapes))
             c_address_modes = (ctypes.c_int * 3)(address_mode_u, address_mode_v, address_mode_w)
-            host_ptr = ctypes.c_void_p()
+            mip_data_ptrs = (ctypes.c_void_p * resolved_num_mip_levels)()
             self._tex_handle = self._runtime.core.wp_texture_create_host(
                 ndim,
-                c_shape,
+                resolved_num_mip_levels,
+                c_mip_widths,
+                c_mip_heights,
+                c_mip_depths,
                 num_channels,
                 dtype_code,
                 filter_mode,
+                mip_filter_mode,
                 c_address_modes,
                 normalized_coords,
-                ctypes.byref(host_ptr),
+                mip_data_ptrs,
             )
-            if not self._tex_handle or not host_ptr:
+            if not self._tex_handle or not mip_data_ptrs[0]:
                 raise RuntimeError(f"Failed to create CPU texture: {self._runtime.get_error_string()}")
-            self._host_ptr = host_ptr.value
+            self._host_ptr = mip_data_ptrs[0]
+            self._mip_host_ptrs = [int(ptr) for ptr in mip_data_ptrs]
 
         if data is not None:
-            self.copy_from(data)
+            if is_mipmapped:
+                self._upload_mipmap_chain(data)
+            else:
+                self.copy_from(data)
 
     def __del__(self):
         if self._tex_handle == 0 and self._array_handle == 0:
@@ -416,7 +464,9 @@ class Texture:
                     if self._surface_handle:
                         self._runtime.core.wp_surface_object_destroy_device(self.device.context, self._surface_handle)
                     if self._array_handle and self._array_owner:
-                        self._runtime.core.wp_texture_destroy_device(self.device.context, self._array_handle)
+                        self._runtime.core.wp_texture_destroy_device(
+                            self.device.context, self._array_handle, self._is_mipmapped
+                        )
             else:
                 self._runtime.core.wp_texture_destroy_host(self._tex_handle)
         except (TypeError, AttributeError):
@@ -520,11 +570,22 @@ class Texture:
             src: The source can be a Warp array on the same device as the texture, a CPU Warp array,
                 a NumPy array, or another texture.
         """
+        if self._is_mipmapped:
+            raise RuntimeError(
+                "copy_from is not supported for mipmapped textures; mipmap contents are immutable after construction"
+            )
         if isinstance(src, Texture):
             if src.width != self.width or src.height != self.height or src.depth != self.depth:
-                raise ValueError("Incompatible texture shapes for copy")
+                raise ValueError(
+                    f"Incompatible texture shapes for copy: destination shape={self._get_shape()}, "
+                    f"source shape={src._get_shape()}"
+                )
             if src.dtype != self.dtype or src.num_channels != self.num_channels:
-                raise ValueError("Incompatible texture data types for copy")
+                raise ValueError(
+                    f"Incompatible texture data types for copy: destination dtype={type_repr(self.dtype)}, "
+                    f"source dtype={type_repr(src.dtype)}, destination channels={self.num_channels}, "
+                    f"source channels={src.num_channels}"
+                )
         else:
             if isinstance(src, np.ndarray):
                 src = array(src, device="cpu", copy=False)
@@ -533,9 +594,15 @@ class Texture:
 
             arr_width, arr_height, arr_depth, arr_channels, arr_dtype = self._shape_from_warp_array(src, self._ndim)
             if arr_width != self.width or arr_height != self.height or arr_depth != self.depth:
-                raise ValueError("Incompatible array shape for copy")
+                raise ValueError(
+                    f"Incompatible array shape for copy: texture shape={self._get_shape()}, source shape={src.shape}"
+                )
             if arr_dtype != self.dtype or arr_channels != self.num_channels:
-                raise ValueError("Incompatible array data type for copy")
+                raise ValueError(
+                    f"Incompatible array data type for copy: texture dtype={type_repr(self.dtype)}, "
+                    f"source dtype={type_repr(arr_dtype)}, texture channels={self.num_channels}, "
+                    f"source channels={arr_channels}"
+                )
             if not src.is_contiguous:
                 raise ValueError("Source array must be contiguous")
 
@@ -610,11 +677,22 @@ class Texture:
             dst: The destination can be a Warp array on the same device as the texture, a CPU Warp array,
                 a NumPy array, or another texture.
         """
+        if self._is_mipmapped:
+            raise RuntimeError(
+                "copy_to is not supported for mipmapped textures; mipmap contents are immutable after construction"
+            )
         if isinstance(dst, Texture):
             if dst.width != self.width or dst.height != self.height or dst.depth != self.depth:
-                raise ValueError("Incompatible texture shapes for copy")
+                raise ValueError(
+                    f"Incompatible texture shapes for copy: source shape={self._get_shape()}, "
+                    f"destination shape={dst._get_shape()}"
+                )
             if dst.dtype != self.dtype or dst.num_channels != self.num_channels:
-                raise ValueError("Incompatible texture data types for copy")
+                raise ValueError(
+                    f"Incompatible texture data types for copy: source dtype={type_repr(self.dtype)}, "
+                    f"destination dtype={type_repr(dst.dtype)}, source channels={self.num_channels}, "
+                    f"destination channels={dst.num_channels}"
+                )
         else:
             if isinstance(dst, np.ndarray):
                 dst = array(dst, device="cpu", copy=False)
@@ -623,9 +701,15 @@ class Texture:
 
             arr_width, arr_height, arr_depth, arr_channels, arr_dtype = self._shape_from_warp_array(dst, self._ndim)
             if arr_width != self.width or arr_height != self.height or arr_depth != self.depth:
-                raise ValueError("Incompatible array shape for copy")
+                raise ValueError(
+                    f"Incompatible array shape for copy: texture shape={self._get_shape()}, destination shape={dst.shape}"
+                )
             if arr_dtype != self.dtype or arr_channels != self.num_channels:
-                raise ValueError("Incompatible array data type for copy")
+                raise ValueError(
+                    f"Incompatible array data type for copy: texture dtype={type_repr(self.dtype)}, "
+                    f"destination dtype={type_repr(arr_dtype)}, texture channels={self.num_channels}, "
+                    f"destination channels={arr_channels}"
+                )
             if not dst.is_contiguous:
                 raise ValueError("Destination array must be contiguous")
 
@@ -693,31 +777,151 @@ class Texture:
             self_array = array(ptr=self._host_ptr, shape=self._get_shape(), dtype=self.dtype, device=self.device)
             warp._src.context.copy(dst, self_array)
 
-    def copy_from_array(self, src: array):
-        """Copy from a CUDA Warp array into this texture's CUDA array.
-        Deprecated, use ``Texture.copy_from()`` method instead."""
-        import warp._src.utils  # noqa: PLC0415
+    @staticmethod
+    def _compute_mip_shapes(base_shape, ndim, num_mip_levels):
+        """Return a list of per-level ``(width, height, depth)`` tuples.
 
-        warp._src.utils.warn(
-            "The Texture.copy_from_array() method is deprecated, use Texture.copy_from() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        ``num_mip_levels`` of ``0`` expands to the full chain down to a 1x1 (or 1x1x1)
+        base level. Dimensions not relevant to ``ndim`` always report ``1``.
+        """
+        import math  # noqa: PLC0415
 
-        self.copy_from(src)
+        width, height, depth = base_shape
+        if num_mip_levels < 0:
+            raise ValueError("num_mip_levels must be >= 0")
 
-    def copy_to_array(self, dst: array):
-        """Copy from this texture's CUDA array into a CUDA Warp array.
-        Deprecated, use ``Texture.copy_to()`` method instead."""
-        import warp._src.utils  # noqa: PLC0415
+        max_dim = width
+        if ndim > 1:
+            max_dim = max(max_dim, height)
+        if ndim > 2:
+            max_dim = max(max_dim, depth)
+        full_chain_levels = int(math.floor(math.log2(max(max_dim, 1)))) + 1
 
-        warp._src.utils.warn(
-            "The Texture.copy_to_array() method is deprecated, use Texture.copy_to() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        if num_mip_levels == 0:
+            num_mip_levels = full_chain_levels
+        elif num_mip_levels > full_chain_levels:
+            raise ValueError(
+                f"num_mip_levels ({num_mip_levels}) exceeds the maximum for base dimensions "
+                f"{base_shape[:ndim]} ({full_chain_levels})"
+            )
+        if num_mip_levels > _MAX_TEXTURE_MIP_LEVELS:
+            raise ValueError(
+                f"num_mip_levels ({num_mip_levels}) exceeds the maximum supported mip levels "
+                f"({_MAX_TEXTURE_MIP_LEVELS})"
+            )
 
-        self.copy_to(dst)
+        shapes = []
+        w, h, d = width, height, depth
+        for _ in range(num_mip_levels):
+            shapes.append((w, h if ndim > 1 else 1, d if ndim > 2 else 1))
+            w = max(1, w // 2)
+            h = max(1, h // 2) if ndim > 1 else 1
+            d = max(1, d // 2) if ndim > 2 else 1
+        return shapes
+
+    def _generate_mipmap_chain(self, data_np: numpy.ndarray) -> list[numpy.ndarray]:
+        """Generate a mipmap chain from a base-level NumPy array using a 2x box filter.
+
+        Returns a list where entry ``i`` is the data for mip level ``i`` with dtype matching
+        the texture. Integer formats are accumulated in a wider integer type and then clipped
+        back into the source dtype to avoid overflow.
+        """
+        dtype_info = np.iinfo(data_np.dtype) if np.issubdtype(data_np.dtype, np.integer) else None
+        # accumulate in float64 to avoid precision loss and integer overflow
+        accumulation_dtype = np.float64 if dtype_info is not None else np.float32
+
+        levels = [data_np]
+        current = data_np
+
+        for level in range(1, self._num_mip_levels):
+            prev = current
+            target_w, target_h, target_d = self._mip_shapes[level]
+            prev_w, prev_h, prev_d = self._mip_shapes[level - 1]
+
+            def _downsample_axis(arr, src_axis, src_size, dst_size):
+                """Pair-average neighbors along ``src_axis`` to shrink ``src_size -> dst_size``."""
+                if src_size == dst_size:
+                    return arr
+                arr_f = arr.astype(accumulation_dtype, copy=False)
+                even = np.take(arr_f, np.arange(dst_size) * 2, axis=src_axis)
+                odd_idx = np.minimum(np.arange(dst_size) * 2 + 1, src_size - 1)
+                odd = np.take(arr_f, odd_idx, axis=src_axis)
+                return (even + odd) * 0.5
+
+            # NumPy layout: 1D=(W,[C]), 2D=(H,W,[C]), 3D=(D,H,W,[C]).
+            axes = []
+            if self._ndim == 1:
+                axes = [(0, prev_w, target_w)]
+            elif self._ndim == 2:
+                axes = [(1, prev_w, target_w), (0, prev_h, target_h)]
+            else:
+                axes = [(2, prev_w, target_w), (1, prev_h, target_h), (0, prev_d, target_d)]
+
+            current = prev
+            for axis, src_size, dst_size in axes:
+                current = _downsample_axis(current, axis, src_size, dst_size)
+
+            if dtype_info is not None:
+                current = np.clip(np.rint(current), dtype_info.min, dtype_info.max).astype(data_np.dtype)
+            else:
+                current = current.astype(data_np.dtype, copy=False)
+            levels.append(current)
+
+        return levels
+
+    def _upload_mipmap_chain(self, data):
+        """Generate and upload the full mipmap chain from ``data`` (NumPy or Warp array)."""
+        if isinstance(data, array):
+            data_np = data.numpy()
+        elif isinstance(data, np.ndarray):
+            data_np = data
+        else:
+            raise ValueError(f"Expected Warp array or NumPy array, got {type(data)}")
+        data_np = np.ascontiguousarray(data_np)
+
+        mip_data_list = self._generate_mipmap_chain(data_np)
+
+        if self.device.is_cuda:
+            bytes_per_channel = type_size_in_bytes(self.dtype)
+            # Keep host buffers alive until the async copies complete.
+            level_array_refs = []
+            for level, level_data in enumerate(mip_data_list):
+                level_np = np.ascontiguousarray(level_data)
+                level_array_refs.append(level_np)
+                level_w, level_h, level_d = self._mip_shapes[level]
+                level_array = self._runtime.core.wp_texture_get_mip_level_array_device(
+                    self.device.context, self._array_handle, level
+                )
+                if not level_array:
+                    raise RuntimeError(
+                        f"Failed to get mip level {level} CUDA array: {self._runtime.get_error_string()}"
+                    )
+                width_bytes = level_w * self.num_channels * bytes_per_channel
+                src_ptr = level_np.ctypes.data
+                result = self._runtime.core.wp_texture_copy_device(
+                    self.device.context,
+                    width_bytes,
+                    level_h,
+                    level_d,
+                    MemoryType.ARRAY,
+                    level_array,
+                    0,
+                    0,
+                    MemoryType.HOST,
+                    src_ptr,
+                    width_bytes,
+                    level_h,
+                    self.device.stream.cuda_stream,
+                )
+                if not result:
+                    raise RuntimeError(
+                        f"Failed to copy mip level {level} to texture: {self._runtime.get_error_string()}"
+                    )
+            self._runtime.core.wp_cuda_stream_synchronize(self.device.stream.cuda_stream)
+        else:
+            for level, level_data in enumerate(mip_data_list):
+                level_np = np.ascontiguousarray(level_data)
+                ctypes.memmove(self._mip_host_ptrs[level], level_np.ctypes.data, level_np.nbytes)
 
     @staticmethod
     def _dtype_to_code(dtype):
@@ -801,6 +1005,26 @@ class Texture:
         return self._dtype
 
     @property
+    def filter_mode(self) -> TextureFilterMode:
+        """Filter mode used for intra-level sampling, see :class:`TextureFilterMode`."""
+        return self._filter_mode
+
+    @property
+    def mip_filter_mode(self) -> TextureFilterMode:
+        """Filter mode used to blend between mip levels, see :class:`TextureFilterMode`."""
+        return self._mip_filter_mode
+
+    @property
+    def num_mip_levels(self) -> int:
+        """Number of mip levels allocated for this texture (``1`` if not mipmapped)."""
+        return self._num_mip_levels
+
+    @property
+    def is_mipmapped(self) -> bool:
+        """Whether the texture was allocated with more than one mip level."""
+        return self._is_mipmapped
+
+    @property
     def address_mode_u(self) -> int:
         """Address mode for U axis."""
         return self._address_mode_u
@@ -834,10 +1058,12 @@ class Texture:
         """CUDA array handle backing this texture.
 
         Returns:
-            CUDA ``cudaArray_t`` handle for CUDA textures.
+            CUDA ``cudaArray_t`` handle for non-mipmapped CUDA textures.
         """
         if not self.device.is_cuda:
             raise RuntimeError("cuda_array is only supported for CUDA textures.")
+        if self._is_mipmapped:
+            raise RuntimeError("cuda_array is currently limited to non-mipmapped CUDA textures.")
         return self._array_handle
 
     @property
@@ -871,6 +1097,8 @@ class Texture:
                 "Texture CUDA array was not created with surface load/store support. "
                 "Create the texture with surface_access=True."
             )
+        if self._is_mipmapped:
+            raise RuntimeError("cuda_surface is not supported for mipmapped textures.")
         if not self._array_handle:
             raise RuntimeError("Texture has no CUDA array backing storage.")
 
@@ -931,6 +1159,8 @@ class Texture1D(Texture):
         address_mode: TextureAddressMode = TextureAddressMode.CLAMP,
         address_mode_u: TextureAddressMode | None = None,
         normalized_coords: bool = True,
+        num_mip_levels: int = 1,
+        mip_filter_mode: TextureFilterMode = TextureFilterMode.LINEAR,
         device: DeviceLike = None,
         surface_access: bool = False,
         cuda_array: int = 0,
@@ -949,6 +1179,8 @@ class Texture1D(Texture):
             address_mode_v=None,
             address_mode_w=None,
             normalized_coords=normalized_coords,
+            num_mip_levels=num_mip_levels,
+            mip_filter_mode=mip_filter_mode,
             device=device,
             surface_access=surface_access,
             cuda_array=cuda_array,
@@ -1009,6 +1241,8 @@ class Texture2D(Texture):
         address_mode_u: TextureAddressMode | None = None,
         address_mode_v: TextureAddressMode | None = None,
         normalized_coords: bool = True,
+        num_mip_levels: int = 1,
+        mip_filter_mode: TextureFilterMode = TextureFilterMode.LINEAR,
         device: DeviceLike = None,
         surface_access: bool = False,
         cuda_array: int = 0,
@@ -1026,6 +1260,8 @@ class Texture2D(Texture):
             address_mode_u=address_mode_u,
             address_mode_v=address_mode_v,
             normalized_coords=normalized_coords,
+            num_mip_levels=num_mip_levels,
+            mip_filter_mode=mip_filter_mode,
             surface_access=surface_access,
             device=device,
             cuda_array=cuda_array,
@@ -1089,6 +1325,8 @@ class Texture3D(Texture):
         address_mode_v: TextureAddressMode | None = None,
         address_mode_w: TextureAddressMode | None = None,
         normalized_coords: bool = True,
+        num_mip_levels: int = 1,
+        mip_filter_mode: TextureFilterMode = TextureFilterMode.LINEAR,
         device: DeviceLike = None,
         surface_access: bool = False,
         cuda_array: int = 0,
@@ -1107,6 +1345,8 @@ class Texture3D(Texture):
             address_mode_v=address_mode_v,
             address_mode_w=address_mode_w,
             normalized_coords=normalized_coords,
+            num_mip_levels=num_mip_levels,
+            mip_filter_mode=mip_filter_mode,
             surface_access=surface_access,
             device=device,
             cuda_array=cuda_array,

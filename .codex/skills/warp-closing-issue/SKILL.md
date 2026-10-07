@@ -1,0 +1,306 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: warp-closing-issue
+description: Use when the user provides Warp commit SHA(s) and GitHub issue number(s) to assess, draft issue comments, post progress updates, or recommend whether issue threads should stay open or close.
+license: Apache-2.0
+---
+
+# Warp Closing Issue
+
+## Overview
+
+Assess user-supplied Warp commits against user-supplied GitHub issues. Produce a
+scoped assessment and draft comment first; public GitHub writes require explicit
+confirmation after the user sees the exact target issues and comment body.
+
+## Hard Rules
+
+- Stay within the user-supplied commit SHA(s) and issue number(s). Do not search for
+  extra commits or issues; ask the user for more SHAs/issues if scope is incomplete.
+- Read the issue body and comments, not just the title.
+- Treat commit messages as orientation, not proof. Inspect diffs and changed files.
+- Treat `changelog/*.md` fragments as the editable source of pending changelog
+  intent. Treat generated `CHANGELOG.md` sections as released history or
+  release-build metadata, never as behavioral fix evidence by themselves.
+- Commenting is not always closure. Supported actions are `close`, `comment-only`,
+  `keep open`, and `no public update`.
+- Never post comments or close issues before showing the assessment and exact draft.
+- Public comments use full 40-character SHAs as plain text for GitHub auto-linking.
+- For multiline GitHub comment bodies, never use `gh api -f body=@file`
+  or `gh api --raw-field body=@file`; these forms can send `@file`
+  literally. Use `gh issue comment --body-file <file>` for new issue
+  comments, or `gh api --input <json>` for PATCH/non-issue-comment writes.
+- Keep local execution noise out of public comments: no `WARP_CACHE_PATH`,
+  `/tmp/...`, local worktree paths, or shell setup.
+- Do not use a local test command as the public test note. Public comments describe
+  test coverage changes in the commit set: new tests, modified tests, or no tests.
+- Do not treat passing committed tests as sufficient behavioral verification when
+  the issue includes a runnable repro or clear expected behavior. When feasible,
+  write and run small temporary probes inspired by the issue.
+- Require behavioral probe summaries in the private assessment. Public comments may
+  mention probes only when they clarify the recommendation, remaining risk, or
+  requester-facing behavior.
+- Format public comment Markdown for GitHub rendering: put each prose paragraph and each list item on one physical source line. Use hard line breaks only between structural blocks such as paragraphs, headings, list items, and fenced code blocks; never wrap prose to a fixed column width.
+- Surface actionable, issue-related future work under `### Follow-up to consider`. Include the section only when the assessment found a specific improvement, and distinguish non-blocking follow-ups from gaps that prevent closure.
+
+Optional command snippets live in [commands.md](references/commands.md). Prefer the
+GitHub app/MCP connector when it fits; `gh` is installed and authenticated here and is
+fine for gaps or simple issue operations.
+
+## Checklist
+
+1. **Resolve scope.** Record supplied commits, issues, and requested outcome, if any:
+   closure assessment, progress update, comment only, or unspecified. If one
+   supplied commit contains all others, use the newest such commit as the
+   assessed head. For disjoint histories, inspect each commit tree separately
+   and do not invent a combined fragment view.
+
+2. **Gather evidence.** For each issue, extract author, author association, reported
+   symptoms, reproducers, expected behavior, follow-up comments, maintainer asks, and
+   current state. For each commit, inspect message, diff, tests, docs, changelog
+   fragments, generated changelog changes, and touched areas such as `warp/native/`.
+   For every touched fragment:
+   - Read `changelog/README.md` and validate the identifier, category, optional
+     counter, and content. A numeric filename identifies a GitHub issue and
+     Towncrier generates its link; the fragment text should not repeat it.
+   - Compare a numeric identifier with the supplied issue number. Inspect sibling
+     fragments with the same identifier at the assessed head so complementary,
+     duplicate, and counter-based entries are not mistaken for separate fixes.
+     If an Added/Fixed/Changed set describes iterations on one not-yet-released
+     feature, flag it for changelog audit; do not consolidate fragments in this
+     issue-assessment workflow.
+   - When combined rendering matters, run the pinned Towncrier draft from the
+     assessed worktree and map the rendered bullet back to its source paths.
+     A draft is read-only; never edit generated `CHANGELOG.md`.
+   When the issue or commit appears to change public API behavior, inspect the
+   relevant code, docs, tests, source fragments, rendered entry, and historical
+   changelog for intended API surface and examples.
+
+3. **Classify commits.**
+
+   | Type | Meaning |
+   | --- | --- |
+   | Behavioral fix | Changes the code path behind the issue. |
+   | Test-only | Adds confidence, but cannot close by itself. |
+   | Docs/changelog-only | Source fragments or generated release metadata; supporting context, not fix evidence. |
+   | Follow-up | Completes or corrects earlier issue-linked work. |
+   | Beyond scope | Related cleanup or broader behavior worth surfacing. |
+
+4. **Map requirements.** For each issue requirement, state commit evidence, test
+   coverage evidence, behavioral probe evidence if available, and status:
+   addressed, partial, or missing.
+
+5. **Assess public API behavior.** If the issue or commit changes public API
+   surface or behavior, identify:
+   - Python scope: constructors, functions, arguments, configuration, exceptions,
+     or unsupported combinations visible from `warp`.
+   - Kernel scope: existing or new Warp builtins callable only inside
+     `@wp.kernel` / `@wp.func`.
+   - Behavior type: new API, existing API now works in more cases, changed
+     semantics, explicit unsupported behavior, or deprecation/removal.
+   - Example accuracy: include short examples only when they clarify the issue;
+     never show kernel-only APIs as host-side Python calls.
+
+6. **Review tests.** Inspect the supplied commits for test changes. Use unordered
+   bullets in the assessment/comment:
+   - New tests: file path, test function/class names, and what each case checks.
+   - Modified tests: file path, test names, and what behavior or expectation changed.
+   - No tests: state that no test changes were included and recommend whether that was
+     reasonable or a potential review oversight.
+
+   You may still run committed tests when useful, but prefer probes that add issue
+   specific signal beyond "the merged tests pass." Follow Warp policy locally:
+   unique `WARP_CACHE_PATH`, `uv run`, and rebuild native
+   libraries when `warp/native/` changes require it. Do not put local verification
+   commands in the public issue comment.
+
+7. **Probe issue-shaped behavior.** When the issue has a repro, expected behavior,
+   or clear boundary conditions, create one or more temporary scripts that exercise
+   the reported behavior on the supplied commit/worktree. These are transient
+   working artifacts; do not add them to the repo unless the user explicitly asks.
+
+   Prefer probes that:
+   - Recreate the original repro as directly as possible.
+   - Vary only issue-relevant dimensions likely to expose blind spots.
+   - Assert observable behavior, not just absence of a crash.
+   - Run outside the test suite when the issue is about script, import, process,
+     runtime, environment, cache, or packaging context.
+   - Use `uv run` and a unique `WARP_CACHE_PATH` for Warp commands.
+
+   Avoid probes that:
+   - Merely rerun a committed test without adding issue-specific signal.
+   - Expand into broad fuzzing or unrelated API compatibility.
+   - Depend on timing or local environment details unless the issue is
+     environment-specific.
+
+   Classify probe results in the private assessment:
+   - `passes`: supports closure or progress assessment.
+   - `fails in scope`: blocks closure or changes recommendation to `comment-only`
+     / `keep open`.
+   - `inconclusive`: mention as residual risk, but do not overstate it.
+   - `not run`: explain why, such as unavailable hardware, excessive cost, or
+     insufficient repro detail.
+
+8. **Decide action.**
+   - `close`: every reported symptom and expected behavior is addressed, relevant
+     comments are covered, test coverage is adequate or the lack of tests is
+     reasonable for the change, and behavioral probes pass or were not feasible for
+     a defensible reason.
+   - `comment-only`: supplied commits are relevant progress, but the issue should remain
+     open.
+   - `keep open`: gaps remain and a public comment would not add value.
+   - `no public update`: commits are peripheral, speculative, or already covered.
+
+   Include a requester-verification recommendation. If the issue author appears
+   external to NVIDIA, prefer a resolution/progress comment that leaves the issue open
+   so they can verify. If the issue author matches the current requesting user, closure
+   is appropriate once the requirements are addressed; verify that identity from local
+   user guidance, GitHub authenticated user data, or explicit user input rather than
+   hardcoding a username.
+
+9. **Draft before writing.** Output:
+
+   ```markdown
+   Assessment: <close | comment-only | keep open | no public update>
+
+   Issue <#>: <title>
+   - Requested outcome: <...>
+   - Commits: <primary full SHA(s)>; supporting: <full SHA(s) or none>
+   - What changed: <behavior summary>
+   - Public API behavior: <none | Python scope summary | kernel scope summary | unsupported cases>
+   - Test coverage:
+     - <new/modified/no tests detail>
+   - Behavioral probes:
+     - <required private probe summary: passes/fails in scope/inconclusive/not run, behavior checked, and issue relevance>
+   - Beyond issue scope: <extra changes or none>
+   - Requester verification: <close now | leave open for requester verification and why>
+   - Recommendation: <action and why>
+
+   Spotted Improvements:
+   - <actionable follow-up or none>
+
+   Draft comment:
+   <opening resolution or progress statement and issue-specific explanation; put each prose paragraph on one physical source line>
+
+   ### Public API behavior
+
+   <include only when relevant>
+
+   ### Test coverage
+
+   - <new, modified, or absent test coverage; put each list item on one physical source line>
+
+   ### Behavioral verification
+
+   <include only when public probe results materially clarify the outcome, risk, or requester-facing behavior>
+
+   ### Follow-up to consider
+
+   - <include only for actionable, issue-related future work; state when it does not block closure>
+
+   Confirm whether to post this comment to <#>. If closure is recommended, also
+   confirm whether to close <#> as completed.
+   ```
+
+## Comment Shape
+
+For closure, start with:
+
+```markdown
+This is addressed by <full-sha>.
+```
+
+For progress/comment-only updates, start with:
+
+```markdown
+Progress update: <full-sha> landed <summary>.
+```
+
+Then explain what changed in issue terms, mention supporting commits if useful, and
+state whether the issue should remain open. Mention docs/changelog-only commits only
+as supporting metadata. If leaving an externally filed issue open for requester
+verification, say that directly. Drop empty sections.
+
+Use level-three headings for named public sections:
+
+Leave one blank line between each level-three heading and its following paragraph, list, or code block.
+
+- `### Public API behavior`: include only for relevant public API behavior.
+- `### Test coverage`: always include.
+- `### Behavioral verification`: include only when executed public probe results materially clarify the outcome, risk, or requester-facing behavior; do not add it solely to say that no probe was feasible.
+- `### Follow-up to consider`: include only for actionable, issue-related future work found during assessment; do not add it for a concern already fully handled in another required section.
+
+Include test coverage as unordered bullets. Name changed test files and test functions. If no tests changed, say whether that is reasonable for the commit type or a potential oversight.
+
+When public API behavior is relevant, include `### Public API behavior` before test coverage. Prefer prose bullets for small changes. Use short code blocks only when they make scope clearer. Use `Public API behavior`, not `Public API surface`, when APIs already existed and the commit expands or fixes their behavior.
+
+Suitable items from private `Spotted Improvements` become public follow-ups only when they do not duplicate a concern fully handled in another required section. Follow-ups may cover test coverage, refactoring, features, bug fixes, documentation, or maintainability; do not add unrelated wish lists or invented work. State explicitly when a follow-up does not block closure.
+
+Split examples by scope when both Python and kernel APIs are involved. Python
+scope includes constructors, host-side functions, arguments, configuration, and
+exceptions. Kernel scope includes Warp builtins that must be called from
+`@wp.kernel` / `@wp.func`. For example:
+
+```markdown
+### Public API behavior
+
+**Python scope**
+
+- `wp.Mesh(..., bvh_constructor="cubql")` now supports the fixed behavior.
+- `wp.Bvh(..., constructor="cubql")` is now supported.
+- Grouped meshes/BVHs and winding-number support remain unsupported for cuBQL.
+
+**Kernel scope**
+
+- Existing `wp.mesh_query_point*`, `wp.mesh_query_furthest_point_no_sign`, and `wp.mesh_query_aabb*` builtins now work with cuBQL-backed meshes.
+```
+
+Behavioral probe summaries are required in the private assessment. In the public
+comment, mention probes only when they clarify the outcome, explain residual risk, or
+help the requester verify the fix. When included publicly, summarize checked behavior
+and result without local commands, cache paths, temp paths, or worktree paths.
+
+Write in a factual maintainer voice, usually third person: "The change updates...",
+"Coverage was added...". Keep wording direct and precise, adding detail when it
+clarifies impact, scope, test coverage, remaining gaps, beyond-scope work, or follow-up.
+Do not restate the commit message mechanically; use the comment to augment the commit
+with issue-specific context.
+
+## Write Actions
+
+After explicit confirmation, post the issue-specific comment. For each posted or
+edited comment, fetch the comment by ID and verify the public body matches the
+reviewed draft before closing anything. Close only issues that were both
+recommended for closure and explicitly confirmed for closure. Verify final GitHub
+state and report comment IDs, URLs, state, state reason, and close time.
+
+If any write fails, stop and report the exact failure. Do not retry against a different
+issue by guess.
+
+## Red Flags
+
+- About to call a GitHub write API before showing the draft.
+- The draft implies completion for a progress update.
+- The issue has multiple requirements and the commits cover only one.
+- The commit touches `warp/native/` and rebuild state was not considered.
+- The only evidence is the commit message.
+- The issue has a runnable repro but the assessment only reruns committed tests.
+- The private assessment omits behavioral probe results or a reason probes were not run.
+- The draft contains `/tmp/`, `WARP_CACHE_PATH`, or local paths.
+- A multiline `gh api` write uses `-f body=@file` or `--raw-field body=@file`
+  instead of `gh issue comment --body-file` or `gh api --input`.
+- The public comment shows a kernel-only Warp API as if it can be called directly
+  from Python scope.
+- Public comment prose or a list item is manually wrapped across physical source lines instead of relying on GitHub's responsive rendering.
+- A named public section uses a colon label instead of the required level-three heading.
+- The assessment found distinct actionable, issue-related future work not fully handled in another required section, but the draft omits `### Follow-up to consider`, or presents a non-blocking follow-up as a closure blocker.
+
+## Maintenance
+
+When editing the Codex-side project skill, sync the mirrored Claude copy before
+committing:
+
+```bash
+uv run tools/pre-commit-hooks/sync_skills.py --from codex
+```

@@ -13,8 +13,6 @@ import numpy as np
 
 import warp as wp
 
-_wp_module_name_ = "warp.autograd"
-
 __all__ = [
     "gradcheck",
     "gradcheck_tape",
@@ -22,6 +20,14 @@ __all__ = [
     "jacobian_fd",
     "jacobian_plot",
 ]
+
+
+def _is_kernel_backward_enabled(kernel: wp.Kernel) -> bool:
+    """Return whether backward code generation is enabled for ``kernel``."""
+    return kernel.options.get(
+        "enable_backward",
+        kernel.module.options.get("enable_backward", True),
+    )
 
 
 def gradcheck(
@@ -43,6 +49,7 @@ def gradcheck(
     plot_relative_error: bool = False,
     plot_absolute_error: bool = False,
     show_summary: bool = True,
+    restore_inputs: bool = True,
 ) -> bool:
     """Check whether the autodiff gradient of a Warp kernel matches finite differences.
 
@@ -80,6 +87,9 @@ def gradcheck(
         plot_relative_error: If True, visualizes the relative error of the Jacobians in a plot (requires ``matplotlib``).
         plot_absolute_error: If True, visualizes the absolute error of the Jacobians in a plot (requires ``matplotlib``).
         show_summary: If True, prints a summary table of the gradient check results.
+        restore_inputs: For Python functions, restore top-level Warp array inputs to their
+          original values between evaluations and before returning, so both Jacobians are
+          evaluated from the original input values. Arrays inside structs are not restored.
 
     Returns:
         ``True`` if the gradient check passes, ``False`` otherwise.
@@ -100,6 +110,7 @@ def gradcheck(
         max_blocks=max_blocks,
         block_dim=block_dim,
         max_outputs_per_var=max_outputs_per_var,
+        restore_inputs=restore_inputs,
         plot_jacobians=False,
         metadata=metadata,
     )
@@ -114,6 +125,7 @@ def gradcheck(
         block_dim=block_dim,
         max_inputs_per_var=max_inputs_per_var,
         eps=eps,
+        restore_inputs=restore_inputs,
         plot_jacobians=False,
         metadata=metadata,
     )
@@ -200,16 +212,12 @@ def gradcheck(
         jacobian_plot(
             relative_error_jacs,
             metadata,
-            inputs,
-            outputs,
             title=f"{metadata.key} kernel Jacobian relative error",
         )
     if plot_absolute_error:
         jacobian_plot(
             absolute_error_jacs,
             metadata,
-            inputs,
-            outputs,
             title=f"{metadata.key} kernel Jacobian absolute error",
         )
 
@@ -307,7 +315,7 @@ def gradcheck_tape(
             continue
         if kernel.key in blacklist_kernels:
             continue
-        if not kernel.options.get("enable_backward", True):
+        if not _is_kernel_backward_enabled(kernel):
             continue
 
         input_output_mask = input_output_masks.get(kernel.key)
@@ -351,6 +359,36 @@ def infer_device(xs: list):
     return wp.get_preferred_device()
 
 
+def _restore_array_inputs(inputs: Sequence, snapshot: Sequence[tuple[wp.array, bool] | None]) -> None:
+    """Write back snapshotted contents and read-tracking state of Warp array inputs."""
+    for x, s in zip(inputs, snapshot, strict=True):
+        if s is not None:
+            data, was_read = s
+            x.assign(data)
+            # the check's own tape marks reads; restoring the entry state clears
+            # those without erasing flags owned by a caller's pending tape
+            x._is_read = was_read
+
+
+def _snapshot_array_inputs(inputs: Sequence) -> list[tuple[wp.array, bool] | None]:
+    """Snapshot the contents and read-tracking state of top-level Warp array inputs.
+
+    Data only (gradients are unused by ``jacobian_fd()`` and zeroed by ``jacobian()``);
+    arrays inside struct inputs and inputs of Warp kernels are not covered.
+    """
+    return [(wp.clone(x, requires_grad=False), x._is_read) if isinstance(x, wp.array) else None for x in inputs]
+
+
+def _eval_function(function, inputs: Sequence, input_snapshot: Sequence[tuple[wp.array, bool] | None] | None):
+    """Evaluate a Python function, restoring the caller's inputs if it raises."""
+    try:
+        return function(*inputs)
+    except BaseException:
+        if input_snapshot is not None:
+            _restore_array_inputs(inputs, input_snapshot)
+        raise
+
+
 class FunctionMetadata:
     """Metadata holder for kernel functions or functions with Warp arrays as inputs/outputs."""
 
@@ -377,10 +415,10 @@ class FunctionMetadata:
         return self.key is None
 
     def input_is_array(self, i: int):
-        return self.input_strides[i] is not None
+        return self.input_dtypes[i] is not None
 
     def output_is_array(self, i: int):
-        return self.output_strides[i] is not None
+        return self.output_dtypes[i] is not None
 
     def update_from_kernel(self, kernel: wp.Kernel, inputs: Sequence):
         self.key = kernel.key
@@ -390,16 +428,16 @@ class FunctionMetadata:
         self.output_strides = []
         self.input_dtypes = []
         self.output_dtypes = []
-        for arg in kernel.adj.args[: len(inputs)]:
-            if arg.type is wp.array:
-                self.input_strides.append(arg.type.strides)
-                self.input_dtypes.append(arg.type.dtype)
+        for arg, value in zip(kernel.adj.args[: len(inputs)], inputs, strict=True):
+            if wp._src.types.matches_array_class(arg.type, wp.array):
+                self.input_strides.append(getattr(value, "strides", getattr(arg.type, "strides", None)))
+                self.input_dtypes.append(getattr(value, "dtype", arg.type.dtype))
             else:
                 self.input_strides.append(None)
                 self.input_dtypes.append(None)
         for arg in kernel.adj.args[len(inputs) :]:
-            if arg.type is wp.array:
-                self.output_strides.append(arg.type.strides)
+            if wp._src.types.matches_array_class(arg.type, wp.array):
+                self.output_strides.append(getattr(arg.type, "strides", None))
                 self.output_dtypes.append(arg.type.dtype)
             else:
                 self.output_strides.append(None)
@@ -451,7 +489,7 @@ def jacobian_plot(
     Args:
         jacobians: A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
         kernel: The Warp kernel function, decorated with the :func:`@wp.kernel <warp.kernel>` decorator, or a :class:`FunctionMetadata` instance with the kernel/function attributes.
-        inputs: List of input variables.
+        inputs: List of input variables. Required when ``kernel`` is a Warp kernel.
         show_plot: If True, displays the plot via ``plt.show()``.
         show_colorbar: If True, displays a colorbar next to the plot (or a colorbar next to every submatrix if ).
         scale_colors_per_submatrix: If True, considers the minimum and maximum of each Jacobian submatrix separately for color scaling. Otherwise, uses the global minimum and maximum of all Jacobians.
@@ -463,11 +501,13 @@ def jacobian_plot(
         The created Matplotlib figure.
     """
 
+    if isinstance(kernel, wp.Kernel) and inputs is None:
+        raise ValueError("inputs must be provided when kernel is a Warp kernel")
+
     import matplotlib.pyplot as plt  # noqa: PLC0415
     from matplotlib.ticker import MaxNLocator  # noqa: PLC0415
 
     if isinstance(kernel, wp.Kernel):
-        assert inputs is not None
         metadata = FunctionMetadata()
         metadata.update_from_kernel(kernel, inputs)
     elif isinstance(kernel, FunctionMetadata):
@@ -478,52 +518,62 @@ def jacobian_plot(
     jacobians = sorted(jacobians.items(), key=lambda x: (x[0][1], x[0][0]))
     jacobians = dict(jacobians)
 
-    input_to_ax = {}
-    output_to_ax = {}
-    ax_to_input = {}
-    ax_to_output = {}
-    for i, j in jacobians.keys():
-        if i not in input_to_ax:
-            input_to_ax[i] = len(input_to_ax)
-            ax_to_input[input_to_ax[i]] = i
-        if j not in output_to_ax:
-            output_to_ax[j] = len(output_to_ax)
-            ax_to_output[output_to_ax[j]] = j
+    input_indices = sorted({input_i for input_i, _ in jacobians})
+    output_indices = sorted({output_i for _, output_i in jacobians})
+    input_to_ax = {input_i: ax_j for ax_j, input_i in enumerate(input_indices)}
+    output_to_ax = {output_i: ax_i for ax_i, output_i in enumerate(output_indices)}
+    ax_to_input = dict(enumerate(input_indices))
+    ax_to_output = dict(enumerate(output_indices))
 
     num_rows = len(output_to_ax)
     num_cols = len(input_to_ax)
     if num_rows == 0 or num_cols == 0:
         return
 
-    # determine the width and height ratios for the subplots based on the
-    # dimensions of the Jacobians
-    width_ratios = []
-    height_ratios = []
-    for i in range(len(metadata.input_labels)):
-        if not metadata.input_is_array(i):
-            continue
-        input_stride = metadata.input_strides[i][0]
-        for j in range(len(metadata.output_labels)):
-            if (i, j) not in jacobians:
-                continue
-            jac_wp = jacobians[(i, j)]
-            width_ratios.append(jac_wp.shape[1] * input_stride)
-            break
+    input_component_counts = {}
+    for input_i in input_to_ax:
+        input_count = len(metadata.input_labels or [])
+        if input_i < 0 or input_i >= input_count:
+            raise ValueError(f"Invalid Jacobian input index {input_i}: plotting metadata defines {input_count} inputs")
+        if metadata.input_labels[input_i] is None:
+            raise ValueError(f"Invalid plotting metadata for Jacobian input index {input_i}: missing label")
+        dtype_count = len(metadata.input_dtypes or [])
+        if input_i < 0 or input_i >= dtype_count or metadata.input_dtypes[input_i] is None:
+            raise ValueError(f"Invalid plotting metadata for Jacobian input index {input_i}: missing array dtype")
+        component_count = getattr(metadata.input_dtypes[input_i], "_length_", None)
+        if component_count is None:
+            raise ValueError(
+                f"Invalid plotting metadata for Jacobian input index {input_i}: array dtype has no component count"
+            )
+        input_component_counts[input_i] = component_count
 
-    for i in range(len(metadata.output_labels)):
-        if not metadata.output_is_array(i):
-            continue
-        for j in range(len(inputs)):
-            if (j, i) not in jacobians:
-                continue
-            jac_wp = jacobians[(j, i)]
-            height_ratios.append(jac_wp.shape[0])
-            break
+    for output_i in output_to_ax:
+        output_count = len(metadata.output_labels or [])
+        if output_i < 0 or output_i >= output_count:
+            raise ValueError(
+                f"Invalid Jacobian output index {output_i}: plotting metadata defines {output_count} outputs"
+            )
+        if metadata.output_labels[output_i] is None:
+            raise ValueError(f"Invalid plotting metadata for Jacobian output index {output_i}: missing label")
+
+    width_ratios = []
+    for ax_j in range(num_cols):
+        input_i = ax_to_input[ax_j]
+        jac_wp = next(jac for (jac_input_i, _), jac in jacobians.items() if jac_input_i == input_i)
+        input_component_count = input_component_counts[input_i]
+        width_ratios.append(jac_wp.shape[1] * input_component_count)
+
+    height_ratios = []
+    for ax_i in range(num_rows):
+        output_i = ax_to_output[ax_i]
+        jac_wp = next(jac for (_, jac_output_i), jac in jacobians.items() if jac_output_i == output_i)
+        height_ratios.append(jac_wp.shape[0])
 
     fig, axs = plt.subplots(
         ncols=num_cols,
         nrows=num_rows,
         figsize=(7, 7),
+        layout="constrained",
         sharex="col",
         sharey="row",
         gridspec_kw={
@@ -536,7 +586,7 @@ def jacobian_plot(
         squeeze=False,
     )
     if title is None:
-        key = kernel.key if isinstance(kernel, wp.Kernel) else kernel.get("key", "unknown")
+        key = metadata.key or "unknown"
         title = f"{key} kernel Jacobian"
     fig.suptitle(title)
     fig.canvas.manager.set_window_title(title)
@@ -570,12 +620,12 @@ def jacobian_plot(
         ax.tick_params(which="major", width=1, length=7)
         ax.tick_params(which="minor", width=1, length=4, color="gray")
 
-        input_stride = metadata.input_dtypes[input_i]._length_
+        input_component_count = input_component_counts[input_i]
         # output_stride = metadata.output_dtypes[output_i]._length_
 
         jac = jac_wp.numpy()
         # Jacobian matrix has output stride already multiplied to first dimension
-        jac = jac.reshape(jac_wp.shape[0], jac_wp.shape[1] * input_stride)
+        jac = jac.reshape(jac_wp.shape[0], jac_wp.shape[1] * input_component_count)
 
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -613,7 +663,6 @@ def jacobian_plot(
         m.set_clim(vmin, vmax)
         plt.colorbar(m, ax=axs, orientation="vertical", pad=0.02)
 
-    plt.tight_layout()
     if show_plot:
         plt.show()
     return fig
@@ -637,7 +686,9 @@ def scalarize_array_1d(arr):
 
 
 def scalarize_array_2d(arr):
-    assert arr.ndim == 2
+    if arr.ndim != 2:
+        raise ValueError(f"scalarize_array_2d requires a 2D array, got {arr.ndim}D")
+
     # convert array to 2D array with scalar dtype
     if arr.dtype in wp._src.types.scalar_types:
         return arr
@@ -666,6 +717,7 @@ def jacobian(
     max_outputs_per_var=-1,
     plot_jacobians=False,
     metadata: FunctionMetadata | None = None,
+    restore_inputs: bool = True,
 ) -> dict[tuple[int, int], wp.array]:
     """Compute the Jacobians of a function or Warp kernel for the provided selection of differentiable inputs to differentiable outputs.
 
@@ -693,6 +745,8 @@ def jacobian(
         max_outputs_per_var: Maximum number of output dimensions over which to evaluate the Jacobians for the input-output pairs. Evaluates all output dimensions if value <= 0.
         plot_jacobians: If True, visualizes the computed Jacobians in a plot (requires ``matplotlib``).
         metadata: The metadata of the kernel function, containing the input and output labels, strides, and dtypes. If None or empty, the metadata is inferred from the kernel or function.
+        restore_inputs: For Python functions, restore top-level Warp array inputs to their
+          original values before returning. Arrays inside structs are not restored.
 
     Returns:
         A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
@@ -704,7 +758,7 @@ def jacobian(
         metadata = FunctionMetadata()
 
     if isinstance(function, wp.Kernel):
-        if not function.options.get("enable_backward", True):
+        if not _is_kernel_backward_enabled(function):
             raise ValueError("Kernel must have backward pass enabled to compute Jacobians")
         if outputs is None or len(outputs) == 0:
             raise ValueError("A list of output arguments must be provided to compute kernel Jacobians")
@@ -724,66 +778,75 @@ def jacobian(
             block_dim=block_dim,
         )
     else:
+        input_snapshot = _snapshot_array_inputs(inputs) if restore_inputs else None
         tape = wp.Tape()
         with tape:
-            outputs = function(*inputs)
+            outputs = _eval_function(function, inputs, input_snapshot)
         if isinstance(outputs, wp.array):
             outputs = [outputs]
-        if metadata.is_empty:
+
+    try:
+        if not isinstance(function, wp.Kernel):
+            for launch in tape.launches:
+                if isinstance(launch, (tuple, list)) and isinstance(launch[0], wp.Kernel):
+                    if not _is_kernel_backward_enabled(launch[0]):
+                        raise ValueError("Kernel must have backward pass enabled to compute Jacobians")
+
+        # metadata inference can raise, and can re-evaluate the function
+        if metadata.is_empty and not isinstance(function, wp.Kernel):
             metadata.update_from_function(function, inputs, outputs)
 
-    arg_names = metadata.input_labels + metadata.output_labels
+        arg_names = metadata.input_labels + metadata.output_labels
 
-    def resolve_arg(name, offset: int = 0):
-        if isinstance(name, int):
-            return name
-        return arg_names.index(name) + offset
+        def resolve_arg(name, offset: int = 0):
+            if isinstance(name, int):
+                return name
+            return arg_names.index(name) + offset
 
-    input_output_mask = [
-        (resolve_arg(input_name), resolve_arg(output_name, -len(inputs)))
-        for input_name, output_name in input_output_mask
-    ]
-    input_output_mask = set(input_output_mask)
+        input_output_mask = [
+            (resolve_arg(input_name), resolve_arg(output_name, -len(inputs)))
+            for input_name, output_name in input_output_mask
+        ]
+        input_output_mask = set(input_output_mask)
 
-    zero_grads(inputs)
-    zero_grads(outputs)
+        zero_grads(inputs)
+        zero_grads(outputs)
 
-    jacobians = {}
+        jacobians = {}
 
-    for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
-        if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
-            continue
-        input = inputs[input_i]
-        output = outputs[output_i]
-        if not isinstance(input, wp.array) or not input.requires_grad:
-            continue
-        if not isinstance(output, wp.array) or not output.requires_grad:
-            continue
-        out_grad = scalarize_array_1d(output.grad)
-        output_num = out_grad.shape[0]
-        jacobian = wp.empty((output_num, input.size), dtype=input.dtype, device=input.device)
-        jacobian.fill_(wp.nan)
-        if max_outputs_per_var > 0:
-            output_num = min(output_num, max_outputs_per_var)
-        for i in range(output_num):
-            output.grad.zero_()
-            if i > 0:
-                set_element(out_grad, i - 1, 0.0)
-            set_element(out_grad, i, 1.0)
-            tape.backward()
-            jacobian[i].assign(input.grad)
+        for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
+            if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
+                continue
+            input = inputs[input_i]
+            output = outputs[output_i]
+            if not isinstance(input, wp.array) or not input.requires_grad:
+                continue
+            if not isinstance(output, wp.array) or not output.requires_grad:
+                continue
+            out_grad = scalarize_array_1d(output.grad)
+            output_num = out_grad.shape[0]
+            jacobian = wp.empty((output_num, input.size), dtype=input.dtype, device=input.device)
+            jacobian.fill_(wp.nan)
+            if max_outputs_per_var > 0:
+                output_num = min(output_num, max_outputs_per_var)
+            for i in range(output_num):
+                output.grad.zero_()
+                if i > 0:
+                    set_element(out_grad, i - 1, 0.0)
+                set_element(out_grad, i, 1.0)
+                tape.backward()
+                jacobian[i].assign(input.grad)
 
-            zero_grads(inputs)
-            zero_grads(outputs)
-        jacobians[input_i, output_i] = jacobian
+                zero_grads(inputs)
+                zero_grads(outputs)
+            jacobians[input_i, output_i] = jacobian
+    finally:
+        # restores the snapshot even when a backward pass raises
+        if restore_inputs and not isinstance(function, wp.Kernel):
+            _restore_array_inputs(inputs, input_snapshot)
 
     if plot_jacobians:
-        jacobian_plot(
-            jacobians,
-            metadata,
-            inputs,
-            outputs,
-        )
+        jacobian_plot(jacobians, metadata)
 
     return jacobians
 
@@ -801,6 +864,7 @@ def jacobian_fd(
     eps: float = 1e-4,
     plot_jacobians=False,
     metadata: FunctionMetadata | None = None,
+    restore_inputs: bool = True,
 ) -> dict[tuple[int, int], wp.array]:
     """Compute the finite-difference Jacobian of a function or Warp kernel for the provided selection of differentiable inputs to differentiable outputs.
 
@@ -831,6 +895,9 @@ def jacobian_fd(
         eps: The finite-difference step size.
         plot_jacobians: If True, visualizes the computed Jacobians in a plot (requires ``matplotlib``).
         metadata: The metadata of the kernel function, containing the input and output labels, strides, and dtypes. If None or empty, the metadata is inferred from the kernel or function.
+        restore_inputs: For Python functions, restore top-level Warp array inputs to their
+          original values between evaluations and before returning, so each evaluation starts
+          from the original input values. Arrays inside structs are not restored.
 
     Returns:
         A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
@@ -842,8 +909,6 @@ def jacobian_fd(
         metadata = FunctionMetadata()
 
     if isinstance(function, wp.Kernel):
-        if not function.options.get("enable_backward", True):
-            raise ValueError("Kernel must have backward pass enabled to compute Jacobians")
         if outputs is None or len(outputs) == 0:
             raise ValueError("A list of output arguments must be provided to compute kernel Jacobians")
         if device is None:
@@ -862,13 +927,22 @@ def jacobian_fd(
             block_dim=block_dim,
         )
     else:
+        input_snapshot = _snapshot_array_inputs(inputs) if restore_inputs else None
         tape = wp.Tape()
         with tape:
-            outputs = function(*inputs)
+            outputs = _eval_function(function, inputs, input_snapshot)
         if isinstance(outputs, wp.array):
             outputs = [outputs]
-        if metadata.is_empty:
-            metadata.update_from_function(function, inputs, outputs)
+        try:
+            # metadata inference can raise, and can re-evaluate the function
+            if metadata.is_empty:
+                metadata.update_from_function(function, inputs, outputs)
+        finally:
+            if restore_inputs:
+                # restore before anything below can raise (e.g. a bad
+                # input_output_mask label); the FD tape is never backpropagated,
+                # so nothing downstream needs the post-evaluation state
+                _restore_array_inputs(inputs, input_snapshot)
 
     arg_names = metadata.input_labels + metadata.output_labels
 
@@ -892,138 +966,150 @@ def jacobian_fd(
 
     outputs_copy = [conditional_clone(output) for output in outputs]
 
-    for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
-        if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
-            continue
-        input = inputs[input_i]
-        output = outputs[output_i]
-        if not isinstance(input, wp.array) or not input.requires_grad:
-            continue
-        if not isinstance(output, wp.array) or not output.requires_grad:
-            continue
+    try:
+        for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
+            if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
+                continue
+            input = inputs[input_i]
+            output = outputs[output_i]
+            if not isinstance(input, wp.array) or not input.requires_grad:
+                continue
+            if not isinstance(output, wp.array) or not output.requires_grad:
+                continue
 
-        flat_input = scalarize_array_1d(input)
+            flat_input = scalarize_array_1d(input)
 
-        left = wp.clone(output)
-        right = wp.clone(output)
-        left_copy = wp.clone(output)
-        right_copy = wp.clone(output)
-        flat_left = scalarize_array_1d(left)
-        flat_right = scalarize_array_1d(right)
+            left = wp.clone(output)
+            right = wp.clone(output)
+            left_copy = wp.clone(output)
+            right_copy = wp.clone(output)
+            flat_left = scalarize_array_1d(left)
+            flat_right = scalarize_array_1d(right)
 
-        outputs_until_left = [conditional_clone(output) for output in outputs_copy[:output_i]]
-        outputs_until_right = [conditional_clone(output) for output in outputs_copy[:output_i]]
-        outputs_after_left = [conditional_clone(output) for output in outputs_copy[output_i + 1 :]]
-        outputs_after_right = [conditional_clone(output) for output in outputs_copy[output_i + 1 :]]
-        left_outputs = [*outputs_until_left, left, *outputs_after_left]
-        right_outputs = [*outputs_until_right, right, *outputs_after_right]
+            outputs_until_left = [conditional_clone(output) for output in outputs_copy[:output_i]]
+            outputs_until_right = [conditional_clone(output) for output in outputs_copy[:output_i]]
+            outputs_after_left = [conditional_clone(output) for output in outputs_copy[output_i + 1 :]]
+            outputs_after_right = [conditional_clone(output) for output in outputs_copy[output_i + 1 :]]
+            left_outputs = [*outputs_until_left, left, *outputs_after_left]
+            right_outputs = [*outputs_until_right, right, *outputs_after_right]
 
-        input_num = flat_input.shape[0]
-        flat_input_copy = wp.clone(flat_input)
-        jacobian = wp.empty((flat_left.size, input.size), dtype=input.dtype, device=input.device)
-        jacobian.fill_(wp.nan)
+            use_restore = restore_inputs and not isinstance(function, wp.Kernel)
+            input_num = flat_input.shape[0]
+            # the restore path resets the full inputs from the snapshot instead
+            flat_input_copy = None if use_restore else wp.clone(flat_input)
+            jacobian = wp.empty((flat_left.size, input.size), dtype=input.dtype, device=input.device)
+            jacobian.fill_(wp.nan)
 
-        jacobian_scalar = scalarize_array_2d(jacobian)
-        jacobian_t = jacobian_scalar.transpose()
-        if max_inputs_per_var > 0:
-            input_num = min(input_num, max_inputs_per_var)
-        for i in range(input_num):
-            set_element(flat_input, i, -eps, relative=True)
-            if isinstance(function, wp.Kernel):
-                wp.launch(
-                    function,
-                    dim=dim,
-                    max_blocks=max_blocks,
-                    block_dim=block_dim,
-                    inputs=inputs,
-                    outputs=left_outputs,
-                    device=device,
+            jacobian_scalar = scalarize_array_2d(jacobian)
+            jacobian_t = jacobian_scalar.transpose()
+            if max_inputs_per_var > 0:
+                input_num = min(input_num, max_inputs_per_var)
+            for i in range(input_num):
+                set_element(flat_input, i, -eps, relative=True)
+                if isinstance(function, wp.Kernel):
+                    wp.launch(
+                        function,
+                        dim=dim,
+                        max_blocks=max_blocks,
+                        block_dim=block_dim,
+                        inputs=inputs,
+                        outputs=left_outputs,
+                        device=device,
+                    )
+                else:
+                    outputs = _eval_function(function, inputs, input_snapshot)
+                    if isinstance(outputs, wp.array):
+                        outputs = [outputs]
+                    left.assign(outputs[output_i])
+
+                if use_restore:
+                    # the left evaluation may have mutated the inputs; restart from the snapshot
+                    _restore_array_inputs(inputs, input_snapshot)
+                    set_element(flat_input, i, eps, relative=True)
+                else:
+                    set_element(flat_input, i, 2 * eps, relative=True)
+                if isinstance(function, wp.Kernel):
+                    wp.launch(
+                        function,
+                        dim=dim,
+                        max_blocks=max_blocks,
+                        block_dim=block_dim,
+                        inputs=inputs,
+                        outputs=right_outputs,
+                        device=device,
+                    )
+                else:
+                    outputs = _eval_function(function, inputs, input_snapshot)
+                    if isinstance(outputs, wp.array):
+                        outputs = [outputs]
+                    right.assign(outputs[output_i])
+
+                # restore input
+                if use_restore:
+                    _restore_array_inputs(inputs, input_snapshot)
+                else:
+                    flat_input.assign(flat_input_copy)
+
+                compute_fd(
+                    flat_left,
+                    flat_right,
+                    eps,
+                    jacobian_t[i],
                 )
-            else:
-                outputs = function(*inputs)
-                if isinstance(outputs, wp.array):
-                    outputs = [outputs]
-                left.assign(outputs[output_i])
 
-            set_element(flat_input, i, 2 * eps, relative=True)
-            if isinstance(function, wp.Kernel):
-                wp.launch(
-                    function,
-                    dim=dim,
-                    max_blocks=max_blocks,
-                    block_dim=block_dim,
-                    inputs=inputs,
-                    outputs=right_outputs,
-                    device=device,
-                )
-            else:
-                outputs = function(*inputs)
-                if isinstance(outputs, wp.array):
-                    outputs = [outputs]
-                right.assign(outputs[output_i])
+                if i < input_num - 1:
+                    # reset output buffers
+                    left.assign(left_copy)
+                    right.assign(right_copy)
+                    flat_left = scalarize_array_1d(left)
+                    flat_right = scalarize_array_1d(right)
 
-            # restore input
-            flat_input.assign(flat_input_copy)
-
-            compute_fd(
-                flat_left,
-                flat_right,
-                eps,
-                jacobian_t[i],
-            )
-
-            if i < input_num - 1:
-                # reset output buffers
-                left.assign(left_copy)
-                right.assign(right_copy)
-                flat_left = scalarize_array_1d(left)
-                flat_right = scalarize_array_1d(right)
-
-        jacobians[input_i, output_i] = jacobian
+            jacobians[input_i, output_i] = jacobian
+    finally:
+        # restores the snapshot even when a probe raises mid-loop
+        if restore_inputs and not isinstance(function, wp.Kernel):
+            _restore_array_inputs(inputs, input_snapshot)
 
     if plot_jacobians:
-        jacobian_plot(
-            jacobians,
-            metadata,
-            inputs,
-            outputs,
-        )
+        jacobian_plot(jacobians, metadata)
 
     return jacobians
 
 
 @wp.kernel(enable_backward=False)
-def set_element_kernel(a: wp.array(dtype=Any), i: int, val: Any, relative: bool):
+def set_element_kernel(a: wp.array[Any], i: int, val: Any, relative: bool):
     if relative:
         a[i] += val
     else:
         a[i] = val
 
 
-wp.overload(set_element_kernel, {"a": wp.array(dtype=wp.float32), "val": wp.float32})
-wp.overload(set_element_kernel, {"a": wp.array(dtype=wp.float64), "val": wp.float64})
+wp.overload(set_element_kernel, {"a": wp.array[wp.float32], "val": wp.float32})
+wp.overload(set_element_kernel, {"a": wp.array[wp.float64], "val": wp.float64})
 
 
-def set_element(a: wp.array(dtype=Any), i: int, val: Any, relative: bool = False):
+def set_element(a: wp.array[Any], i: int, val: Any, relative: bool = False):
     wp.launch(set_element_kernel, dim=1, inputs=[a, i, a.dtype(val), relative], device=a.device)
 
 
 @wp.kernel(enable_backward=False)
-def compute_fd_kernel(left: wp.array(dtype=Any), right: wp.array(dtype=Any), eps: Any, fd: wp.array(dtype=Any)):
+def compute_fd_kernel(left: wp.array[Any], right: wp.array[Any], eps: Any, fd: wp.array[Any]):
     tid = wp.tid()
-    fd[tid] = (right[tid] - left[tid]) / (fd.dtype(2.0) * eps)
+    # compute the difference quotient in the output precision, then cast to the
+    # Jacobian dtype, which follows the input array and may differ from the
+    # output dtype (e.g. float32 inputs with a float64 output)
+    fd[tid] = fd.dtype((right[tid] - left[tid]) / (left.dtype(2.0) * eps))
 
 
-wp.overload(
-    compute_fd_kernel, [wp.array(dtype=wp.float32), wp.array(dtype=wp.float32), wp.float32, wp.array(dtype=wp.float32)]
-)
-wp.overload(
-    compute_fd_kernel, [wp.array(dtype=wp.float64), wp.array(dtype=wp.float64), wp.float64, wp.array(dtype=wp.float64)]
-)
+wp.overload(compute_fd_kernel, [wp.array[wp.float32], wp.array[wp.float32], wp.float32, wp.array[wp.float32]])
+wp.overload(compute_fd_kernel, [wp.array[wp.float64], wp.array[wp.float64], wp.float64, wp.array[wp.float64]])
+# mixed input/output precision: the outputs (left/right/eps) and the Jacobian (fd) may differ
+wp.overload(compute_fd_kernel, [wp.array[wp.float32], wp.array[wp.float32], wp.float32, wp.array[wp.float64]])
+wp.overload(compute_fd_kernel, [wp.array[wp.float64], wp.array[wp.float64], wp.float64, wp.array[wp.float32]])
 
 
-def compute_fd(left: wp.array(dtype=Any), right: wp.array(dtype=Any), eps: Any, fd: wp.array(dtype=Any)):
-    wp.launch(compute_fd_kernel, dim=len(left), inputs=[left, right, fd.dtype(eps)], outputs=[fd], device=left.device)
+def compute_fd(left: wp.array[Any], right: wp.array[Any], eps: Any, fd: wp.array[Any]):
+    wp.launch(compute_fd_kernel, dim=len(left), inputs=[left, right, left.dtype(eps)], outputs=[fd], device=left.device)
 
 
 @wp.kernel(enable_backward=False)
