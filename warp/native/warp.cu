@@ -189,6 +189,7 @@ struct ContextInfo {
 // Used with the on_graph_destroy() callback.
 struct GraphDestroyCallbackInfo {
     void* context = NULL;  // graph CUDA context
+    uint64_t capture_id = 0;  // capture that produced the graph
     std::vector<void*> unfreed_allocs;  // graph allocations not freed by the graph
     std::vector<FreeInfo> tmp_allocs;  // temporary allocations owned by the graph (e.g., staged array fill values)
 };
@@ -746,7 +747,9 @@ static int process_deferred_graph_destroy_callbacks(void* context = NULL)
             // handle unfreed graph allocations (may have outstanding user references)
             for (void* ptr : graph_info->unfreed_allocs) {
                 auto alloc_iter = g_graph_allocs.find(ptr);
-                if (alloc_iter != g_graph_allocs.end()) {
+                // The address may have been reused by a later graph capture (e.g. HIP hands out the
+                // same address again if this graph was never launched), so only touch our own entry.
+                if (alloc_iter != g_graph_allocs.end() && alloc_iter->second.capture_id == graph_info->capture_id) {
                     // unlink this allocation from the destroyed graph
                     // and free it if no user reference remains
                     GraphAllocInfo& alloc_info = alloc_iter->second;
@@ -1066,8 +1069,30 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             // hipGraphAddMemAllocNode on explicitly constructed graphs.
             // Use hipFreeAsync on the capturing stream instead, the stream capture
             // mechanism records it as a proper free node in the graph.
+            // The allocation may still be in use by work captured on forked (possibly already
+            // destroyed) streams, so first join all unjoined graph leaf nodes into the capture
+            // stream; otherwise the memory could be reused while that work is still pending.
             {
                 CaptureInfo* capture = capture_iter->second;
+                cudaGraph_t graph = get_capture_graph(capture->stream);
+                std::vector<cudaGraphNode_t> stream_dependencies;
+                std::vector<cudaGraphNode_t> leaf_nodes;
+                if (graph && get_capture_dependencies(capture->stream, stream_dependencies)
+                    && get_graph_leaf_nodes(graph, leaf_nodes)) {
+                    std::vector<cudaGraphNode_t> unjoined_dependencies;
+                    std::sort(stream_dependencies.begin(), stream_dependencies.end());
+                    std::sort(leaf_nodes.begin(), leaf_nodes.end());
+                    std::set_difference(
+                        leaf_nodes.begin(), leaf_nodes.end(), stream_dependencies.begin(), stream_dependencies.end(),
+                        std::back_inserter(unjoined_dependencies)
+                    );
+                    if (!unjoined_dependencies.empty()) {
+                        check_cu(cuStreamUpdateCaptureDependencies_f(
+                            capture->stream, unjoined_dependencies.data(), unjoined_dependencies.size(),
+                            CU_STREAM_ADD_CAPTURE_DEPENDENCIES
+                        ));
+                    }
+                }
                 check_cuda(cudaFreeAsync(ptr, capture->stream));
             }
 #else
@@ -1266,6 +1291,39 @@ bool wp_memcpy_d2h(void* context, void* dest, void* src, size_t n, void* stream)
     return result;
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+template <typename T> static __global__ void memcpy_d2d_kernel(T* __restrict__ dst, const T* __restrict__ src, size_t n)
+{
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x);
+    for (size_t tid
+         = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+         tid < n; tid += grid_stride) {
+        dst[tid] = src[tid];
+    }
+}
+
+// HIP/ROCm: a captured memcpy node whose source and destination are both graph allocations
+// faults at graph launch on secondary devices (ordinal != 0), so copy with a kernel instead.
+static bool memcpy_d2d_via_kernel(void* dest, const void* src, size_t n, CUstream stream)
+{
+    const int num_threads = 256;
+    const uintptr_t align_bits = reinterpret_cast<uintptr_t>(dest) | reinterpret_cast<uintptr_t>(src) | n;
+    if ((align_bits & 15) == 0) {
+        const size_t count = n / 16;
+        const int num_blocks = static_cast<int>(std::min<size_t>((count + num_threads - 1) / num_threads, 65535));
+        memcpy_d2d_kernel<<<num_blocks, num_threads, 0, stream>>>(
+            static_cast<uint4*>(dest), static_cast<const uint4*>(src), count
+        );
+    } else {
+        const int num_blocks = static_cast<int>(std::min<size_t>((n + num_threads - 1) / num_threads, 65535));
+        memcpy_d2d_kernel<<<num_blocks, num_threads, 0, stream>>>(
+            static_cast<uint8_t*>(dest), static_cast<const uint8_t*>(src), n
+        );
+    }
+    return check_cuda(cudaGetLastError());
+}
+#endif
+
 bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
 {
     ContextGuard guard(context);
@@ -1278,7 +1336,16 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
 
     begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy DtoD");
 
+#if defined(__HIP_PLATFORM_AMD__)
+    bool result;
+    if (n > 0 && wp_cuda_stream_is_capturing(cuda_stream)
+        && wp_cuda_context_get_device_ordinal(WP_CURRENT_CONTEXT) != 0)
+        result = memcpy_d2d_via_kernel(dest, src, n, cuda_stream);
+    else
+        result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyDeviceToDevice, cuda_stream));
+#else
     bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyDeviceToDevice, cuda_stream));
+#endif
 
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
@@ -3787,6 +3854,7 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         // not necessarily when cudaGraphExecDestroy() is called.
         GraphDestroyCallbackInfo* graph_info = new GraphDestroyCallbackInfo;
         graph_info->context = context ? context : get_current_context();
+        graph_info->capture_id = capture_id;
         graph_info->unfreed_allocs = unfreed_allocs;
         graph_info->tmp_allocs = tmp_allocs;
         cudaUserObject_t user_object;

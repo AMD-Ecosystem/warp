@@ -286,7 +286,7 @@ class TestMempool(unittest.TestCase):
 
 # CUDA-only mempool semantics (threshold/usage/self-access). CPU has no memory pool, so it is
 # excluded here and covered by test_mempool_exceptions / test_mempool_cpu_unsupported instead.
-cuda_devices_with_mempools = get_cuda_test_devices_with_mempool()
+cuda_devices_with_mempools = [d for d in get_cuda_test_devices() if d.is_mempool_supported]
 devices_without_mempools = [d for d in get_test_devices() if not d.is_mempool_supported]
 
 # test devices with mempool support

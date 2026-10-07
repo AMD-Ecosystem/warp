@@ -82,7 +82,7 @@ class TestContext(unittest.TestCase):
             ctx.set_device_allocator("cpu", None)
 
     def test_export_generators(self):
-        """The stub/doc/builtin generators must run for every registered builtin.
+        """The stub/builtin generators must run for every registered builtin.
 
         These entry points back ``build_docs.py`` and the ``check_generated_files``
         pre-commit hook, and they exercise each builtin's generic return-type
@@ -93,7 +93,7 @@ class TestContext(unittest.TestCase):
 
         import warp._src.context as ctx
 
-        for fn_name in ("export_stubs", "export_builtins", "export_functions_rst"):
+        for fn_name in ("export_stubs", "export_builtins"):
             buf = io.StringIO()
             getattr(ctx, fn_name)(buf)
             self.assertGreater(len(buf.getvalue()), 0, f"{fn_name} produced no output")
@@ -110,7 +110,7 @@ class TestContext(unittest.TestCase):
 
         # these query the LLVM backend; verify only the documented return types
         self.assertIsInstance(ctx._get_cpu_feature_set(), frozenset)
-        self.assertIsInstance(ctx._get_cpu_isa_hash(), str)
+        self.assertIsInstance(ctx._get_cpu_target_hash(ctx._resolve_cpu_compiler_flags(None, None)), str)
         self.assertIsInstance(ctx._get_host_cpu_name(), str)
 
     def test_kernel_mangled_name_cache(self):

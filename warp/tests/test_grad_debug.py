@@ -20,10 +20,6 @@ except ImportError:
     plt = None
     MATPLOTLIB_AVAILABLE = False
 
-import matplotlib
-
-matplotlib.use("Agg")  # non-interactive backend so jacobian_plot never blocks
-
 import warp as wp
 import warp._src.autograd as _autograd
 from warp._src.autograd import FunctionMetadata
@@ -773,6 +769,7 @@ class TestGradDebug(unittest.TestCase):
             )
         )
 
+    @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "Requires Matplotlib")
     def test_gradcheck_function_with_plots(self):
         # Use a plain Python function (not a kernel) so metadata is inferred via
         # update_from_function, and enable both plot options to exercise the
@@ -788,7 +785,7 @@ class TestGradDebug(unittest.TestCase):
             plot_absolute_error=True,
         )
         self.assertTrue(passed)
-        matplotlib.pyplot.close("all")
+        plt.close("all")
 
     def test_jacobian_function_input(self):
         # jacobian / jacobian_fd with a Python function input (exercises the
@@ -825,11 +822,10 @@ class TestGradDebug(unittest.TestCase):
         a = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, requires_grad=True, device="cpu")
         out = wp.zeros_like(a)
 
-        # backward pass disabled
+        # backward pass disabled (jacobian_fd only needs the forward pass, see
+        # test_jacobian_fd_allows_backward_disabled_kernels)
         with self.assertRaisesRegex(ValueError, "backward pass enabled"):
             jacobian(no_backward_kernel, dim=a.shape, inputs=[a], outputs=[out])
-        with self.assertRaisesRegex(ValueError, "backward pass enabled"):
-            jacobian_fd(no_backward_kernel, dim=a.shape, inputs=[a], outputs=[out])
 
         # missing outputs
         with self.assertRaisesRegex(ValueError, "output arguments must be provided"):
@@ -902,6 +898,7 @@ class TestGradDebug(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be a scalar/vector/matrix array"):
             _autograd.scalarize_array_2d(bad2d)
 
+    @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "Requires Matplotlib")
     def test_jacobian_plot_options(self):
         # Directly exercise jacobian_plot option branches with a 2x2 grid of
         # Jacobians so that both present and absent (input, output) cells occur.
@@ -960,7 +957,7 @@ class TestGradDebug(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be a Warp kernel or a FunctionMetadata"):
             jacobian_plot(jacs, object(), inputs=[x, y], show_plot=False, title="bad")
 
-        matplotlib.pyplot.close("all")
+        plt.close("all")
 
     @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "Requires Matplotlib")
     def test_jacobian_plot_function(self):

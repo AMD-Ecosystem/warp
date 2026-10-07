@@ -686,6 +686,10 @@ def _insert_alloc(device=None):
 
 def _insert_free(alloc_node, device=None):
     device = wp.get_device(device)
+    if device.is_hip:
+        # HIP records captured frees via hipFreeAsync (hipGraphAddMemFreeNode rejects
+        # stream-captured allocations), so no explicit free node is available to probe.
+        raise unittest.SkipTest("Graph free-node topology probing is not supported on HIP")
     node = wp._src.context.runtime.core.wp_cuda_graph_insert_free_node(device.context, alloc_node)
     if not node:
         raise RuntimeError("Failed to insert free node")

@@ -1580,9 +1580,8 @@ class TestSparse(unittest.TestCase):
 
         # expression arithmetic
         expr = 2.0 * A
-        # for scaling expressions, axpy applies the scale to the added operand
-        assert_np_equal(_bsr_to_dense(expr + B), dense_A + 2.0 * dense_B, 1e-5)
-        assert_np_equal(_bsr_to_dense(expr - B), dense_A - 2.0 * dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense(expr + B), 2.0 * dense_A + dense_B, 1e-5)
+        assert_np_equal(_bsr_to_dense(expr - B), 2.0 * dense_A - dense_B, 1e-5)
         assert_np_equal(_bsr_to_dense((expr * 3.0).eval()), dense_A * 6.0, 1e-5)
         assert_np_equal(_bsr_to_dense((3.0 * expr).eval()), dense_A * 6.0, 1e-5)
         assert_np_equal(_bsr_to_dense((expr / 2.0).eval()), dense_A, 1e-5)

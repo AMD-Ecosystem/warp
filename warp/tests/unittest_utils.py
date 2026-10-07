@@ -267,18 +267,24 @@ def get_cuda_test_devices_with_mempool(mode=None):
     """Like :func:`get_cuda_test_devices`, but drops CUDA devices without memory pool support.
 
     See :func:`get_test_devices_with_graph_capture_allocation` for context on why mempool
-    support is required for in-capture allocation on CUDA.
+    support is required for in-capture allocation on CUDA. HIP/ROCm secondary devices are
+    also dropped because graph memory-allocation nodes are unreliable there.
     """
-    return [d for d in get_cuda_test_devices(mode) if d.is_mempool_supported]
+    from warp._src.context import _is_graph_capture_allocation_supported  # noqa: PLC0415
+
+    return [d for d in get_cuda_test_devices(mode) if _is_graph_capture_allocation_supported(d)]
 
 
 def get_selected_cuda_test_devices_with_mempool(mode: str | None = None):
     """Like :func:`get_selected_cuda_test_devices`, but drops CUDA devices without memory pool support.
 
     See :func:`get_test_devices_with_graph_capture_allocation` for context on why mempool
-    support is required for in-capture allocation on CUDA.
+    support is required for in-capture allocation on CUDA. HIP/ROCm secondary devices are
+    also dropped because graph memory-allocation nodes are unreliable there.
     """
-    return [d for d in get_selected_cuda_test_devices(mode) if d.is_mempool_supported]
+    from warp._src.context import _is_graph_capture_allocation_supported  # noqa: PLC0415
+
+    return [d for d in get_selected_cuda_test_devices(mode) if _is_graph_capture_allocation_supported(d)]
 
 
 class StreamCapture:

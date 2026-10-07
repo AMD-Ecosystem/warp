@@ -362,6 +362,8 @@ def test_runlength_encode_host_return_rejected_during_cpu_apic_capture(test, dev
 
 
 devices = get_test_devices()
+# capture_save() (.wrp serialization) does not yet support HIP gfx architectures.
+save_load_devices = [d for d in devices if not d.is_hip]
 
 add_function_test(
     TestApicSegmentedSort,
@@ -373,13 +375,13 @@ add_function_test(
     TestApicSegmentedSort,
     "test_save_load_segmented_sort",
     test_save_load_segmented_sort,
-    devices=devices,
+    devices=save_load_devices,
 )
 add_function_test(
     TestApicSegmentedSort,
     "test_save_load_segmented_sort_explicit_end",
     test_save_load_segmented_sort_explicit_end,
-    devices=devices,
+    devices=save_load_devices,
 )
 add_function_test(
     TestApicUtilityAlgorithms,
@@ -391,13 +393,13 @@ add_function_test(
     TestApicUtilityAlgorithms,
     "test_save_load_array_scan_replay_with_updated_input",
     test_save_load_array_scan_replay_with_updated_input,
-    devices=devices,
+    devices=save_load_devices,
 )
 add_function_test(
     TestApicUtilityAlgorithms,
     "test_capture_with_array_scan_extended_metadata",
     test_capture_with_array_scan_extended_metadata,
-    devices=devices,
+    devices=save_load_devices,
 )
 add_function_test(
     TestApicUtilityAlgorithms,

@@ -169,6 +169,16 @@ static bool acquire_temp_buffer(size_t size, TempBuffer& temp_ret)
         // Use ephemeral graph allocations when the capture is registered
         // and is not a child graph capture (where graph allocations are not allowed).
         bool use_graph_allocs = mempool_supported && capture && capture->id == capture_id;
+        bool side_alloc_async = mempool_supported;
+#if defined(__HIP_PLATFORM_AMD__)
+        // HIP/ROCm: on secondary devices (ordinal != 0), stream-ordered allocations used by a
+        // captured sort are unreliable (graph alloc nodes fault at launch, side-stream pool
+        // allocations yield corrupted results). Use a synchronous, graph-retained allocation.
+        if (ordinal != 0) {
+            use_graph_allocs = false;
+            side_alloc_async = false;
+        }
+#endif
 
         if (use_graph_allocs) {
             // Use ephemeral graph allocs, released after use.
@@ -176,7 +186,7 @@ static bool acquire_temp_buffer(size_t size, TempBuffer& temp_ret)
             temp_ret.size = temp_ret.mem ? size : 0;
             temp_ret.is_ephemeral = true;
         } else {
-            cached_side_alloc(size, mempool_supported, stream, capture_id, capture, temp_ret);
+            cached_side_alloc(size, side_alloc_async, stream, capture_id, capture, temp_ret);
         }
     } else {
         // No capture, use global temp cache.

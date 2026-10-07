@@ -3441,11 +3441,9 @@ devices_with_graph_capture_allocation_and_cuda_graph_module_load = [
 cuda_devices_with_graph_capture_allocation_and_cuda_graph_module_load = [
     d for d in devices_with_graph_capture_allocation_and_cuda_graph_module_load if d.is_cuda
 ]
-# Native graph capture (and thus APIC graph save/replay and capture-time
-# rejection paths) is unsupported on HIP -- capture_begin() is a no-op there and
-# ScopedCapture leaves graph=None. Tests that require an active capture or a
-# non-None captured graph are gated to these device lists so they skip on HIP
-# while still running on CPU (APIC recording) and non-HIP CUDA.
+cuda_save_load_devices = [d for d in get_cuda_test_devices() if not d.is_hip]
+# In-memory graph capture works on HIP, so capture-time rejection tests keep HIP devices;
+# tests that call capture_save() must use the non-HIP lists above.
 devices_with_graph_capture = get_graph_capture_test_devices()
 cuda_devices_with_graph_capture = [d for d in devices_with_graph_capture if d.is_cuda]
 cuda_devices_with_graph_capture_and_module_load = [
@@ -3582,7 +3580,7 @@ add_function_test(
     devices=[d for d in devices if d.is_cpu],
 )
 add_function_test(
-    TestApic, "test_save_load_fill", test_save_load_fill, devices=get_cuda_test_devices()
+    TestApic, "test_save_load_fill", test_save_load_fill, devices=cuda_save_load_devices
 )  # CPU: wp_memtile_host not recorded
 add_function_test(
     TestApic, "test_save_load_alloc_only", test_save_load_alloc_only, devices=devices_with_graph_capture_allocation
@@ -3640,7 +3638,7 @@ add_function_test(
     TestApic,
     "test_save_load_tiled_nondefault_block_dim",
     test_save_load_tiled_nondefault_block_dim,
-    devices=get_cuda_test_devices(),
+    devices=cuda_save_load_devices,
 )
 add_function_test(
     TestApic,
@@ -3805,7 +3803,7 @@ add_function_test(
     TestApic,
     "test_save_load_capture_time_scratch_cuda",
     test_save_load_capture_time_scratch_cuda,
-    devices=cuda_devices_with_graph_capture,
+    devices=cuda_save_load_devices,
 )
 add_function_test(
     TestApic,

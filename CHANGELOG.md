@@ -9,6 +9,11 @@
   `hip_util.h` mappings, HIP LDS / block-dim launch validation, IPC/cluster gating, HIP test tolerances).
   Native hipGraph capture from `amd-integration` is kept; conditional graph nodes and APIC `.wrp`
   save/load remain unsupported on HIP.
+- Fix HIP graph-capture issues exposed by the upgraded test suite: captured frees now join forked-stream
+  work before releasing memory, captured device-to-device copies and radix-sort temporaries on secondary
+  devices (ordinal != 0) avoid faulting graph allocation paths, deterministic-mode scratch buffers are
+  allocated synchronously during capture, and a destroyed graph no longer frees a reused allocation
+  address that belongs to a later capture.
 - Merge upstream NVIDIA Warp v1.13.0 into `amd-integration`.
 - Preserve AMD-only changes: HIP initial port, BVH performance work, ROCm-specific docker / README,
   torch interop example.

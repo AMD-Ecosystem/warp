@@ -29,7 +29,7 @@ import ctypes
 import itertools
 import re
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -94,8 +94,13 @@ def det_buffer_allocation_scope(device, stream_is_capturing):
     previous_mode = runtime.core.wp_cuda_thread_exchange_capture_mode(int(CaptureMode.RELAXED))
     if previous_mode < 0:
         raise RuntimeError(f"Failed to switch thread capture mode: {runtime.get_error_string()}")
+    # HIP/ROCm rejects stream-ordered allocation (hipMallocAsync) on a non-capturing
+    # stream while a capture is active, even in relaxed mode, so allocate synchronously.
+    mempool_scope = (
+        warp.ScopedMempool(device, False) if device.is_hip and device.is_mempool_enabled else nullcontext()
+    )
     try:
-        with warp.ScopedStream(alloc_stream, sync_enter=False):
+        with warp.ScopedStream(alloc_stream, sync_enter=False), mempool_scope:
             yield
         # Ensure allocations/initialization on the allocation stream complete
         # before captured work can use the memory. Call the native sync
