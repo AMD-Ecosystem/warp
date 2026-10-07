@@ -190,7 +190,7 @@ class Example:
         self.grid = wp.HashGrid(N_GRID, N_GRID, 1)
         self.grid_cell_size = RADIUS
 
-        self.use_cuda_graph = wp.get_device().is_cuda
+        self.use_cuda_graph = wp.get_device().supports_graph_capture
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
                 self.simulate()

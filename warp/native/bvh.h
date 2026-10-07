@@ -230,6 +230,11 @@ CUDA_CALLABLE inline void make_node(volatile BVHPackedNodeHalf* n, const vec3& b
     n->b = (unsigned int)(leaf ? 1 : 0);
 }
 
+// These load helpers are CUDA_CALLABLE (__host__ __device__) rather than split
+// into separate __device__/host overloads via #ifdef __CUDA_ARCH__. HIP/clang
+// parses __global__ kernel bodies during the host pass too (where
+// __HIP_DEVICE_COMPILE__ is undefined), so a device-only overload would be
+// invisible there and calls from kernels would fail to compile.
 CUDA_CALLABLE inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index)
 {
 #if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(USE_LOAD4)

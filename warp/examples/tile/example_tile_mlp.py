@@ -198,7 +198,6 @@ class Example:
         wp.load_module(module=compute.module, device=wp.get_device(), block_dim=NUM_THREADS)
 
         # capture graph for whole epoch
-        # Graph capture is disabled on HIP.
         def run_epoch():
             for b in range(0, IMG_WIDTH * IMG_HEIGHT, BATCH_SIZE):
                 loss.zero_()

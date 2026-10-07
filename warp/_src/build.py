@@ -35,6 +35,60 @@ LTO_CACHE_KEY_LENGTH = 16
 _resolved_kernel_cache_dir: str | None = None
 
 
+_HIP_EXTRA_INCLUDE_DIRS_CACHE: "list[str] | None" = None
+
+
+def _hip_extra_include_dirs() -> "list[str]":
+    """Return extra `-I` directories needed by HIPRTC compiles.
+
+    ROCm 7's comgr embeds clang but doesn't always auto-detect either
+    (a) the clang resource directory for the ``<rocm>/lib/llvm/lib/clang/<ver>``
+        layout (so HIPRTC fails to find ``<float.h>`` / ``<stdint.h>`` etc.), or
+    (b) the HIP runtime headers under ``<rocm>/include`` (so HIPRTC fails on
+        ``#include <hip/hip_runtime.h>``).
+    We feed both explicitly when present.
+    """
+    global _HIP_EXTRA_INCLUDE_DIRS_CACHE
+    if _HIP_EXTRA_INCLUDE_DIRS_CACHE is not None:
+        return _HIP_EXTRA_INCLUDE_DIRS_CACHE
+
+    candidate_roots: "list[str]" = []
+    for var in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        v = os.environ.get(var)
+        if v:
+            candidate_roots.append(v)
+    candidate_roots.append("/opt/rocm")
+
+    dirs: "list[str]" = []
+    seen: "set[str]" = set()
+
+    def _add(path: str) -> None:
+        if path and os.path.isdir(path) and path not in seen:
+            dirs.append(path)
+            seen.add(path)
+
+    for root in candidate_roots:
+        clang_root = os.path.join(root, "lib", "llvm", "lib", "clang")
+        if os.path.isdir(clang_root):
+            try:
+                versions = [
+                    d for d in os.listdir(clang_root)
+                    if re.fullmatch(r"\d+(\.\d+)*", d)
+                    and os.path.isdir(os.path.join(clang_root, d))
+                ]
+            except OSError:
+                versions = []
+            if versions:
+                versions.sort(key=lambda s: [int(p) for p in s.split(".")])
+                _add(os.path.join(clang_root, versions[-1], "include"))
+
+        # HIP runtime headers (hip/hip_runtime.h and friends).
+        _add(os.path.join(root, "include"))
+
+    _HIP_EXTRA_INCLUDE_DIRS_CACHE = dirs
+    return dirs
+
+
 def _get_extra_include_dirs(extra_include_dirs) -> list[str]:
     include_dirs: list[str] = []
     invalid_dirs: list[str] = []

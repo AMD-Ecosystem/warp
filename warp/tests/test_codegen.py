@@ -1466,10 +1466,10 @@ def test_augassign_no_double_eval_pow_subscript(test, device):
     test.assertEqual(
         counter.numpy()[0], 1, "RHS of augmented assignment with **= on subscript was evaluated more than once"
     )
-    # places=4: ROCm's powf(5, 2) routes through exp2/log2 and yields 25.000002,
-    # which is correct to single-precision tolerance (the test's intent is the
-    # single-evaluation check above, not bit-exact pow).
-    test.assertAlmostEqual(data.numpy()[0], 25.0, places=4)
+    # gfx942's powf differs from NVIDIA's by ~1e-6 for 5**2; relax the precision
+    # check on HIP (the assertion's purpose is the single-evaluation count above).
+    places = 4 if wp.get_device(device).is_hip else 7
+    test.assertAlmostEqual(data.numpy()[0], 25.0, places=places)
 
 
 # Mul on vec component (v[0] *= expr)

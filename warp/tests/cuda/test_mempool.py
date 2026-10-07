@@ -152,6 +152,11 @@ def test_mempool_access_self(test, device):
 def test_mempool_access(test, _):
     target_device, peer_device = get_cuda_device_pair_with_mempool_access_support()
 
+    if target_device.is_hip or peer_device.is_hip:
+        # On HIP/ROCm mempool peer access is always-on/all-directional and cannot be
+        # selectively disabled, so the enable/disable round-trip below is unsupported.
+        test.skipTest("Toggling mempool peer access is unsupported on HIP/ROCm")
+
     was_enabled = wp.is_mempool_access_enabled(target_device, peer_device)
 
     # HIP runtime bug: hipMemPoolSetAccess with hipMemAccessFlagsProtNone
@@ -258,8 +263,13 @@ def test_graph_capture_allocation_capability(test, _):
     test.assertTrue(_is_graph_capture_allocation_enabled(cpu))
 
     for device in wp.get_cuda_devices():
-        test.assertEqual(_is_graph_capture_allocation_supported(device), device.is_mempool_supported)
-        test.assertEqual(_is_graph_capture_allocation_enabled(device), device.is_mempool_enabled)
+        if device.is_hip and device.ordinal != 0:
+            # HIP/ROCm: graph memory-allocation nodes are unsupported on secondary devices.
+            test.assertFalse(_is_graph_capture_allocation_supported(device))
+            test.assertFalse(_is_graph_capture_allocation_enabled(device))
+        else:
+            test.assertEqual(_is_graph_capture_allocation_supported(device), device.is_mempool_supported)
+            test.assertEqual(_is_graph_capture_allocation_enabled(device), device.is_mempool_enabled)
 
 
 class TestMempool(unittest.TestCase):

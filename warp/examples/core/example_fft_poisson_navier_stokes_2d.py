@@ -266,8 +266,8 @@ class Example:
             [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
         ]
 
-        # use CUDA graph if GPU is available
-        self.use_cuda_graph = wp.get_device().is_cuda
+        # use CUDA graph if the device supports native graph capture (not on HIP/ROCm)
+        self.use_cuda_graph = wp.get_device().supports_graph_capture
         self.graph = None
         self.num_steps = None
         self.sim_substeps = 1

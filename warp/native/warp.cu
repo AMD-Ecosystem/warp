@@ -5789,6 +5789,22 @@ bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size)
 {
     int requested_smem_bytes = size;
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // hipFuncSetAttribute accepts an over-budget dynamic shared memory size without error
+    // (unlike the CUDA driver, which rejects it), which would otherwise let an unlaunchable
+    // kernel configure "successfully" and only fault at dispatch. Reject it up front so the
+    // shared-memory budget diagnostics behave the same on both backends.
+    {
+        ContextInfo* ci = get_context_info(get_current_context());
+        int max_smem = (ci && ci->device_info) ? ci->device_info->max_smem_bytes : 0;
+        int static_smem = 0;
+        if (cuFuncGetAttribute_f(&static_smem, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (CUfunction)kernel) != CUDA_SUCCESS)
+            static_smem = 0;
+        if (max_smem > 0 && (long long)requested_smem_bytes + (long long)static_smem > (long long)max_smem)
+            return false;
+    }
+#endif
+
     // configure shared memory
     CUresult res = cuFuncSetAttribute_f(
         (CUfunction)kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, requested_smem_bytes
@@ -5864,6 +5880,13 @@ int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int 
     if (!kernel || !context)
         return 1;
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // Thread-block clusters are a CUDA-only (Hopper+) feature. HIP/ROCm has no
+    // equivalent launch-config plumbing, so report "no clusters supported".
+    (void)block_dim; (void)dynamic_smem_bytes;
+    return 1;
+#else
+
     ContextGuard guard(context);
 
     // Opt into non-portable cluster sizes so probes above 8 are valid on
@@ -5919,6 +5942,7 @@ int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int 
     cuFuncSetAttribute_f((CUfunction)kernel, non_portable_attr, prior_non_portable);
 
     return max_cluster_dim;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 void* wp_cuda_get_kernel(void* context, void* module, const char* name)
@@ -6052,6 +6076,50 @@ size_t wp_cuda_launch_kernel(
         grid_y = gy;
         grid_z = gz;
     }
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP does not reject an over-budget shared-memory launch synchronously the way the CUDA
+    // driver does; hipModuleLaunchKernel dispatches and the kernel faults asynchronously with an
+    // invalid-allocation queue abort that leaves the context unusable (and cascades to every
+    // subsequent launch). Validate the request against the device LDS budget up front so an
+    // over-budget launch fails cleanly with CUDA_ERROR_INVALID_VALUE, matching CUDA's synchronous
+    // rejection, instead of corrupting the context.
+    // HIP/HSA linearizes the dispatch global work size into a uint32, so a launch whose total
+    // thread count exceeds UINT32_MAX is dispatched and faults with a sticky launch failure that
+    // poisons the context (and cascades to every subsequent launch). The CUDA driver has no such
+    // 32-bit ceiling; reject the over-sized launch up front so it fails cleanly instead.
+    // Grid-stride launches are exempt: their grid is clamped above and the loop covers all of dim.
+    if (!grid_stride && dim > 0xFFFFFFFFull) {
+        check_cu(CUDA_ERROR_INVALID_VALUE);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    if (dim > 0) {
+        ContextInfo* smem_ctx = get_context_info(static_cast<CUcontext>(context));
+        int max_smem = (smem_ctx && smem_ctx->device_info) ? smem_ctx->device_info->max_smem_bytes : 0;
+        int static_smem = 0;
+        if (cuFuncGetAttribute_f(&static_smem, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (CUfunction)kernel) != CUDA_SUCCESS)
+            static_smem = 0;
+        if (max_smem > 0 && (long long)shared_memory_bytes + (long long)static_smem > (long long)max_smem) {
+            check_cu(CUDA_ERROR_INVALID_VALUE);
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+
+        // Same asymmetry for the block size: when block_dim exceeds the function's
+        // maxThreadsPerBlock (either the device limit or a tighter __launch_bounds__),
+        // the CUDA driver rejects the launch synchronously, but HIP dispatches and the
+        // kernel faults asynchronously with a sticky launch failure that poisons the
+        // context for every subsequent launch. Validate block_dim against the function's
+        // max threads per block up front so the launch fails cleanly instead.
+        int func_max_threads = 0;
+        if (cuFuncGetAttribute_f(&func_max_threads, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (CUfunction)kernel)
+                == CUDA_SUCCESS
+            && func_max_threads > 0 && (int)block_dim > func_max_threads) {
+            check_cu(CUDA_ERROR_INVALID_VALUE);
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+    }
+#endif
 
     begin_cuda_range(WP_TIMING_KERNEL, stream, context, get_cuda_kernel_name(kernel));
 

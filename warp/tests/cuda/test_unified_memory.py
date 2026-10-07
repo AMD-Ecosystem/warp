@@ -785,6 +785,11 @@ class TestUnifiedMemory(unittest.TestCase):
 
         target_device, peer_device = get_cuda_device_pair_with_mempool_access_support()
 
+        if target_device.is_hip or peer_device.is_hip:
+            # On HIP/ROCm mempool peer access is always-on/all-directional and cannot
+            # be disabled, so the mempool-disabled branch below is unsupported.
+            self.skipTest("Toggling mempool peer access is unsupported on HIP/ROCm")
+
         peer_access_saved = wp.is_peer_access_enabled(target_device, peer_device)
         mempool_access_saved = wp.is_mempool_access_enabled(target_device, peer_device)
         try:

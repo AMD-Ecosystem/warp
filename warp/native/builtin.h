@@ -18,7 +18,7 @@
 #define __restrict__ __restrict
 #endif
 
-// NVRTC has --restrict flag which is not available on HIPRTC.
+// NVRTC has a --restrict flag which is not available on HIPRTC.
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #define WP_RESTRICT __restrict__
 #else
@@ -2058,6 +2058,9 @@ CUDA_CALLABLE inline void slice_assert_step_nonzero(const slice_t& slice)
 #if defined(__CUDA_ARCH__)
     printf("slice step cannot be zero\n");
     __trap();
+#elif defined(__HIP_DEVICE_COMPILE__)
+    printf("slice step cannot be zero\n");
+    __builtin_trap();
 #else
     _wp_assert("slice step cannot be zero", __FILE__, unsigned(__LINE__));
 #endif
@@ -2307,7 +2310,7 @@ template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
 #endif
 }
 
-// HIP does not provide atomicMin overloads for signed long..
+// HIP does not provide atomicMin overloads for signed long.
 // Add an explicit specialization to use long long.
 #if defined(__HIPCC__)
 template <> inline CUDA_CALLABLE long atomic_min(long* address, long val)
@@ -2423,7 +2426,7 @@ template <> inline CUDA_CALLABLE double atomic_max(double* address, double val)
 #endif
 }
 
-// HIP does not provide atomicMax overloads for signed long..
+// HIP does not provide atomicMax overloads for signed long.
 // Add an explicit specialization to use long long.
 #if defined(__HIPCC__)
 template <> inline CUDA_CALLABLE long atomic_max(long* address, long val)

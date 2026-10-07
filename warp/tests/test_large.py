@@ -296,6 +296,11 @@ def test_large_dim_lean_3d(test, device):
 
 devices = get_test_devices()
 
+# HIP/HSA linearizes the dispatch global work size into a uint32, so a single lean (non-grid-stride)
+# launch cannot exceed UINT32_MAX total threads. Grid-stride launches are clamped and loop instead,
+# so only the lean >2**32-thread test is restricted to non-HIP CUDA devices.
+cuda_devices_below_uint32_launch = [d for d in get_selected_cuda_test_devices() if not d.is_hip]
+
 
 class TestLarge(unittest.TestCase):
     def test_max_blocks_ignored_on_cpu(self):
@@ -342,7 +347,7 @@ add_function_test(
     TestLarge,
     "test_large_launch_large_kernel",
     test_large_launch_large_kernel,
-    devices=get_selected_cuda_test_devices(),
+    devices=cuda_devices_below_uint32_launch,
 )
 
 add_function_test(TestLarge, "test_large_launch_max_blocks", test_large_launch_max_blocks, devices=devices)

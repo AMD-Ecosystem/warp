@@ -17,7 +17,13 @@
 
 #include <type_traits>
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/cub.cuh>
+#endif
 #include <thrust/iterator/transform_iterator.h>
 
 namespace {

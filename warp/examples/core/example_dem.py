@@ -141,7 +141,7 @@ class Example:
         else:
             self.renderer = None
 
-        self.use_graph_capture = True
+        self.use_graph_capture = wp.get_device().supports_graph_capture
         if self.use_graph_capture:
             with wp.ScopedCapture() as capture:
                 self.simulate()

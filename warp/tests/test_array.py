@@ -3674,6 +3674,15 @@ def test_array_runtime_zero_step(test, device):
 
     result = _run_runtime_zero_step_subprocess(device.alias)
     output = result.stdout + result.stderr
+    if device.is_hip:
+        # On HIP/ROCm the zero-step slice traps on the device, aborting the queue. The
+        # device-side printf ("slice step cannot be zero") is a hostcall that is not
+        # serviced before the trap, so it is discarded (and Warp cannot surface a
+        # "Warp CUDA error" string because the process aborts first). The failure
+        # instead surfaces as an HSA hardware exception; verify the trap occurred.
+        test.assertRegex(output, r"HSA_STATUS_ERROR_EXCEPTION|hardware exception")
+        test.assertNotEqual(result.returncode, 0)
+        return
     test.assertRegex(output, "slice step cannot be zero")
     if device.is_cuda:
         test.assertRegex(output, "Warp CUDA error")

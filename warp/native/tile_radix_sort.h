@@ -44,7 +44,7 @@ struct FloatKeyToUint {
     // http://stereopsis.com/radix.html
     inline CUDA_CALLABLE uint32_t convert(float value)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         unsigned int i = __float_as_uint(value);
 #else
         union {
@@ -346,13 +346,17 @@ inline CUDA_CALLABLE void bitonic_sort_single_stage_full_warp(int k, unsigned in
 }
 
 
-// Sorts 32 elements according to keys
+// Sorts a power-of-two-sized run of elements (one per lane) according to keys.
+//
+// sort_size is the (power-of-two) network width. It must not exceed the number of
+// lanes actually launched: a block smaller than the hardware warp/wavefront only
+// runs block_dim lanes, so sizing the network to the padded element count (rather
+// than the full WP_TILE_WARP_SIZE) keeps every shuffle within active lanes. On
+// NVIDIA this also avoids redundant stages when fewer than 32 elements are sorted.
 template <typename K, typename V>
-inline CUDA_CALLABLE void bitonic_sort_single_warp(unsigned int thread_id, K& key, V& val)
+inline CUDA_CALLABLE void bitonic_sort_single_warp(unsigned int thread_id, K& key, V& val, int sort_size)
 {
-#pragma unroll
-    for (int k = 2; k <= WP_TILE_WARP_SIZE; k <<= 1) {
-#pragma unroll
+    for (int k = 2; k <= sort_size; k <<= 1) {
         for (int stride = k / 2; stride > 0; stride >>= 1) {
             bitonic_sort_single_stage_full_warp(k, thread_id, stride, key, val);
         }
@@ -374,8 +378,12 @@ bitonic_sort_single_warp(int thread_id, K* keys_input, V* values_input, int num_
     else
         value = V {};
 
+    // Size the network to the padded element count so it never spans lanes that a
+    // sub-wavefront block did not launch (e.g. block_dim=32 on a 64-wide wavefront).
+    const int sort_size = next_higher_pow2(num_elements_to_sort);
+
     __syncwarp();
-    bitonic_sort_single_warp(thread_id, key, value);
+    bitonic_sort_single_warp(thread_id, key, value, sort_size);
     __syncwarp();
 
     if (thread_id < num_elements_to_sort) {
@@ -474,7 +482,11 @@ template <int max_num_elements, typename K, typename V, typename KeyToUint>
 inline CUDA_CALLABLE void
 bitonic_sort_thread_block_shared_mem(int thread_id, K* keys_input, V* values_input, int num_elements_to_sort)
 {
-    if constexpr (max_num_elements < WP_TILE_WARP_SIZE) {
+    // Fast track requires a single warp to hold every element (padded to a power of
+    // two) AND that many lanes to actually be launched. On a sub-wavefront block
+    // (e.g. block_dim=32 on a 64-wide wavefront) the padded run can exceed the launched
+    // lanes, so fall through to the block-level path in that case.
+    if constexpr (max_num_elements < WP_TILE_WARP_SIZE && next_higher_pow2(max_num_elements) <= WP_TILE_BLOCK_DIM) {
         // Fast track - single warp sort
         if (thread_id < WP_TILE_WARP_SIZE)
             bitonic_sort_single_warp<K, V, KeyToUint>(thread_id, keys_input, values_input, num_elements_to_sort);
@@ -487,8 +499,8 @@ bitonic_sort_thread_block_shared_mem(int thread_id, K* keys_input, V* values_inp
 
         __shared__ K keys_shared_mem[shared_mem_count];  // TODO: This shared memory can be avoided if keys_input is
                                                          // already shared memory
-        __shared__ V values_shared_mem[shared_mem_count];  // TODO: This shared memory can be avoided if values_input is
-                                                           // already shared memory
+        // TODO: This shared memory can be avoided if values_input is already shared memory
+        WP_TILE_SHARED_ARRAY(V, values_shared_mem, shared_mem_count);
 
         for (int i = thread_id; i < shared_mem_count; i += WP_TILE_BLOCK_DIM) {
             if (i < num_elements_to_sort) {
@@ -573,7 +585,8 @@ template <int max_num_elements, typename K, typename V, typename KeyToUint>
 inline CUDA_CALLABLE void
 bitonic_sort_thread_block_direct(int thread_id, K* keys_input, V* values_input, int num_elements_to_sort)
 {
-    if constexpr (max_num_elements < WP_TILE_WARP_SIZE) {
+    // See bitonic_sort_thread_block_shared_mem: the fast track also requires the padded run to fit in launched lanes.
+    if constexpr (max_num_elements < WP_TILE_WARP_SIZE && next_higher_pow2(max_num_elements) <= WP_TILE_BLOCK_DIM) {
         // Fast track - single warp sort
         if (thread_id < WP_TILE_WARP_SIZE)
             bitonic_sort_single_warp<K, V, KeyToUint>(thread_id, keys_input, values_input, num_elements_to_sort);
@@ -944,7 +957,7 @@ template <typename TileK, typename TileV> CUDA_CALLABLE_DEVICE void tile_sort(Ti
             );
     } else {
         __shared__ T keys_tmp[num_elements_to_sort];
-        __shared__ V values_tmp[num_elements_to_sort];
+        WP_TILE_SHARED_ARRAY(V, values_tmp, num_elements_to_sort);
 
         constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
 
@@ -979,7 +992,7 @@ CUDA_CALLABLE_DEVICE void tile_sort(TileK& t, TileV& t2, int start, int length)
     } else {
         if constexpr (max_elements_to_sort > BITONIC_SORT_THRESHOLD) {
             __shared__ T keys_tmp[max_elements_to_sort];
-            __shared__ V values_tmp[max_elements_to_sort];
+            WP_TILE_SHARED_ARRAY(V, values_tmp, max_elements_to_sort);
 
             constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
 

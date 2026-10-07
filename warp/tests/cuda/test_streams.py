@@ -421,6 +421,12 @@ def test_stream_priority_basics(test, device):
 
 
 def test_stream_priority_timings(test, device):
+    if wp.get_device(device).is_hip:
+        # HIP/ROCm exposes stream priorities, but its scheduler does not measurably
+        # favor higher-priority streams for large device-to-device copies, so the
+        # elapsed-time comparison below is not reliable on ROCm hardware.
+        test.skipTest("Stream-priority copy timing is not reliably observable on HIP/ROCm.")
+
     total_size = 256 * 1024 * 1024
     each_size = 128 * 1024 * 1024
 
@@ -536,6 +542,8 @@ def test_stream_synchronize_cpu(test, _):
 
 
 def test_synchronize_during_capture(test, device):
+    if not device.supports_graph_capture:
+        test.skipTest("Native graph capture is unsupported on this device (HIP/ROCm)")
     with wp.ScopedDevice(device):
         with test.assertRaisesRegex(RuntimeError, "Cannot synchronize device"):
             with wp.ScopedCapture():

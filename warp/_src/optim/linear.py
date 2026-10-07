@@ -2228,7 +2228,7 @@ def _run_solver_loop(
 
     while True:
         # Do not do graph capture at first iteration -- modules may not be loaded yet
-        if device.is_cuda and use_cuda_graph and cur_iter > 0:
+        if device.is_cuda and use_cuda_graph and device.supports_graph_capture and cur_iter > 0:
             if graph is None:
                 with wp.ScopedCapture(device=device, force_module_load=False) as capture:
                     do_cycle()

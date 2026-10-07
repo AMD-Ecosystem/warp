@@ -20,6 +20,51 @@ verbose_cmd = True  # print command lines before executing them
 
 MIN_CTK_VERSION = (12, 0)
 
+
+def find_rocm_sdk() -> str | None:
+    rocm_path = os.environ.get("ROCM_PATH") or os.environ.get("ROCM_HOME")
+    if rocm_path and os.path.isdir(rocm_path):
+        return rocm_path
+
+    hipcc = shutil.which("hipcc")
+    if hipcc:
+        candidate = os.path.dirname(os.path.dirname(os.path.abspath(hipcc)))
+        if os.path.isdir(candidate):
+            return candidate
+
+    default_path = "/opt/rocm"
+    if os.path.isdir(default_path):
+        return default_path
+
+    return None
+
+
+def find_hipcc_executable(rocm_path: str | None) -> str:
+    hipcc_name = "hipcc.exe" if os.name == "nt" else "hipcc"
+    if rocm_path:
+        hipcc_path = os.path.join(rocm_path, "bin", hipcc_name)
+        if os.path.exists(hipcc_path):
+            return f'"{hipcc_path}"'
+    hipcc_in_path = shutil.which("hipcc")
+    if hipcc_in_path:
+        return hipcc_in_path
+    return hipcc_name
+
+
+def _parse_hip_arches(args) -> list[str]:
+    if getattr(args, "hip_arch", None):
+        raw = args.hip_arch.replace(";", ",").replace(" ", ",")
+        return [arch for arch in raw.split(",") if arch]
+
+    env_arch = os.environ.get("ROCM_TARGETS") or os.environ.get("HIP_ARCH")
+    if env_arch:
+        raw = env_arch.replace(";", ",").replace(" ", ",")
+        return [arch for arch in raw.split(",") if arch]
+
+    # Default to gfx942 for HIP builds when not specified.
+    return ["gfx942"]
+
+
 # Echoed by our wrapper command before dumping the environment; the MSVC
 # environment script does not emit it.
 _VCVARS_ENV_DUMP_MARKER = "__WARP_VCVARS_ENV_BEGIN__"
@@ -638,7 +683,7 @@ def build_dll_for_arch(
     mode = args.mode if (mode is None) else mode
     cuda_home = args.cuda_path
     cuda_cmd = None
-    hip_enabled = bool(getattr(args, "enable_hip", False) and args.rocm_path and cu_paths)
+    hip_enabled = bool(getattr(args, "enable_hip", False) and getattr(args, "rocm_path", None) and cu_paths)
     hipcc_cmd = find_hipcc_executable(args.rocm_path) if hip_enabled else None
 
     # Derive a unique tag from dll_path for object file names to allow parallel builds
@@ -942,7 +987,7 @@ def build_dll_for_arch(
 
                     if hip_enabled:
                         hip_arches = _parse_hip_arches(args)
-                        hip_arch_flags = " ".join([f"--offload-arch={arch}" for arch in hip_arches])
+                        hip_arch_flags = " ".join([f"--offload-arch={a}" for a in hip_arches])
                         # User-supplied extra hipcc options (e.g., "-Xarch_device -fno-inline"),
                         # applied only to reduce.cu.
                         if os.path.basename(cu_path) == "reduce.cu":
@@ -953,9 +998,13 @@ def build_dll_for_arch(
                         hip_fp_flags = "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
                         # Match the host C++ ABI (`-D_GLIBCXX_USE_CXX11_ABI=0` is used for
                         # the .cpp objects above); without this the libstdc++ ABI tag
-                        # leaks into the mangled names of std::string-taking helpers like
-                        # apic_load_graph_cuda_setup, breaking the host<->HIP link step.
-                        hip_abi_flags = "-fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0"
+                        # leaks into the mangled names of std::string-taking helpers,
+                        # breaking the host<->HIP link step.
+                        # Define __HIP_PLATFORM_AMD__ explicitly so the source-level
+                        # HIP guards (`#if defined(__HIP_PLATFORM_AMD__)`) are active in
+                        # both the host and device passes of hipcc, matching the host
+                        # C++ objects compiled above.
+                        hip_abi_flags = "-fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -D__HIP_PLATFORM_AMD__"
                         if mode == "debug":
                             cuda_cmd = (
                                 f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden {hip_abi_flags} '
@@ -1049,8 +1098,8 @@ def build_dll_for_arch(
 
         with ScopedTimer("link", active=args.verbose):
             origin = "@loader_path" if (sys.platform == "darwin") else "$ORIGIN"
-            # On HIP, link via hipcc to pull in HIP runtime/libs; on CUDA, use the host C++
-            # compiler with the upstream static-runtime options.
+            # On HIP, link via hipcc (clang-based) to pull in the HIP runtime; drop the
+            # g++-only version flag and the static libstdc++/version-script options.
             if hip_enabled:
                 link_compiler = hipcc_cmd
                 link_version = ""
