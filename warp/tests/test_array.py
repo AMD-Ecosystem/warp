@@ -3690,7 +3690,10 @@ def test_array_runtime_zero_step(test, device):
         # "Warp CUDA error" string because the process aborts first). The failure
         # instead surfaces as an HSA hardware exception; verify the trap occurred.
         test.assertRegex(output, r"HSA_STATUS_ERROR_EXCEPTION|hardware exception")
-        test.assertNotEqual(result.returncode, 0)
+        # ROCm only aborts the process when it writes a GPU core dump; with core dumps
+        # disabled (ulimit -c 0) the trap surfaces as a Warp CUDA error and a clean exit.
+        if result.returncode == 0:
+            test.assertRegex(output, "Warp CUDA error")
         return
     test.assertRegex(output, "slice step cannot be zero")
     if device.is_cuda:
