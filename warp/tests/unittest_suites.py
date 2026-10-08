@@ -28,7 +28,12 @@ TOP_LEVEL_DIRECTORY = os.path.realpath(os.path.join(START_DIRECTORY, "..", "..")
 # by class name and only takes effect when HIP devices are present, so CUDA /
 # NVIDIA runs are unaffected. ``TestAsync`` is the large D2D-copy sweep that
 # saturates the copy engines; ``TestTape`` performs strided-view adjoint copies.
-HIP_SERIAL_ONLY_SUITES = frozenset({"TestAsync", "TestTape"})
+# Override with WARP_TEST_ISOLATED_CLASSES (comma-separated class names; empty disables).
+HIP_SERIAL_ONLY_SUITES = frozenset(
+    name.strip()
+    for name in os.environ.get("WARP_TEST_ISOLATED_CLASSES", "TestAsync,TestTape").split(",")
+    if name.strip()
+)
 
 
 def _create_suite_from_test_classes(test_loader, test_classes):
