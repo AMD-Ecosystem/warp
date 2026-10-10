@@ -852,14 +852,6 @@ def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
 
 
 def test_tile_reduce_axis_tier3(test, device, block_dim=TILE_DIM):
-    # KNOWN GAP (HIP/gfx1151): the Tier 3 block-level axis reduction (reduction
-    # dimension > 256, cooperative reduction across the whole block) returns
-    # incorrect results on HIP — the forward reduction reads uninitialized
-    # shared memory. Under investigation; see KNOWN_ISSUES-AMD.md. Tier 1/2
-    # axis reductions and all non-axis reductions are correct.
-    if device.is_hip:
-        test.skipTest("Tier 3 block-level axis reduction is incorrect on HIP (known gap, under investigation)")
-
     # 2D sum: axis=0, size 400 (forward and backward)
     x = wp.ones((400, 16), dtype=float, requires_grad=True, device=device)
     y = wp.zeros(16, dtype=float, requires_grad=True, device=device)

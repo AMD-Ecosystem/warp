@@ -31,6 +31,8 @@ For example, the location of the user kernel cache can be changed with:
     wp.init()
 
 See :doc:`../api_reference/warp_config` for a complete list of global settings.
+See :doc:`execution_and_performance/reducing_compilation_and_startup_time` for
+guidance on settings that affect compilation and startup.
 
 .. _module-settings:
 
@@ -87,12 +89,17 @@ The options for a module can also be queried using :func:`wp.get_module_options(
 |``strip_hash``                        | Boolean | ``False``   | If ``True``, avoids using a content-based hash to identify the module    |
 |                                      |         |             | and its functions.                                                       |
 +--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
+|``extra_build_options``               | Object  | ``None``    | Experimental extra build inputs for CPU and CUDA modules. Set to an      |
+|                                      |         |             | :class:`warp.ModuleBuildOptions` instance.                               |
++--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
 |``enable_mathdx_gemm``                | Boolean | ``None``    | A module-level override of the :attr:`warp.config.enable_mathdx_gemm`    |
 |                                      |         |             | setting. ``None`` defers to the global setting at compile time.          |
 +--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
 |``enable_mathdx_solver``              | Boolean | ``None``    | A module-level override of the :attr:`warp.config.enable_mathdx_solver`  |
 |                                      |         |             | setting. ``None`` defers to the global setting at compile time.          |
 +--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
+
+.. _kernel-settings:
 
 Kernel Settings
 ---------------
@@ -107,6 +114,14 @@ Kernel-level settings can be passed as arguments to the :func:`@wp.kernel <warp.
      - Type
      - Default Value
      - Description
+   * - ``name``
+     - String
+     - ``None``
+     - Sets the kernel key used for registration and native code generation. If
+       ``None``, Warp derives the key from the Python callable passed to
+       ``wp.kernel``. A custom name must be a valid C++ identifier. When
+       ``strip_hash=True``, Warp uses the key without a hash suffix as the base
+       of the generated native entry-point names.
    * - ``enable_backward``
      - Boolean
      - ``None``
@@ -150,6 +165,14 @@ Kernel-level settings can be passed as arguments to the :func:`@wp.kernel <warp.
        Keys are validated against the module's known options (see
        `Module Settings`_ above). For shared modules, use
        :func:`wp.set_module_options() <warp.set_module_options>` instead.
+   * - ``entry_point_abi``
+     - String
+     - ``None``
+     - Selects the experimental entry-point ABI. ``"warp"`` uses the regular
+       launch-compatible CPU and CUDA ABI. ``"external_constant_params"`` is
+       CUDA-only and binds one struct argument from constant memory symbol
+       ``params``; it requires ``enable_backward=False`` and cannot be launched
+       with :func:`warp.launch`.
 
 .. code-block:: python
 

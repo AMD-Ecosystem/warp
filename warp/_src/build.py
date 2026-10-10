@@ -34,6 +34,32 @@ LTO_CACHE_KEY_LENGTH = 16
 _resolved_kernel_cache_dir: str | None = None
 
 
+def _get_extra_include_dirs(extra_include_dirs) -> list[str]:
+    include_dirs: list[str] = []
+    invalid_dirs: list[str] = []
+
+    for entry in extra_include_dirs:
+        path = os.fspath(entry)
+        if not os.path.isabs(path):
+            invalid_dirs.append(f"{path!r} (not absolute)")
+            continue
+
+        normalized_path = os.path.realpath(path)
+        if not os.path.isdir(normalized_path):
+            invalid_dirs.append(f"{path!r} (not a directory)")
+            continue
+
+        include_dirs.append(normalized_path)
+
+    if invalid_dirs:
+        raise ValueError("extra_include_dirs entries must be absolute existing directories: " + ", ".join(invalid_dirs))
+    return include_dirs
+
+
+def _get_extra_include_dir_bytes(extra_include_dirs) -> list[bytes]:
+    return [path.encode("utf-8") for path in _get_extra_include_dirs(extra_include_dirs)]
+
+
 # Above this generated-source size, HIP kernels are compiled AOT via hipcc instead
 # of in-process HIPRTC. ROCm 7.2's clang AMDGPU backend segfaults (in SelectionDAG
 # FoldConstantArithmetic during type legalization) on certain kernels — e.g. a
@@ -127,6 +153,7 @@ def build_cuda(
     arch_suffix="",
     llvm_cuda=False,
     use_precompiled_headers=True,
+    extra_include_dirs=(),
 ) -> None:
     with open(cu_path, "rb") as src_file:
         src = src_file.read()
@@ -148,10 +175,20 @@ def build_cuda(
         )
         return
 
+    extra_cuda_include_dirs = _get_extra_include_dir_bytes(extra_include_dirs)
+    if is_hip:
+        # hipRTC needs the ROCm and GCC system include paths (<hip/hip_runtime.h>, <stddef.h>, ...)
+        extra_cuda_include_dirs = extra_cuda_include_dirs + [b"/opt/rocm/include", hip_extra_includes.encode("utf-8")]
+    num_cuda_include_dirs = len(extra_cuda_include_dirs)
+    cuda_include_dirs = (
+        (ctypes.c_char_p * num_cuda_include_dirs)(*extra_cuda_include_dirs) if num_cuda_include_dirs else None
+    )
     output_path = output_path.encode("utf-8")
 
     if llvm_cuda:
-        err = warp._src.context.runtime.llvm.wp_compile_cuda(src, cu_path_bytes, inc_path, output_path, False)
+        err = warp._src.context.runtime.llvm.wp_compile_cuda(
+            src, cu_path_bytes, inc_path, num_cuda_include_dirs, cuda_include_dirs, output_path, False
+        )
     else:
         if ltoirs is None:
             ltoirs = []
@@ -170,24 +207,14 @@ def build_cuda(
         # isolated between threads and processes to avoid .pch races.
         pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
         arch_suffix_bytes = arch_suffix.encode("utf-8")
-        # For HIP (arch=0, arch_suffix starts with "gfx"): add ROCm and GCC system
-        # include paths so hipRTC can find <hip/hip_runtime.h>, <stddef.h>, etc.
-        is_hip = (arch == 0 and arch_suffix and arch_suffix.startswith("gfx"))
-        if is_hip:
-            extra_inc_dirs = [b"/opt/rocm/include", hip_extra_includes.encode("utf-8")]
-            num_extra_inc = len(extra_inc_dirs)
-            arr_extra_inc = (ctypes.c_char_p * num_extra_inc)(*extra_inc_dirs)
-        else:
-            num_extra_inc = 0
-            arr_extra_inc = None
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
             program_name_bytes,
             arch,
             arch_suffix_bytes,
             inc_path,
-            num_extra_inc,
-            arr_extra_inc,
+            num_cuda_include_dirs,
+            cuda_include_dirs,
             config == "debug",
             optimization_level,
             warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
@@ -230,6 +257,7 @@ def build_cpu(
     pch_dir=None,
     block_dim=256,
     enable_tiles_in_stack_memory=True,
+    extra_include_dirs=(),
 ):
     with open(cpp_path, "rb") as cpp:
         src = cpp.read()
@@ -242,6 +270,8 @@ def build_cpu(
     obj_path = obj_path.encode("utf-8")
 
     flags_list = extra_flags.split()
+    for include_dir in _get_extra_include_dirs(extra_include_dirs):
+        flags_list.extend(("-I", include_dir))
     flags_array = (ctypes.c_char_p * (len(flags_list) + 1))(*[f.encode("utf-8") for f in flags_list], None)
 
     pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
