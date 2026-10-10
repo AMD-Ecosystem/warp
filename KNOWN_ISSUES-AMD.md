@@ -97,6 +97,14 @@ RDNA executes a wavefront in lockstep without independent thread scheduling.
 Spinlocks built from `wp.atomic_cas`, where one lane must release a lock while
 its wave-mates spin on it, deadlock. `wp.atomic_cas` itself is correct.
 
+### Floating-point contraction can differ between kernels
+
+HIP kernels are compiled with `-ffp-contract=fast` when `fuse_fp` is set. The
+compiler may fuse multiply-adds across statements after inlining, so the same
+`@wp.func` can round differently in two kernels. Code that compares a value
+computed in one kernel with the same value computed in another kernel can see
+a difference of a few ULP. Status: platform limitation.
+
 ### Out-of-bounds accesses fault instead of being masked
 
 An out-of-bounds device access that goes unnoticed on CUDA raises
@@ -182,12 +190,6 @@ upstream in MuJoCo-Warp.
 `warp.DeterministicMode.RUN_TO_RUN` / `GPU_TO_GPU` results differ at ULP
 level between runs: the binned-accumulator reduction in `deterministic.cu` is
 not bit-reproducible on gfx1151. Status: open.
-
-### Tile block-level axis reduction (Tier 3)
-
-Tile axis reductions over a dimension larger than 256 (the block-level path)
-return wrong results. Tier 1/2 and non-axis reductions are correct. Status:
-open.
 
 ### Tile-path array reduction is slow
 
@@ -324,7 +326,6 @@ Skipped on HIP:
 - `tile/test_tile_shared_memory` `test_tile_shared_mem_large`,
   `tile/test_tile_view` `test_tile_assign_2d`, `tile/test_tile_reduce` 3D
   axis-reduce backward — exceed 64 KB LDS.
-- `tile/test_tile_reduce` Tier 3 axis reduction — open bug (section 2).
 - `tile/test_tile_fft`, `test_tile_solve`, `test_tile_mlp` MathDx cases —
   libmathdx is CUDA-only.
 - `cuda/test_texture` mipmapped-array tests — error 801.
