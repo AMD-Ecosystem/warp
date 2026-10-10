@@ -8303,6 +8303,14 @@ class Runtime:
             getattr(self.core, name).argtypes = []
             getattr(self.core, name).restype = restype
 
+        # Whether PyTorch had already initialized the GPU runtime before Warp: on HIP, ROCm then reads its
+        # environment before Warp can raise HSA_SCRATCH_SINGLE_LIMIT (see the warning after device setup)
+        torch_mod = sys.modules.get("torch")
+        try:
+            gpu_runtime_initialized_by_torch = bool(torch_mod is not None and torch_mod.cuda.is_initialized())
+        except Exception:
+            gpu_runtime_initialized_by_torch = False
+
         # Initialize with version verification
         error = self.core.wp_init(warp.config.version.encode("utf-8"))
 
@@ -8413,6 +8421,13 @@ class Runtime:
                 self.set_default_device("cuda:0")
 
             self.is_hip = any(d.is_hip for d in self.cuda_devices)
+
+            if self.is_hip and gpu_runtime_initialized_by_torch and "HSA_SCRATCH_SINGLE_LIMIT" not in os.environ:
+                log_warning(
+                    "PyTorch initialized ROCm before Warp, so Warp could not raise HSA_SCRATCH_SINGLE_LIMIT; kernels that "
+                    "need a large scratch allocation may run slowly. Set HSA_SCRATCH_SINGLE_LIMIT=1073741824 in the "
+                    "environment before starting Python."
+                )
 
             if self.is_hip:
                 self.default_ptx_arch = None
