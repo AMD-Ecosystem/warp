@@ -1064,37 +1064,13 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
         auto capture_iter = g_captures.find(capture_id);
         if (capture_iter != g_captures.end() && capture_id == get_capture_id(capture_iter->second->stream)) {
 #if defined(__HIP_PLATFORM_AMD__)
-            // hipGraphAddMemFreeNode rejects pointers from hipMallocAsync during
-            // stream capture (hipErrorInvalidValue). It only accepts pointers from
-            // hipGraphAddMemAllocNode on explicitly constructed graphs.
-            // Use hipFreeAsync on the capturing stream instead, the stream capture
-            // mechanism records it as a proper free node in the graph.
-            // The allocation may still be in use by work captured on forked (possibly already
-            // destroyed) streams, so first join all unjoined graph leaf nodes into the capture
-            // stream; otherwise the memory could be reused while that work is still pending.
-            {
-                CaptureInfo* capture = capture_iter->second;
-                cudaGraph_t graph = get_capture_graph(capture->stream);
-                std::vector<cudaGraphNode_t> stream_dependencies;
-                std::vector<cudaGraphNode_t> leaf_nodes;
-                if (graph && get_capture_dependencies(capture->stream, stream_dependencies)
-                    && get_graph_leaf_nodes(graph, leaf_nodes)) {
-                    std::vector<cudaGraphNode_t> unjoined_dependencies;
-                    std::sort(stream_dependencies.begin(), stream_dependencies.end());
-                    std::sort(leaf_nodes.begin(), leaf_nodes.end());
-                    std::set_difference(
-                        leaf_nodes.begin(), leaf_nodes.end(), stream_dependencies.begin(), stream_dependencies.end(),
-                        std::back_inserter(unjoined_dependencies)
-                    );
-                    if (!unjoined_dependencies.empty()) {
-                        check_cu(cuStreamUpdateCaptureDependencies_f(
-                            capture->stream, unjoined_dependencies.data(), unjoined_dependencies.size(),
-                            CU_STREAM_ADD_CAPTURE_DEPENDENCIES
-                        ));
-                    }
-                }
-                check_cuda(cudaFreeAsync(ptr, capture->stream));
-            }
+            // Don't record a free node: hipGraphLaunch with AutoFreeOnLaunch segfaults when relaunching
+            // a graph in which a captured free precedes an allocation that outlives the graph
+            // (e.g., allocate tmp, free tmp, allocate result). Instead, let the graph retain the
+            // allocation and release it when the graph is destroyed (see on_graph_destroy()).
+            // hipGraphAddMemFreeNode isn't an alternative, it rejects stream-captured allocations.
+            alloc_info.ref_exists = false;
+            return;
 #else
             CaptureInfo* capture = capture_iter->second;
             cudaGraph_t graph = get_capture_graph(capture->stream);

@@ -361,6 +361,9 @@ class CheckOutput:
     def __enter__(self):
         # wp.force_load()
 
+        # initialize outside the capture so the one-time init banner isn't flagged as unexpected output
+        wp.init()
+
         self.capture = StdOutCapture()
         self.capture.begin()
 
