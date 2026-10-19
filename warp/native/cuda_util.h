@@ -418,6 +418,7 @@ struct CaptureInfo {
     bool external = false;  // whether this is an external capture
     cudaStreamCaptureMode mode = cudaStreamCaptureModeThreadLocal;  // mode used to open the capture (for pause/resume)
     std::vector<FreeInfo> tmp_allocs;  // temporary allocations owned by the graph (e.g., staged array fill values)
+    std::vector<CUstream> forked_streams;  // streams that joined this capture through an event wait (joined back on HIP)
 };
 
 struct StreamInfo {

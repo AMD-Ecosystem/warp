@@ -534,6 +534,26 @@ CaptureInfo* find_capture_info(uint64_t capture_id)
     return NULL;
 }
 
+// Remember a stream that an event wait has just pulled into a capture that began on another
+// stream. CUDA accepts the dependency-set join that wp_cuda_graph_end_capture() performs; HIP
+// still reports such streams as unjoined work, so they are joined back there with events.
+static void note_forked_stream(CUstream stream)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    if (g_captures.empty() || !wp_cuda_stream_is_capturing(stream))
+        return;
+    CaptureInfo* capture = find_capture_info(get_capture_id(stream));
+    if (!capture || capture->stream == stream)
+        return;
+    for (CUstream forked : capture->forked_streams)
+        if (forked == stream)
+            return;
+    capture->forked_streams.push_back(stream);
+#else
+    (void)stream;
+#endif
+}
+
 static inline bool is_context_capturing(CUcontext context)
 {
     if (g_captures.empty())
@@ -3508,6 +3528,7 @@ void wp_cuda_context_set_stream(void* context, void* stream, int sync)
                 CUevent cached_event = old_stream_info->cached_event;
                 check_cu(cuEventRecord_f(cached_event, old_stream));
                 check_cu(cuStreamWaitEvent_f(new_stream, cached_event, CU_EVENT_WAIT_DEFAULT));
+                note_forked_stream(new_stream);
             }
         }
 
@@ -3846,6 +3867,7 @@ void wp_cuda_stream_wait_event(void* stream, void* event, bool external)
             cuStreamWaitEvent_f(static_cast<CUstream>(stream), static_cast<CUevent>(event), CU_EVENT_WAIT_DEFAULT)
         );
     }
+    note_forked_stream(static_cast<CUstream>(stream));
 }
 
 void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, bool external)
@@ -3863,6 +3885,7 @@ void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, b
 
     check_cu(cuEventRecordWithFlags_f(static_cast<CUevent>(event), static_cast<CUstream>(other_stream), record_flags));
     check_cu(cuStreamWaitEvent_f(static_cast<CUstream>(stream), static_cast<CUevent>(event), wait_flags));
+    note_forked_stream(static_cast<CUstream>(stream));
 }
 
 int wp_cuda_stream_is_capturing(void* stream)
@@ -4102,14 +4125,40 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     bool external = capture->external;
     uint64_t capture_id = capture->id;
     std::vector<FreeInfo> tmp_allocs = capture->tmp_allocs;
+    std::vector<CUstream> forked_streams = capture->forked_streams;
 
     // clear capture info
     stream_info->capture = NULL;
     g_captures.erase(capture_id);
     delete capture;
 
+    // HIP counts a forked stream as unjoined until the capture stream waits on an event recorded on
+    // it, whatever the dependency set below says, and hipStreamEndCapture then fails with
+    // hipErrorStreamCaptureUnjoined. Join every stream that an event wait pulled into this capture.
+    std::vector<CUevent> join_events;
+#if defined(__HIP_PLATFORM_AMD__)
+    for (CUstream forked : forked_streams) {
+        if (!wp_cuda_stream_is_capturing(forked))
+            continue;
+        CUevent join_event = NULL;
+        if (!check_cu(cuEventCreate_f(&join_event, CU_EVENT_DISABLE_TIMING)))
+            continue;
+        check_cu(cuEventRecordWithFlags_f(join_event, forked, CU_EVENT_RECORD_DEFAULT));
+        check_cu(cuStreamWaitEvent_f(cuda_stream, join_event, CU_EVENT_WAIT_DEFAULT));
+        join_events.push_back(join_event);
+    }
+#else
+    (void)forked_streams;
+#endif
+    auto destroy_join_events = [&join_events]() {
+        for (CUevent join_event : join_events)
+            check_cu(cuEventDestroy_f(join_event));
+        join_events.clear();
+    };
+
     // a lambda to clean up on exit in case of error
-    auto clean_up = [cuda_stream, capture_id, external]() {
+    auto clean_up = [cuda_stream, capture_id, external, &destroy_join_events]() {
+        destroy_join_events();
         // unreference outstanding graph allocs so that they will be released with the user reference
         for (auto it = g_graph_allocs.begin(); it != g_graph_allocs.end(); /*noop*/) {
             GraphAllocInfo& alloc_info = it->second;
@@ -4199,11 +4248,15 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     }
 
     // for external captures, we don't instantiate the graph ourselves, so we're done
-    if (external)
+    if (external) {
+        destroy_join_events();
         return true;
+    }
 
     // end the capture
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
+    bool ended = check_cuda(cudaStreamEndCapture(cuda_stream, &graph));
+    destroy_join_events();
+    if (!ended)
         return false;
 
     // process deferred free list if no more captures are ongoing
