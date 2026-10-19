@@ -89,8 +89,8 @@ def _hipcc_genco_cmd(hipcc, cu_path, output_path, arch_suffix, inc_dirs, config,
         cmd += ["-DNDEBUG"]
     if fast_math:
         cmd += ["-ffast-math"]
-    if fuse_fp:
-        cmd += ["-ffp-contract=fast"]
+    # clang's HIP default already contracts, so fuse_fp=False must be explicit (--fmad=false on CUDA).
+    cmd += ["-ffp-contract=fast" if fuse_fp else "-ffp-contract=off"]
     if lineinfo:
         cmd += ["-gline-tables-only"]
     for inc in inc_dirs:

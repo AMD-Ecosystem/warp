@@ -5471,8 +5471,13 @@ size_t wp_cuda_compile_program(
         opts.push_back(stored_options.back().c_str());
     }
 
+    // clang's HIP default already contracts (fast-honor-pragmas), so fuse_fp=false has to say so
+    // explicitly to match --fmad=false on CUDA.
     if (fuse_fp) {
         stored_options.push_back("-ffp-contract=fast");
+        opts.push_back(stored_options.back().c_str());
+    } else {
+        stored_options.push_back("-ffp-contract=off");
         opts.push_back(stored_options.back().c_str());
     }
 
