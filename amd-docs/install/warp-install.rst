@@ -11,7 +11,7 @@ Warp on ROCm installation
 System requirements
 ====================================================================
 
-To use Warp `1.13.0+rocm.0 <https://github.com/AMD-Ecosystem/warp>`__, you need the following prerequisites:
+To use Warp `v1.13.0 <https://github.com/AMD-Ecosystem/warp/tree/v1.13.0>`__, you need the following prerequisites:
 
 - **ROCm version:** `7.2.0 <https://rocm.docs.amd.com/en/docs-7.2.0/>`__ (MI325X), `10.1.0 <https://rocm.docs.amd.com/en/docs-10.1.0/>`__ (MI350X, MI355X)
 - **Operating system:** Ubuntu 24.04

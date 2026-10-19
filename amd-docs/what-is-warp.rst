@@ -8,7 +8,7 @@
 What is Warp?
 ********************************************************************
 
-`Warp <https://github.com/NVIDIA/warp>`__ is a Python framework for writing
+`Warp <https://github.com/AMD-Ecosystem/warp>`__ is a Python framework for writing
 high-performance simulation and graphics code. Warp takes regular Python
 functions decorated with ``@wp.kernel`` and JIT compiles them to efficient
 kernel code that can run on the CPU or GPU.
