@@ -38,13 +38,13 @@ Build Warp from source
 
    .. tab-set::
 
-      .. tab-item:: MI325X (ROCm 7.2.0)
+      .. tab-item:: AMD Instinct MI325X (ROCm 7.2.0)
 
          .. code-block:: bash
 
             docker build --network=host -f docker/rocm/Dockerfile --target warp_gfx942 -t warp:rocm_7.2_ubuntu24.04_py3.12_torch2.9.1 .
 
-      .. tab-item:: MI350X/MI355X (ROCm 10.1.0)
+      .. tab-item:: AMD Instinct MI350X/MI355X (ROCm 10.1.0)
 
          .. code-block:: bash
 
@@ -57,7 +57,7 @@ Build Warp from source
 
    .. tab-set::
 
-      .. tab-item:: MI325X (ROCm 7.2.0)
+      .. tab-item:: AMD Instinct MI325X (ROCm 7.2.0)
 
          .. code-block:: bash
 
@@ -74,7 +74,7 @@ Build Warp from source
                --shm-size=16g \
                warp:rocm_7.2_ubuntu24.04_py3.12_torch2.9.1
 
-      .. tab-item:: MI350X/MI355X (ROCm 10.1.0)
+      .. tab-item:: AMD Instinct MI350X/MI355X (ROCm 10.1.0)
 
          .. code-block:: bash
 
