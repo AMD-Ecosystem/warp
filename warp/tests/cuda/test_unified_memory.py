@@ -388,8 +388,13 @@ def test_unified_memory_cuda_memory_kind_queries(test, device):
         if device.is_mempool_supported:
             with wp.ScopedMempool(device, True):
                 mempool_arr = wp.empty(4, dtype=wp.float32, device=device)
-            test.assertIs(mempool_arr.memory_kind, wp.MemoryKind.CUDA_MEMPOOL)
-            test.assertIs(mempool_arr[1:].memory_kind, wp.MemoryKind.CUDA_MEMPOOL)
+            # HIP keeps regular allocations off the async pool even when the pool is
+            # enabled (the pool serves graph-capture allocations only), so they are
+            # plain device memory there.
+            pooled = device.mempool_enabled_allocator is device.mempool_allocator
+            expected_kind = wp.MemoryKind.CUDA_MEMPOOL if pooled else wp.MemoryKind.CUDA_DEVICE
+            test.assertIs(mempool_arr.memory_kind, expected_kind)
+            test.assertIs(mempool_arr[1:].memory_kind, expected_kind)
 
         if device.is_managed_memory_supported:
             managed = wp.CudaManagedAllocator()

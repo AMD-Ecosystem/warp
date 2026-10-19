@@ -1,6 +1,6 @@
 # Warp on AMD HIP/ROCm
 
-AMD HIP/ROCm build of NVIDIA Warp 1.17.0.dev4 (upstream main).
+AMD HIP/ROCm build of NVIDIA Warp 1.17.0 (release tag v1.17.0).
 
 ## Quickstart
 
@@ -10,12 +10,11 @@ turnkey option; if you already have Python 3.11/3.12 a plain `venv` works too �
 see [Environment setup](#environment-setup). The short version:
 
 ```bash
-# 0. Clone this branch. The repository is private: you need access, and the
-#    clone must go over SSH (or an authenticated HTTPS remote). git-lfs must
-#    be installed FIRST — the USD/NVDB test and example assets are LFS
-#    objects, and without it the clone silently contains pointer files.
+# 0. Clone this branch (the repository is public). git-lfs must be installed
+#    FIRST — the USD/NVDB test and example assets are LFS objects, and without
+#    it the clone silently contains pointer files.
 git lfs install
-git clone -b tomas/port-on-1.17-full git@github.com:tomasthoresen/warp
+git clone -b amd-integration-halo https://github.com/AMD-Ecosystem/warp
 cd warp
 
 # 1. Create and activate an environment (Python 3.12; 3.11 also works)
@@ -31,7 +30,7 @@ pip install numpy setuptools packaging wheel
 #   pip install torch --index-url https://rocm.nightlies.amd.com/v2/gfx1151/
 
 # 3. Build Warp for HIP. The compile takes about 1-2 minutes at the default
-#    8 jobs (measured 72 s); the first-ever build additionally downloads the
+#    8 jobs; the first-ever build additionally downloads the
 #    LLVM/Clang toolchain dependency. Must run before step 4:
 #    `pip install -e .` expects warp/bin/warp.so to already exist.
 #    build_amd.sh auto-detects python/python3; override with
@@ -45,8 +44,7 @@ pip install -e .
 python tools/run_gfx1151_smoke.py
 ```
 
-Recommended ROCm version: **7.14.0** — the version all current recorded
-numbers were produced on. See [Choosing a ROCm version](#choosing-a-rocm-version),
+Recommended ROCm version: **7.14.0**. See [Choosing a ROCm version](#choosing-a-rocm-version),
 including a validated container route that needs no host ROCm upgrade.
 
 A passing smoke test means the build loads and runs kernels. It does **not**
@@ -66,7 +64,7 @@ This port is **validated only on `gfx1151`** (AMD Radeon 8060S / Strix Halo iGPU
 
 | Architecture | Status | Notes |
 |---|---|---|
-| `gfx1151` | Validated | Test matrix and per-example throughput in `KNOWN_ISSUES-AMD.md` |
+| `gfx1151` | Validated | Known issues in `KNOWN_ISSUES-AMD.md` |
 | `gfx1100`, `gfx1101`, `gfx1102` | Buildable | RDNA 3 dGPU; untested |
 | `gfx1030` | Buildable | RDNA 2; untested |
 
@@ -82,12 +80,8 @@ find /opt/rocm -name rocminfo -executable 2>/dev/null
 
 ## Choosing a ROCm version
 
-**Recommended: ROCm 7.14.0.** All current recorded numbers — the five-suite
-validation matrix (Warp, Newton, MuJoCo-Warp, benchmarks, CDNA build), the
-per-example Newton FPS figures, and the unit-test results — were produced on
-ROCm 7.14.0, run against an NVIDIA reference machine at the same commits.
-ROCm 7.2.x is also validated and remains necessary for one workload class
-below.
+**Recommended: ROCm 7.14.0.** ROCm 7.2.x is also validated and remains
+necessary for one workload class below.
 
 The two releases fail in opposite directions:
 
@@ -97,12 +91,12 @@ walking example loses most of its throughput within a few hundred frames and
 keeps degrading. On ROCm 7.14.0 the same example holds a steady rate.
 
 **ROCm 7.14.0 fails small device allocations under capture-heavy load.**
-`hipMalloc` returns NULL for 56-byte requests with 97 per cent of device memory
-free, which costs several Newton test modules outright.
+`hipMalloc` returns NULL for small requests while most device memory is free,
+which makes several Newton test modules fail.
 
 For sustained simulation and reinforcement-learning rollouts, use 7.14.0. For
-workloads that trip the allocation failure, 7.2.x remains necessary. Detail and
-evidence for both are in `KNOWN_ISSUES-AMD.md`.
+workloads that trip the allocation failure, 7.2.x remains necessary. Both are
+described in `KNOWN_ISSUES-AMD.md`.
 
 Two 7.14.0 specifics:
 
@@ -154,45 +148,15 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 | OS | Ubuntu 24.04.3 |
 | Kernel | 7.0.0-28-generic, in-tree `amdgpu` (6.17.0-1017-oem also validated; some other kernels are known bad — see [Troubleshooting](#troubleshooting)) |
 | GPU | AMD Radeon 8060S (gfx1151), 96 GiB unified memory |
-| ROCm | 7.14.0 (recommended; all current recorded numbers). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
-| Newton | 1.4.0, branch `tomas/gfx1151-fixes` of `github.com/tomasthoresen/newton` (two commits on top of the 1.4.0 release — see [Newton integration](#newton-integration)) |
-| MuJoCo | 3.10.0 |
-| MuJoCo-Warp | 3.10.0.2 (Newton 1.4.0 is incompatible with 3.10.0.3, which removed `Model.qLD_dof_simple`) |
-| usd-core | 26.3 (Newton 1.4.0 requires `>=25.5,<26.5`; 26.8 is unusable with it) |
+| ROCm | 7.14.0 (recommended). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
+| Newton | 1.5.1 from PyPI (`newton[sim,importers,examples]`) |
+| MuJoCo | 3.11.0 |
+| MuJoCo-Warp | 3.11.0 |
+| usd-core | 26.3 (Newton 1.5.1 requires `>=25.5,<26.5`) |
 | JAX | 0.11.0 |
 | PyTorch | 2.12/2.13 nightlies from `https://rocm.nightlies.amd.com/v2/gfx1151/` on the ROCm 7.2.1 host. Not usable inside the 7.14.0 container: the wheel bundles a rocm-sdk whose `libamd_comgr` conflicts with the container's LLVM. |
 | Python | 3.12 (3.11 also tested) |
 | GCC | 13 (13.3.0 tested) |
-
-### Validated environment (full pinned baseline)
-
-Historical record of the original 1.12.0.dev0 port, retained for provenance.
-These pins were recorded in May 2026 against Newton 1.0.0 and do **not**
-describe the current tree, which is Warp 1.17.0.dev4 with Newton 1.4.0 and 104
-examples.
-
-```
-warp-lang             1.12.0.dev0   # editable install of an AMD port branch
-mujoco                3.5.0
-mujoco-warp           3.5.0.2
-newton                1.0.0
-torch                 2.11.0+rocm7.2
-torchvision           0.26.0+rocm7.2
-```
-
-Two known-working warp ports exist for gfx1151. Either one can be the
-editable install behind `warp-lang 1.12.0.dev0` / `1.12.1`:
-
-| Tag / branch | warp version | Notes |
-|---|---|---|
-| `gfx1151-anymal-working` (branch `amd-integration`, commit `5e9aef4c`) | 1.12.0.dev0 | Original 10-patch port; confirmed working ANYmal baseline. |
-| `v1.12.1-amd-gfx1151-uma` (branch `amd-port-v1.12.1`, this repo) | 1.12.1 | UMA hybrid allocator + HIP `graphInstantiate` worker-thread fix + capture-aware allocator, tile-reduce, int64-atomic and pow fixes. |
-
-To check which build is active in a given conda env:
-
-```bash
-pip show warp-lang | grep -E '^(Version|Editable project location)'
-```
 
 ### Kernel selection
 
@@ -226,48 +190,10 @@ The meta-package (`linux-image-oem-24.04d` or whichever your system
 tracks) is the critical one — that is what `unattended-upgrade`
 follows. Confirm the holds with `apt-mark showhold | grep linux`.
 
-### Verifying the environment matches the baseline
-
-This subsection applies to the historical 1.12 baseline above, not to the
-current 1.17.0.dev4 stack: on the current configuration the script exits
-nonzero by design (it checks the 1.12-era kernel and package pins). Run it only to compare
-against that baseline:
-
-```bash
-bash tools/check_gfx1151_baseline.sh           # exit 0 = matches baseline
-bash tools/check_gfx1151_baseline.sh --strict  # also fail on missing kernel pin
-```
-
-It validates kernel + amdgpu srcversion, `rocminfo` reports gfx1151,
-mujoco/mujoco-warp/newton/torch pins, the editable warp install path
-and git state, and that the ROCm/kernel apt holds are in place.
-
-Manual equivalent if you want to spot-check individual pieces:
-
-```bash
-# Kernel + driver
-uname -r                            # expect: 6.17.0-1017-oem
-modinfo amdgpu | awk '/srcversion/' # expect: srcversion: FC7DA320ED9D733CA6A3F1E
-
-# Python stack (don't import warp/newton — it can hang on a broken kernel)
-pip list | grep -iE '^(warp|mujoco|newton|torch)'
-
-# Apt holds
-apt-mark showhold | grep -E 'linux-image-6\.17|linux-image-oem|amdgpu-dkms|hsa-'
-```
-
-If `mujoco` or `mujoco-warp` have drifted (commonly upgraded by a
-transitive dep), restore with:
-
-```bash
-pip install mujoco==3.5.0 mujoco-warp==3.5.0.2 --force-reinstall --no-deps
-```
-
 ## Prerequisites
 
-- ROCm at `/opt/rocm`. Recommended: 7.14.0 (the version all current recorded
-  numbers were produced on — natively or via
-  [the container](#rocm-714-in-a-container)); 7.2.1 and 7.2.4 also validated.
+- ROCm at `/opt/rocm`. Recommended: 7.14.0, natively or via
+  [the container](#rocm-714-in-a-container); 7.2.1 and 7.2.4 also validated.
   See [Choosing a ROCm version](#choosing-a-rocm-version).
   **On 7.14 the runtime libraries moved** to `/opt/rocm/core-<version>/lib`
   with no `ld.so.conf.d` entry installed, so `warp.so` will not load until that
@@ -305,7 +231,7 @@ conda activate warp-amd
 
 # PyTorch built for gfx1151, from AMD's gfx1151 index (the stock
 # download.pytorch.org ROCm wheels do not carry gfx1151). Rolling nightly
-# index: you get the current build; the validated baseline was 2.11.0+rocm7.2.
+# index: you get the current build.
 pip install torch --index-url https://rocm.nightlies.amd.com/v2/gfx1151/
 
 # Build dependencies
@@ -355,7 +281,7 @@ python build_lib.py --no-cuda --rocm-path=/opt/rocm --hip-arch=gfx1151 --quick
 
 Output: `warp/bin/warp.so` and `warp/bin/warp-clang.so` (the CPU kernel
 compiler). The compile takes about 1-2 minutes per architecture at the default
-8 jobs on a modern desktop CPU (measured 72 s for gfx1151); the first-ever
+8 jobs on a modern desktop CPU; the first-ever
 build additionally downloads the LLVM/Clang toolchain dependency.
 
 ## Install
@@ -377,69 +303,33 @@ for those classes see `KNOWN_ISSUES-AMD.md`.
 
 ## Newton integration
 
-Install the pinned MuJoCo stack and Newton 1.4.0 from the gfx1151 branch into
-the same environment:
+Install stock Newton 1.5.1 with its simulation, importer and example extras
+into the same environment; this pulls the matching MuJoCo stack:
 
 ```bash
-pip install mujoco==3.10.0 mujoco-warp==3.10.0.2 "usd-core>=25.5,<26.5"
-git clone -b tomas/gfx1151-fixes git@github.com:tomasthoresen/newton
-pip install -e ./newton --no-deps
+pip install "newton[sim,importers,examples]==1.5.1"
+# resolves to mujoco 3.11.0, mujoco-warp 3.11.0, usd-core 26.3, warp-nn 0.3.x
 ```
 
-Pin rationale: Newton 1.4.0 requires `usd-core>=25.5,<26.5` and is
-incompatible with mujoco-warp 3.10.0.3, which removed `Model.qLD_dof_simple`.
-The `tomas/gfx1151-fixes` branch is the 1.4.0 release plus two commits:
-disable mujoco-warp conditional graphs where the platform does not support
-them, and the matching model-comparison test change.
+Newton depends on `warp-lang`; because this checkout is already installed
+editable (Build and Install above) and satisfies that requirement, `pip` keeps
+it rather than fetching the stock wheel. Check that the port is the Warp that
+gets imported: `python -c "import warp; print(warp.__file__)"` must print a
+path inside this checkout.
 
-**Conditional graph nodes are not supported on HIP** (the API does not exist
-in ROCm's headers). On the branch above, Newton's MuJoCo solver detects this
-and sets `graph_conditional = False` itself, so stock examples run directly:
-
-```bash
-python -m newton.examples robot_anymal_c_walk --viewer null --benchmark --num-frames 1200
-```
-
-With **stock** Newton 1.4.0 instead of the branch, the MuJoCo solver takes the
-conditional-graph path and raises at graph capture
-(`Conditional graph nodes are not supported on HIP/ROCm`). Workaround wrapper
-for that case:
-
-```bash
-python -c "
-import newton.solvers
-_o = newton.solvers.SolverMuJoCo.__init__
-def _p(self, *a, **kw):
-    _o(self, *a, **kw)
-    if hasattr(self, 'mjw_model') and self.mjw_model is not None:
-        self.mjw_model.opt.graph_conditional = False
-newton.solvers.SolverMuJoCo.__init__ = _p
-
-import sys, runpy
-sys.argv = ['newton.examples', 'robot_anymal_c_walk', '--viewer', 'null', '--benchmark', '--num-frames', '1200']
-runpy.run_module('newton.examples', run_name='__main__')
-"
-```
-
-`graph_conditional = False` is also a performance win in eager (non-captured)
-stepping on this port: with the default `True`, mujoco-warp's solver does a
-device-to-host sync per solver iteration to check convergence; with `False` it
-launches a fixed iteration count with no intermediate syncs, which measures
-as a substantial per-step win on gfx1151.
+Conditional graph nodes are emulated on HIP (see `KNOWN_ISSUES-AMD.md`), so
+Newton's MuJoCo solver uses its default graph-conditional path. No wrapper or
+patch is needed.
 
 The `patches/newton/` directory targets Newton 1.0.0 and does not apply to
-1.4.0: the branch above replaces patch 04, and the code patch 03 modified was
-refactored away upstream after 1.0.0.
+1.5.1.
 
 ### Verifying Newton works
 
-Current per-example status on gfx1151 at this branch head: 96 of 104 Newton
-examples run to completion in benchmark mode. The non-runners are all in
-documented platform classes (the graph-replay fault class, several of them
-intermittent; `cloth_franka`; one diffsim timeout; one benchmark-output
-harness quirk) — see `KNOWN_ISSUES-AMD.md`. Quick
-checks with Newton's own benchmark mode, expected sustained rates from the
-recorded sweep:
+Five robot examples (`robot_anymal_c_walk`, `robot_cartpole`, `robot_h1`, `robot_g1`,
+`robot_allegro_hand`) run to completion on every validation pass of this port with stock
+Newton 1.5.1. Examples outside this set are covered by the platform
+classes in `KNOWN_ISSUES-AMD.md`.
 
 Newton's benchmark mode prints its own sustained rate. Run a long frame
 count: on ROCm 7.2.x, graph-replaying examples decay with runtime instead of
@@ -458,8 +348,9 @@ python -m newton.examples cable_twist --viewer null --benchmark --num-frames 120
 
 ### `Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes`
 
-You ran a Newton MuJoCo example without the `graph_conditional = False`
-patch. Use the wrapper in [Newton integration](#newton-integration).
+The imported Warp predates conditional graph emulation on HIP. Build and
+install this branch; `python -c "import warp; print(warp.is_conditional_graph_supported())"`
+prints `True`.
 
 ### `hsa_queue_create` page fault / hang at first kernel launch
 
@@ -575,17 +466,15 @@ works on them. It is **not** safe on managed memory Warp did not allocate that
 way, such as `CudaManagedAllocator` arrays: the hardware atomic silently discards
 updates to host-coherent memory.
 
-The other three change allocation or graph behaviour that the validated baseline
-does not use. `WARP_HIP_GRAPH_FREE_NODES=1` in particular fixes a small number of
-examples and breaks a larger number — see
+The other three change allocation or graph behaviour from the defaults.
+`WARP_HIP_GRAPH_FREE_NODES=1` in particular fixes some examples and breaks
+others — see
 [KNOWN_ISSUES-AMD.md](KNOWN_ISSUES-AMD.md).
 
 ## Limitations
 
 - `libmathdx` is unsupported on HIP builds.
 - Single-architecture compile time: about 1-2 minutes, plus a one-time LLVM/Clang toolchain download on the first build.
-- Newton MuJoCo examples need the `tomas/gfx1151-fixes` Newton branch (or the
-  `graph_conditional = False` wrapper) — see [Newton integration](#newton-integration).
 - Validated only on gfx1151. Other RDNA architectures are buildable but untested.
 
 ## License

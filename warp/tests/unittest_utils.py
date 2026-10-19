@@ -189,6 +189,11 @@ def get_cuda_device_pair_with_mempool_access_support(devices=None):
 
     cuda_devices = [device for device in devices if device.is_cuda]
     for target_device in cuda_devices:
+        # The tests that use this pair allocate under ``ScopedMempool(target, True)`` and expect pooled
+        # memory. HIP keeps regular allocations off the async pool even when the pool is enabled (the pool
+        # serves graph-capture allocations only), so memory-pool access does not apply to such a device.
+        if target_device.mempool_enabled_allocator is not target_device.mempool_allocator:
+            continue
         for peer_device in cuda_devices:
             if target_device != peer_device and wp.is_mempool_access_supported(target_device, peer_device):
                 return target_device, peer_device

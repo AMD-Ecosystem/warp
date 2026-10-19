@@ -169,6 +169,16 @@ static bool acquire_temp_buffer(size_t size, TempBuffer& temp_ret)
         // Use ephemeral graph allocations when the capture is registered
         // and is not a child graph capture (where graph allocations are not allowed).
         bool use_graph_allocs = mempool_supported && capture && capture->id == capture_id;
+#if defined(__HIP_PLATFORM_AMD__)
+        // On HIP, capture-time allocations on the origin stream pause the capture
+        // and use the plain allocator (wp_hip_stable_capture_allocs_enabled), and a
+        // capture cannot be paused while a forked stream is still part of it: a sort
+        // on the main stream between fork and join then fails to get its buffer.
+        // The capture's cached side buffer is allocated outside the capture and owned
+        // by the graph, so it needs no pause.
+        if (wp_hip_stable_capture_allocs_enabled())
+            use_graph_allocs = false;
+#endif
 
         if (use_graph_allocs) {
             // Use ephemeral graph allocs, released after use.
@@ -176,7 +186,12 @@ static bool acquire_temp_buffer(size_t size, TempBuffer& temp_ret)
             temp_ret.size = temp_ret.mem ? size : 0;
             temp_ret.is_ephemeral = true;
         } else {
+#if defined(__HIP_PLATFORM_AMD__)
+            // plain allocation: ROCm's stream-ordered pool aliases blocks still in use (see wp_alloc_device)
+            cached_side_alloc(size, false, stream, capture_id, capture, temp_ret);
+#else
             cached_side_alloc(size, mempool_supported, stream, capture_id, capture, temp_ret);
+#endif
         }
     } else {
         // No capture, use global temp cache.

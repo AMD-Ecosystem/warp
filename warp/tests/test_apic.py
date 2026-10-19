@@ -1718,6 +1718,9 @@ def test_save_load_capture_if_cuda(test, device):
     runs on the rebuilt graph."""
     if not wp.is_conditional_graph_supported():
         test.skipTest("CUDA conditional graph nodes require Toolkit and driver 12.4+")
+    if device.is_hip:
+        # HIP emulates conditionals at capture time only; a loaded graph is rebuilt natively
+        test.skipTest("Rebuilding loaded conditional graphs needs native conditional nodes (not available on HIP)")
 
     n = 4
     out = wp.zeros(n, dtype=float, device=device)

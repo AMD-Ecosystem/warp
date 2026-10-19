@@ -818,8 +818,13 @@ void LinearBVHBuilderGPU::build(
         + sz_total_upper + sz_inv_edges + sz_blk_lowers + sz_blk_uppers + sz_max_depth + sz_sort_temp;
 
     // hipCUB rejects managed memory for temp buffers — pool contains CUB workspace.
-    // Force mempool path even on UMA devices.
-    char* pool = (char*)wp_alloc_device_async(WP_CURRENT_CONTEXT, pool_bytes);
+    // Allocate through wp_alloc_device, which serves plain device memory outside
+    // graph capture and the stream-ordered pool only during capture. Taken
+    // straight from the stream-ordered pool, this block was intermittently
+    // zeroed while the refit kernels ran (about 3 builds in 1000), which cleared
+    // the Karras ranges and left leaves covering the wrong primitives, so
+    // queries missed items. Plain device memory never showed it.
+    char* pool = (char*)wp_alloc_device(WP_CURRENT_CONTEXT, pool_bytes, "(native:bvh)");
 
     char* ptr = pool;
     int* indices = (int*)ptr;
@@ -936,13 +941,13 @@ void LinearBVHBuilderGPU::build(
          bvh.leaf_size, precomputed_depths)
     );
 
-    // CLEANUP – single free. No explicit synchronization: wp_free_device_async
-    // is stream-ordered (it releases the pool only after the preceding build
-    // kernels on this stream complete), so the sync is redundant. It also must
-    // not run here because a device synchronization is illegal during CUDA/HIP
-    // graph capture and would invalidate the capture (e.g. bvh.rebuild() inside
-    // wp.ScopedCapture).
-    wp_free_device_async(WP_CURRENT_CONTEXT, pool);
+    // CLEANUP – single free, returned to whichever allocator produced it. No
+    // explicit synchronization: a pool block (graph capture) is freed
+    // stream-ordered, and a plain block is freed with hipFree, which waits for
+    // the device itself. A device synchronization must not run here because it
+    // is illegal during CUDA/HIP graph capture and would invalidate the capture
+    // (e.g. bvh.rebuild() inside wp.ScopedCapture).
+    wp_free_device(WP_CURRENT_CONTEXT, pool);
 }
 #else
 LinearBVHBuilderGPU::LinearBVHBuilderGPU()

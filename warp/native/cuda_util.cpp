@@ -18,6 +18,7 @@
 #endif
 #endif  // !__HIP_PLATFORM_AMD__
 
+#include <cstdlib>
 #include <mutex>
 #include <queue>
 #include <unordered_set>
@@ -254,6 +255,11 @@ static bool get_driver_entry_point(const char* name, int version, void** pfn)
 bool init_cuda_driver()
 {
 #if defined(__HIP_PLATFORM_AMD__)
+    // ROCm gives a kernel whose scratch exceeds HSA_SCRATCH_SINGLE_LIMIT a new scratch allocation on every dispatch,
+    // which delays each of its dispatches. Raise the default before the runtime reads it, unless the user set a value.
+#if !defined(_WIN32)
+    setenv("HSA_SCRATCH_SINGLE_LIMIT", "1073741824", 0);
+#endif
     hipError_t res = hipInit(0);
     if (res != hipSuccess) {
         fprintf(stderr, "Warp CUDA warning: Failed to initialize HIP runtime\n");

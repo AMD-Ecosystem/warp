@@ -228,7 +228,17 @@ def from_torch(
         sync = t.is_cuda and warp.device_from_torch(t.device).is_hip
     if sync and t.is_cuda:
         import torch  # noqa: PLC0415
-        torch.cuda.current_stream(t.device).synchronize()
+
+        # A blocking host sync is illegal while a CUDA/HIP graph capture is active:
+        # hipStreamSynchronize returns hipErrorStreamCaptureUnsupported, which
+        # invalidates the capture, so hipStreamEndCapture then fails with
+        # hipErrorStreamCaptureInvalidated. It is also unnecessary there -- nothing
+        # has executed yet at capture time, the recorded work is ordered by the
+        # graph, and a caller capturing a Warp launch must already be launching it
+        # on the capture stream (any other stream forks the capture and fails as
+        # hipErrorStreamCaptureUnjoined).
+        if not torch.cuda.is_current_stream_capturing():
+            torch.cuda.current_stream(t.device).synchronize()
 
     if dtype is None:
         dtype = dtype_from_torch(t.dtype)
