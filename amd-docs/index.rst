@@ -22,11 +22,8 @@ Warp on ROCm adds HIP support so that Warp kernels run on AMD Instinct MI325X,
 MI350X, and MI355X GPUs. Warp kernels are differentiable and can be used
 as part of machine-learning pipelines with frameworks such as PyTorch.
 
-.. note::
-
-  The ROCm port of Warp is under active development, and some features are not yet available.
-  For the most up-to-date feature support matrix, refer to the ``README`` in the
-  `https://github.com/AMD-Ecosystem/warp <https://github.com/AMD-Ecosystem/warp>`__ repository.
+Warp is part of the `AMD Simulation toolkit
+<https://rocm.docs.amd.com/projects/rocm-simulation/en/docs-26.10/>`__.
 
 The Warp public repository is located at `https://github.com/AMD-Ecosystem/warp <https://github.com/AMD-Ecosystem/warp>`__.
 
