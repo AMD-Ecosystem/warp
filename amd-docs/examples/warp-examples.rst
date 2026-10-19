@@ -67,7 +67,7 @@ addressed through the ``cuda:N`` device names.
 Run the built-in examples
 ====================================================================
 
-The `warp/examples <https://github.com/AMD-Ecosystem/warp/tree/amd-integration/warp/examples>`__
+The `warp/examples <https://github.com/AMD-Ecosystem/warp/tree/release/v1.13.0/warp/examples>`__
 directory contains scripts, grouped into subdirectories, that show how to
 implement various simulation methods using the Warp API. Most examples write
 USD files with time-sampled animations to the current working directory.

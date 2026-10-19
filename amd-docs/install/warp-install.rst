@@ -11,7 +11,7 @@ Warp on ROCm installation
 System requirements
 ====================================================================
 
-To use Warp `v1.13.0 <https://github.com/AMD-Ecosystem/warp/tree/v1.13.0>`__, you need the following prerequisites:
+To use Warp `v1.13.0 <https://github.com/AMD-Ecosystem/warp/tree/release/v1.13.0>`__, you need the following prerequisites:
 
 - **ROCm version:** `7.2.0 <https://rocm.docs.amd.com/en/docs-7.2.0/>`__ (MI325X), `10.1.0 <https://rocm.docs.amd.com/en/docs-10.1.0/>`__ (MI350X, MI355X)
 - **Operating system:** Ubuntu 24.04
@@ -31,7 +31,7 @@ Build Warp from source
 
    .. code-block:: bash
 
-      git clone -b amd-integration https://github.com/AMD-Ecosystem/warp.git
+      git clone -b release/v1.13.0 https://github.com/AMD-Ecosystem/warp.git
       cd warp
 
 2. Build the Docker image for your GPU architecture:
