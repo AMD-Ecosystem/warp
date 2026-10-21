@@ -942,6 +942,40 @@ def test_cuda_graph_topo_alloc_side_stream_joined(test, device):
         assert _depends_on(node3, (node1, node2))
 
 
+def test_graph_alloc_on_main_with_unjoined_fork(test, device):
+    """Allocating on the capture's main stream while a forked stream still has unjoined work."""
+
+    with wp.ScopedDevice(device):
+        main_stream = wp.get_stream()
+        side_stream = wp.Stream()
+        n = 8
+        a = wp.zeros(n, dtype=float)
+        b = wp.zeros(n, dtype=float)
+        with wp.ScopedCapture(force_module_load=False) as capture:
+            wp.launch(write_tid_kernel, dim=n, inputs=[a])
+            # fork: the side stream joins the capture and keeps unjoined work
+            side_stream.wait_stream(main_stream)
+            wp.launch(scale_kernel, dim=n, inputs=[a, b, 2.0], stream=side_stream)
+            # an allocation on the main stream while the fork is live
+            c = wp.empty(n, dtype=float)
+            wp.launch(scale_kernel, dim=n, inputs=[a, c, 3.0])
+            # more work on the fork after the allocation, still unjoined; it reads only
+            # pre-fork data, since nothing orders it after the main stream's work above
+            wp.launch(scale_kernel, dim=n, inputs=[a, b, 4.0], stream=side_stream)
+            # join back before the capture ends
+            main_stream.wait_stream(side_stream)
+            d = wp.empty(n, dtype=float)
+            wp.launch(add_kernel, dim=n, inputs=[b, c, d])
+
+        for _ in range(2):
+            wp.capture_launch(capture.graph)
+            wp.synchronize_device()
+            expected = np.arange(n, dtype=np.float32)
+            assert_np_equal(b.numpy(), 4.0 * expected)
+            assert_np_equal(c.numpy(), 3.0 * expected)
+            assert_np_equal(d.numpy(), 7.0 * expected)
+
+
 def test_cuda_graph_topo_alloc_fork(test, device):
     """Verify that a forked side stream inherits allocs from before the fork, but not from after the fork."""
 
@@ -1428,6 +1462,12 @@ add_function_test(
     "test_graph_single_kernel",
     test_graph_single_kernel,
     devices=devices_with_cuda_graph_module_load,
+)
+add_function_test(
+    TestGraph,
+    "test_graph_alloc_on_main_with_unjoined_fork",
+    test_graph_alloc_on_main_with_unjoined_fork,
+    devices=[d for d in devices_with_graph_capture_allocation_and_cuda_graph_module_load if d.is_cuda],
 )
 add_function_test(
     TestGraph,

@@ -1140,16 +1140,38 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
                 stable_capture = stable_capture_iter->second;
         }
         // Only intercept allocations made on the capture's origin stream:
-        // pausing requires EndCapture on the origin, which is invalid while a
-        // forked stream's capture frontier is active, and a failed pause
-        // leaves the stream wedged in capture state. Forked-stream
-        // allocations keep the pooled path (alloc nodes), which multi-stream
-        // captures used before this opt-in existed.
+        // pausing requires EndCapture on the origin, and ending the capture
+        // from a forked stream is invalid. Forked-stream allocations keep the
+        // pooled path (alloc nodes), which multi-stream captures used before
+        // this opt-in existed.
         if (stable_capture && static_cast<CUstream>(stream) == stable_capture->stream) {
-            // Pause/resume must run on the stream that began the capture;
-            // ending the capture from a forked stream is invalid. The plain
-            // allocation itself is not stream-bound.
+            // Pause/resume must run on the stream that began the capture. The
+            // plain allocation itself is not stream-bound.
             CUstream origin_stream = stable_capture->stream;
+
+            // HIP refuses to end a capture while a stream that an event wait
+            // pulled into it still has unjoined work (hipErrorStreamCaptureUnjoined),
+            // and a failed pause leaves the origin stream in capture state for
+            // the rest of the process. Join every live fork into the origin
+            // before the pause and fork it again after the resume, so its
+            // later work stays in the capture; the added edges only order the
+            // fork's work around the allocation. The events live until the
+            // capture ends.
+            std::vector<CUstream> live_forks;
+            for (CUstream forked : stable_capture->forked_streams) {
+                if (forked != origin_stream && wp_cuda_stream_is_capturing(forked))
+                    live_forks.push_back(forked);
+            }
+            for (CUstream forked : live_forks) {
+                CUevent join_event = NULL;
+                if (!check_cu(cuEventCreate_f(&join_event, CU_EVENT_DISABLE_TIMING)))
+                    return NULL;
+                stable_capture->pause_events.push_back(join_event);
+                if (!check_cu(cuEventRecordWithFlags_f(join_event, forked, CU_EVENT_RECORD_DEFAULT))
+                    || !check_cu(cuStreamWaitEvent_f(origin_stream, join_event, CU_EVENT_WAIT_DEFAULT)))
+                    return NULL;
+            }
+
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(context, origin_stream, &graph))
                 return NULL;
@@ -1157,6 +1179,14 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
             if (!wp_cuda_graph_resume_capture(context, origin_stream, graph)) {
                 wp_free_device_default(context, stable_ptr);
                 return NULL;
+            }
+            for (CUstream forked : live_forks) {
+                CUevent fork_event = NULL;
+                if (!check_cu(cuEventCreate_f(&fork_event, CU_EVENT_DISABLE_TIMING)))
+                    break;
+                stable_capture->pause_events.push_back(fork_event);
+                check_cu(cuEventRecordWithFlags_f(fork_event, origin_stream, CU_EVENT_RECORD_DEFAULT));
+                check_cu(cuStreamWaitEvent_f(forked, fork_event, CU_EVENT_WAIT_DEFAULT));
             }
             if (stable_ptr) {
                 GraphAllocInfo alloc_info;
@@ -4146,6 +4176,7 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     uint64_t capture_id = capture->id;
     std::vector<FreeInfo> tmp_allocs = capture->tmp_allocs;
     std::vector<CUstream> forked_streams = capture->forked_streams;
+    std::vector<CUevent> pause_events = capture->pause_events;
 
     // clear capture info
     stream_info->capture = NULL;
@@ -4155,7 +4186,7 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     // HIP counts a forked stream as unjoined until the capture stream waits on an event recorded on
     // it, whatever the dependency set below says, and hipStreamEndCapture then fails with
     // hipErrorStreamCaptureUnjoined. Join every stream that an event wait pulled into this capture.
-    std::vector<CUevent> join_events;
+    std::vector<CUevent> join_events = pause_events;  // the stable-allocation pauses' events go with the capture
 #if defined(__HIP_PLATFORM_AMD__)
     for (CUstream forked : forked_streams) {
         if (!wp_cuda_stream_is_capturing(forked))
