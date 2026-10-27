@@ -43,6 +43,7 @@ API
    load_module_max_workers
    log_level
    max_unroll
+   mempool_release_threshold
    mode
    optimization_level
    print_launches

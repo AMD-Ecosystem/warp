@@ -8883,6 +8883,18 @@ class Runtime:
                 # give them reasonable aliases (e.g., "cuda:0.0", "cuda:0.1")
                 self.cuda_custom_context_count = [0] * cuda_device_count
 
+                # apply the configured memory pool release threshold
+                if warp.config.mempool_release_threshold is not None:
+                    for device in self.cuda_primary_devices:
+                        if device.is_mempool_supported:
+                            threshold = warp.config.mempool_release_threshold
+                            if 0 < threshold <= 1:
+                                threshold = int(threshold * device.total_memory)
+                            if not self.core.wp_cuda_device_set_mempool_release_threshold(
+                                device.ordinal, int(threshold)
+                            ):
+                                log_warning(f"Failed to set the memory pool release threshold for device {device}")
+
         # set default device
         if cuda_device_count > 0:
             # stick with the current cuda context, if one is bound

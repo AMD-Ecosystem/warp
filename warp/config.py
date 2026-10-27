@@ -337,6 +337,44 @@ importing Warp to disable automatic memory pool initialization (e.g. when
 sharing the process with a framework that owns its own GPU allocator).
 """
 
+
+def _mempool_release_threshold_from_env() -> int | float | None:
+    value = _os.environ.get("WARP_MEMPOOL_RELEASE_THRESHOLD", "").strip()
+    if not value:
+        return None
+    try:
+        threshold = int(value)  # integers stay exact up to 2**64 - 1, which a double cannot carry
+    except ValueError:
+        try:
+            threshold = float(value)
+        except ValueError:
+            threshold = -1.0
+    if not (0 <= threshold <= 2**64 - 1) or (threshold > 1 and threshold != int(threshold)):
+        raise ValueError(
+            "WARP_MEMPOOL_RELEASE_THRESHOLD must be a fraction from 0 to 1 or a whole number of bytes up to "
+            f"2**64 - 1, got {value!r}"
+        )
+    return threshold if 0.0 < threshold <= 1.0 else int(threshold)
+
+
+mempool_release_threshold: int | float | None = _mempool_release_threshold_from_env()
+"""Memory pool release threshold applied to every CUDA device at initialization.
+
+The threshold is how much freed memory a device's memory pool holds before it
+returns memory to the driver at the next stream, event or device
+synchronization. ``None`` keeps the driver default of zero, which returns every
+freed block at the next synchronization; a workload that allocates and frees
+temporaries on every step and synchronizes in between then pays that release on
+every synchronization. Values between 0 and 1 are a fraction of the device's
+memory, larger values are bytes, as for
+:func:`warp.set_mempool_release_threshold`, which changes one device at any
+time.
+
+Read once from the ``WARP_MEMPOOL_RELEASE_THRESHOLD`` environment variable at
+import, for example ``0.5``; a value that is neither a fraction from 0 to 1 nor a
+whole number of bytes up to 2**64 - 1 is rejected at import. Applies to every device that supports memory pools.
+"""
+
 track_memory: bool = False
 """Enable tracking of memory allocations at initialization.
 

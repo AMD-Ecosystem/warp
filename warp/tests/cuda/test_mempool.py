@@ -55,6 +55,40 @@ def test_mempool_release_threshold(test, device):
     test.assertEqual(wp.get_mempool_release_threshold(device), saved_threshold)
 
 
+def test_mempool_release_threshold_config(test, device):
+    """WARP_MEMPOOL_RELEASE_THRESHOLD sets every device's release threshold at initialization."""
+    device = wp.get_device(device)
+    cases = {"0.25": int(0.25 * device.total_memory), "1048576": 1048576, "0": 0, "18446744073709551615": 2**64 - 1}
+    for value, expected in cases.items():
+        source = f"import warp as wp\nprint(wp.get_mempool_release_threshold(wp.get_device('{device.alias}')))\n"
+        result = run_python_subprocess(source, env_updates={"WARP_MEMPOOL_RELEASE_THRESHOLD": value})
+        test.assertEqual(result.returncode, 0, result.stderr)
+        test.assertEqual(
+            int(result.stdout.strip().splitlines()[-1]), expected, f"WARP_MEMPOOL_RELEASE_THRESHOLD={value}"
+        )
+
+    # unset: nothing is applied and the driver default stays
+    source = (
+        "import os\n"
+        "os.environ.pop('WARP_MEMPOOL_RELEASE_THRESHOLD', None)\n"
+        "import warp as wp\n"
+        "print(wp.config.mempool_release_threshold)\n"
+    )
+    result = run_python_subprocess(source, hide_gpu=True)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    test.assertEqual(result.stdout.strip().splitlines()[-1], "None")
+
+    # values the API would clamp or that cannot reach the driver are rejected at import, naming the variable
+    for value in ("-1", "nan", "inf", "1e30", "18446744073709551616", "1.5", "abc"):
+        result = run_python_subprocess(
+            "import warp.config\n", hide_gpu=True, env_updates={"WARP_MEMPOOL_RELEASE_THRESHOLD": value}
+        )
+        test.assertNotEqual(result.returncode, 0, f"WARP_MEMPOOL_RELEASE_THRESHOLD={value} was accepted")
+        test.assertIn(
+            "ValueError: WARP_MEMPOOL_RELEASE_THRESHOLD", result.stderr, f"WARP_MEMPOOL_RELEASE_THRESHOLD={value}"
+        )
+
+
 def test_mempool_usage_queries(test, device):
     """Check API to query mempool memory usage."""
 
@@ -632,6 +666,12 @@ devices_without_mempools = [d for d in get_test_devices() if not d.is_mempool_su
 # test devices with mempool support
 add_function_test(
     TestMempool, "test_mempool_release_threshold", test_mempool_release_threshold, devices=cuda_devices_with_mempools
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_release_threshold_config",
+    test_mempool_release_threshold_config,
+    devices=cuda_devices_with_mempools,
 )
 add_function_test(
     TestMempool, "test_mempool_usage_queries", test_mempool_usage_queries, devices=cuda_devices_with_mempools
