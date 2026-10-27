@@ -24,6 +24,15 @@
 #include <cudaTypedefs.h>
 #endif
 
+// Checked multiplication for byte spans derived from serialized records.
+inline bool apic_mul_check(uint64_t a, uint64_t b, uint64_t* out)
+{
+    if (b != 0 && a > (SIZE_MAX / b))
+        return false;
+    *out = a * b;
+    return true;
+}
+
 // Byte size of a scalar APICType value: 4 for the 32-bit members, 8 for the
 // 64-bit members, 0 for an unrecognized/unset value. Shared by the array_scan
 // and radix/segmented sort capture and replay paths (apic.cpp and warp.cpp).
@@ -102,7 +111,7 @@ constexpr size_t launch_bounds_align8(size_t offset) { return (offset + 7) & ~si
 
 constexpr size_t launch_bounds_size_offset(int ndim)
 {
-    return launch_bounds_align8(static_cast<size_t>(ndim) * sizeof(int));
+    return launch_bounds_align8(static_cast<size_t>(ndim) * sizeof(uint32_t));
 }
 
 constexpr size_t launch_bounds_coord_mult_offset(int ndim) { return launch_bounds_size_offset(ndim) + sizeof(size_t); }
@@ -293,7 +302,7 @@ void apic_record_kernel_launch(
     const char* kernel_key,
     const char* module_hash,
     int is_forward,
-    const int* shape,
+    const uint32_t* shape,
     int ndim,
     uint64_t size,
     int max_blocks,
@@ -407,8 +416,9 @@ void apic_record_runlength_encode(
     uint32_t value_count
 );
 
-// Records a wp_bsr_matrix_from_triplets_host() call. Optional regions
-// (tpl_nnz, tpl_values, bsr_nnz) carry region_id == -1 when absent.
+// Records a wp_bsr_matrix_from_triplets_host/device() call. Optional regions
+// (tpl_nnz, tpl_values) carry region_id == -1 when absent. The bsr_nnz
+// arguments preserve the format 13-15 record layout; new calls pass -1 and 0.
 void apic_record_bsr_from_triplets(
     APICState* state,
     int32_t block_size,
@@ -558,7 +568,13 @@ struct APICGraph {
 // Walk the operation byte stream once and verify that every record header,
 // variable-length payload, and op_type is within bounds. Prints a diagnostic
 // and returns false on first inconsistency. Defined in apic.cpp.
-bool apic_validate_operation_stream(const uint8_t* data, size_t size, uint32_t operation_count, uint32_t depth = 0);
+bool apic_validate_operation_stream(
+    const uint8_t* data,
+    size_t size,
+    uint32_t operation_count,
+    uint32_t depth = 0,
+    uint32_t format_version = APIC_FORMAT_VERSION
+);
 
 // ============================================================================
 // .wrp file reading helpers (pure C++, defined in apic.cpp)

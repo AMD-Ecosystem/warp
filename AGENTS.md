@@ -10,7 +10,6 @@
 - Create a feature branch before committing—never commit directly to `main`. Use `username/short-description`.
 - Always use imperative mood in commit messages ("Fix X", not "Fixed X"), ~50 char subject, reference issues as `(GH-XXX)`. Body explains *why*, not what.
 - Always use `git commit --signoff` (or `-s`) to add a `Signed-off-by` line (DCO).
-- After rebasing, diff `CHANGELOG.md` against the target branch to catch duplicate entries or other issues from clean but incorrect merges.
 - CI lives in both GitLab (`.gitlab-ci.yml`) and GitHub (`.github/workflows/`). Lightweight jobs (linting, docs, packaging) may exist in both—keep them in sync. GPU-dependent jobs differ by platform.
 - Pin GitHub Actions to commit hashes, not tags, and add a comment with the corresponding tag. Good: `uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v4`. Bad: `uses: astral-sh/setup-uv@v4`. The internal `nv-gha-runners/setup-proxy-cache` action is exempt and may use `@main`.
 - Let uv infer Python version from `.python-version`. Use `uv python install` without arguments.
@@ -28,6 +27,7 @@ Build docs (~1 min) with `uv run --extra docs build_docs.py 2>&1 | tee /tmp/buil
 
 - If opening a pull request on GitHub, use the template in `.github/PULL_REQUEST_TEMPLATE.md`.
 - If opening a merge request on GitLab, use the template in `.gitlab/merge_request_templates/Default.md`. If a GitHub issue exists for the change, end the MR title with a reference (e.g., `[GH-123]`).
+- Never set, change, or clear assignees or reviewers on GitHub pull requests or GitLab merge requests unless explicitly asked; leave values added by users, automation, or project defaults untouched.
 - Follow `changelog/README.md`: add a fragment when a change affects users,
   and do not edit `CHANGELOG.md` directly.
 - For complex features, consider adding a design doc in `design/`. See `design/README.md` for guidelines.

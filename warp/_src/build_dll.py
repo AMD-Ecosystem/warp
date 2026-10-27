@@ -471,6 +471,10 @@ def _get_architectures_cu12(
     gencode_opts = []
     clang_arch_flags = []
 
+    # Clang 24 rejects targets below sm_60 because it lowers generic CUDA atomics with system scope.
+    # See https://github.com/llvm/llvm-project/issues/224420.
+    # Keep sm_52 and sm_53 in the nvcc flags because production builds still support Maxwell.
+
     if quick_build:
         gencode_opts = ["-gencode=arch=compute_75,code=compute_75"]
         clang_arch_flags = ["--cuda-gpu-arch=sm_75"]
@@ -493,7 +497,6 @@ def _get_architectures_cu12(
             )
             clang_arch_flags.extend(
                 [
-                    "--cuda-gpu-arch=sm_52",
                     "--cuda-gpu-arch=sm_60",
                     "--cuda-gpu-arch=sm_61",
                     "--cuda-gpu-arch=sm_70",
@@ -538,7 +541,6 @@ def _get_architectures_cu12(
             clang_arch_flags.extend(
                 [
                     "--cuda-gpu-arch=sm_87",
-                    "--cuda-gpu-arch=sm_53",
                     "--cuda-gpu-arch=sm_62",
                     "--cuda-gpu-arch=sm_72",
                 ]
@@ -678,6 +680,11 @@ def build_dll_for_arch(
             raise Exception(
                 f"CUDA Toolkit version {MIN_CTK_VERSION[0]}.{MIN_CTK_VERSION[1]}+ is required (found {ctk_version[0]}.{ctk_version[1]} in {cuda_home})"
             )
+        if sys.platform == "win32" and arch == "aarch64" and ctk_version < (13, 4):
+            raise RuntimeError(
+                f"CUDA Toolkit 13.4+ is required for Windows ARM64 builds "
+                f"(found {ctk_version[0]}.{ctk_version[1]} in {cuda_home})"
+            )
 
         # Get architecture flags based on CUDA version
         if ctk_version >= (13, 0):
@@ -687,6 +694,7 @@ def build_dll_for_arch(
 
         nvcc_opts = [
             *gencode_opts,
+            "-DWP_BUILD_DLL",
             "-t0",  # multithreaded compilation
             "--extended-lambda",
             "-diag-suppress=221",  # suppress "floating-point value does not fit" warning from INFINITY macro in CUDA headers
@@ -695,11 +703,15 @@ def build_dll_for_arch(
         if sys.platform == "win32":
             # CCCL headers require MSVC's standard conforming preprocessor.
             nvcc_opts.append("-Xcompiler /Zc:preprocessor")
+            if arch == "aarch64":
+                nvcc_opts.append("-target-dir arm64")
+                nvcc_opts.append(f'--compiler-bindir="{os.path.dirname(args.host_compiler)}"')
 
         # Clang options
         clang_opts = [
             *clang_arch_flags,
             "-std=c++17",
+            "-DWP_BUILD_DLL",
             "-xcuda",
             f'--cuda-path="{cuda_home}"',
             "-D_GLIBCXX_USE_CXX11_ABI=0",
@@ -735,6 +747,8 @@ def build_dll_for_arch(
         mathdx_enabled = "WP_ENABLE_MATHDX=0"
 
     if os.name == "nt":
+        cuda_lib_arch = "arm64" if arch == "aarch64" else "x64"
+
         if args.host_compiler:
             host_linker = os.path.join(os.path.dirname(args.host_compiler), "link.exe")
         else:
@@ -756,7 +770,7 @@ def build_dll_for_arch(
             iter_dbg = "_ITERATOR_DEBUG_LEVEL=2"
             debug = "_DEBUG"
 
-        cpp_flags = f'/nologo /std:c++17 /GR- /EHsc {runtime} /D "{debug}" /D "{cuda_enabled}" /D "{mathdx_enabled}" /D "{cuda_compat_enabled}" /D "{iter_dbg}" /I"{native_dir}" {includes} '
+        cpp_flags = f'/nologo /std:c++17 /GR- /EHsc {runtime} /D "WP_BUILD_DLL" /D "{debug}" /D "{cuda_enabled}" /D "{mathdx_enabled}" /D "{cuda_compat_enabled}" /D "{iter_dbg}" /I"{native_dir}" {includes} '
 
         if args.mode == "debug":
             cpp_flags += "/FS /Zi /Od /D WP_ENABLE_DEBUG=1"
@@ -824,19 +838,21 @@ def build_dll_for_arch(
 
                 if args.use_dynamic_cuda:
                     linkopts.append(
-                        f'cudart.lib nvrtc.lib nvptxcompiler_static.lib ws2_32.lib user32.lib /LIBPATH:"{cuda_home}/lib/x64"'
+                        f'cudart.lib nvrtc.lib nvptxcompiler_static.lib ws2_32.lib user32.lib /LIBPATH:"{cuda_home}/lib/{cuda_lib_arch}"'
                     )
                 else:
                     linkopts.append(
-                        f'cudart_static.lib nvrtc_static.lib nvrtc-builtins_static.lib nvptxcompiler_static.lib ws2_32.lib user32.lib ntdll.lib /LIBPATH:"{cuda_home}/lib/x64"'
+                        f'cudart_static.lib nvrtc_static.lib nvrtc-builtins_static.lib nvptxcompiler_static.lib ws2_32.lib user32.lib ntdll.lib /LIBPATH:"{cuda_home}/lib/{cuda_lib_arch}"'
                     )
 
                 if args.libmathdx_path:
                     if args.use_dynamic_cuda:
-                        linkopts.append(f'nvJitLink.lib /LIBPATH:"{args.libmathdx_path}/lib/x64" mathdx.lib')
+                        linkopts.append(
+                            f'nvJitLink.lib /LIBPATH:"{args.libmathdx_path}/lib/{cuda_lib_arch}" mathdx.lib'
+                        )
                     else:
                         linkopts.append(
-                            f'nvJitLink_static.lib /LIBPATH:"{args.libmathdx_path}/lib/x64" mathdx_static.lib'
+                            f'nvJitLink_static.lib /LIBPATH:"{args.libmathdx_path}/lib/{cuda_lib_arch}" mathdx_static.lib'
                         )
 
             if args.jobs <= 1:
@@ -857,7 +873,8 @@ def build_dll_for_arch(
                 print(f"build took {elapsed:.2f} ms ({args.jobs:d} workers)")
 
         with ScopedTimer("link", active=args.verbose):
-            link_cmd = f'"{host_linker}" {" ".join(linkopts + libs)} /out:"{dll_path}"'
+            implib_path = os.path.splitext(dll_path)[0] + ".lib"
+            link_cmd = f'"{host_linker}" {" ".join(linkopts + libs)} /out:"{dll_path}" /IMPLIB:"{implib_path}"'
             run_cmd(link_cmd)
 
     else:
@@ -888,7 +905,7 @@ def build_dll_for_arch(
             else:
                 version = ""
 
-        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
+        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -DWP_BUILD_DLL -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
         if hip_enabled:
             cpp_flags += " -D__HIP_PLATFORM_AMD__ "
 
@@ -1027,9 +1044,9 @@ def build_dll_for_arch(
 
                 if args.libmathdx_path and not hip_enabled:
                     if args.use_dynamic_cuda:
-                        ld_inputs.append(f"-lnvJitLink -L{args.libmathdx_path}/lib -lmathdx")
+                        ld_inputs.append(f"-lnvJitLink -L{quote(args.libmathdx_path + '/lib')} -lmathdx")
                     else:
-                        ld_inputs.append(f"-lnvJitLink_static -L{args.libmathdx_path}/lib -lmathdx_static")
+                        ld_inputs.append(f"-lnvJitLink_static -L{quote(args.libmathdx_path + '/lib')} -lmathdx_static")
 
             if args.jobs <= 1:
                 with ScopedTimer("build_cuda", active=args.verbose):
@@ -1064,7 +1081,9 @@ def build_dll_for_arch(
             # C++ hosts even on distros that flip the default to -z now via RELRO.
             opt_undefined = "-Wl,-z,lazy"
             opt_exclude_libs = "-Wl,--exclude-libs,ALL"
-            opt_static_runtime = f"-static-libstdc++ -static-libgcc -Wl,--version-script={native_dir}/warp.map"
+            opt_static_runtime = (
+                f"-static-libstdc++ -static-libgcc -Wl,--version-script={quote(native_dir + '/warp.map')}"
+            )
 
         sanitize_ld = f" -fsanitize={args.sanitize}" if args.sanitize else ""
 
@@ -1109,11 +1128,12 @@ def build_dll_for_arch(
             # Strip symbols to reduce the binary size
             if mode == "release":
                 if sys.platform == "darwin":
-                    run_cmd(f"strip -x {dll_path}")  # Strip all local symbols
+                    run_cmd(f"strip -x {quote(dll_path)}")  # Strip all local symbols
                 else:  # Linux
                     # Strip symbols not needed for dynamic linking, except those needed to support debugging JIT-compiled code
                     run_cmd(
-                        f"strip --strip-unneeded --keep-symbol=__jit_debug_register_code --keep-symbol=__jit_debug_descriptor {dll_path}"
+                        f"strip --strip-unneeded --keep-symbol=__jit_debug_register_code "
+                        f"--keep-symbol=__jit_debug_descriptor {quote(dll_path)}"
                     )
 
 

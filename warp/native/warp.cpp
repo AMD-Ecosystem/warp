@@ -258,13 +258,13 @@ void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj_args, 
 
     // Record to byte stream (for APIC serialization) if capturing
     if (recording_state && !apic_info) {
-        fprintf(stderr, "APIC: Error - kernel launch during capture without APICLaunchInfo\n");
+        fprintf(stderr, "Warp APIC error: kernel launch during capture without APICLaunchInfo\n");
         return;
     }
     if (recording_state && apic_info) {
         // Extract shape from launch_bounds_t<N>. kernel_dim gives the exact
         // dimensionality expected by the generated kernel.
-        int shape[APIC_LAUNCH_MAX_DIMS] = {};
+        uint32_t shape[APIC_LAUNCH_MAX_DIMS] = {};
         int ndim = apic_info->kernel_dim;
         if (ndim < 1)
             ndim = 1;
@@ -273,7 +273,7 @@ void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj_args, 
 
         uint64_t launch_size = 0;
         if (bounds && ndim > 0) {
-            const int* bounds_shape = static_cast<const int*>(bounds);
+            const uint32_t* bounds_shape = static_cast<const uint32_t*>(bounds);
             for (int d = 0; d < ndim; d++)
                 shape[d] = bounds_shape[d];
 
@@ -1284,25 +1284,29 @@ WP_API int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_di
 WP_API void wp_cuda_set_context_restore_policy(bool always_restore) { }
 WP_API int wp_cuda_get_context_restore_policy() { return false; }
 
-WP_API void wp_array_scan_int_device(
+WP_API bool wp_array_scan_int_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
+    return false;
 }
-WP_API void wp_array_scan_int64_device(
+WP_API bool wp_array_scan_int64_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
+    return false;
 }
-WP_API void wp_array_scan_float_device(
+WP_API bool wp_array_scan_float_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
+    return false;
 }
-WP_API void wp_array_scan_double_device(
+WP_API bool wp_array_scan_double_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
+    return false;
 }
 
 WP_API bool wp_cuda_graphics_map(void* context, void* resource) { return false; }

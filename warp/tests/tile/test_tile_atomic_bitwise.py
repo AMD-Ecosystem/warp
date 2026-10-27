@@ -385,6 +385,19 @@ add_function_test(
     devices=devices,
 )
 
+for name, func in (
+    ("test_tile_atomic_bitwise_scalar", test_tile_atomic_bitwise_scalar),
+    ("test_tile_atomic_bitwise_vector", test_tile_atomic_bitwise_vector),
+    ("test_tile_atomic_bitwise_matrix", test_tile_atomic_bitwise_matrix),
+):
+    add_function_test(
+        TestTileAtomicBitwise,
+        f"{name}_cpu_blocks",
+        func,
+        devices=get_cpu_test_devices(),
+        enable_cpu_blocks=True,
+    )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

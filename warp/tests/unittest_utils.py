@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import ctypes
 import ctypes.util
 import functools
@@ -9,11 +10,13 @@ import importlib.util
 import io
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 
 
 def _normalize_direct_test_sys_path():
@@ -43,6 +46,23 @@ import warp as wp  # noqa: E402
 
 pxr = importlib.util.find_spec("pxr")
 USD_AVAILABLE = pxr is not None
+
+
+@contextlib.contextmanager
+def suppress_native_error_output():
+    """Suppress native ``stderr`` output while preserving the recorded diagnostic.
+
+    Native output originates in C, so :func:`contextlib.redirect_stderr` cannot
+    intercept it. The diagnostic remains available through
+    :meth:`warp._src.context.Runtime.get_error_string`.
+    """
+    core = wp._src.context.runtime.core
+    saved_error_output_enabled = core.wp_is_error_output_enabled()
+    try:
+        core.wp_set_error_output_enabled(False)
+        yield
+    finally:
+        core.wp_set_error_output_enabled(saved_error_output_enabled)
 
 
 def make_isolated_kernel(func, **kwargs):
@@ -83,7 +103,7 @@ except OSError:
 
 
 def get_selected_cuda_test_devices(mode: str | None = None):
-    """Returns a list of CUDA devices according the selected ``mode`` behavior.
+    """Return CUDA devices according to the selected ``mode`` behavior.
 
     If ``mode`` is ``None``, the ``global test_mode`` value will be used and
     this list will be a subset of the devices returned from ``get_test_devices()``.
@@ -124,8 +144,15 @@ def get_selected_cuda_test_devices(mode: str | None = None):
     return selected_cuda_devices
 
 
+def get_cpu_test_devices():
+    """Return a list containing the CPU test device when available."""
+    if wp.is_cpu_available():
+        return [wp.get_device("cpu")]
+    return []
+
+
 def get_test_devices(mode: str | None = None):
-    """Returns a list of devices based on the mode selected.
+    """Return devices based on the selected mode.
 
     Args:
         mode: The testing mode to specify which devices to include. If not provided or ``None``, the
@@ -143,14 +170,12 @@ def get_test_devices(mode: str | None = None):
 
     if mode == "basic":
         # only run on CPU and first GPU device
-        if wp.is_cpu_available():
-            devices.append(wp.get_device("cpu"))
+        devices.extend(get_cpu_test_devices())
         if wp.is_cuda_available():
             devices.append(wp.get_device("cuda:0"))
     elif mode == "unique" or mode == "unique_or_2x":
         # run on CPU and a subset of GPUs
-        if wp.is_cpu_available():
-            devices.append(wp.get_device("cpu"))
+        devices.extend(get_cpu_test_devices())
         devices.extend(get_selected_cuda_test_devices(mode))
     elif mode == "all":
         # run on all devices
@@ -369,19 +394,151 @@ def assert_np_equal(result: np.ndarray, expect: np.ndarray, tol=0.0):
         np.testing.assert_array_equal(result, expect)
 
 
+def run_python_subprocess(
+    source: str,
+    *args: str,
+    timeout: float = 60,
+    hide_gpu: bool = False,
+    env_updates: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run Python source in a child interpreter with test-safe process settings.
+
+    Use this helper when the child process's exit status or output is part of
+    the test assertion. Use ``run_test_in_subprocess()`` instead when a test
+    simply needs an isolated interpreter and is expected to pass.
+
+    Crash dump collection is suppressed before ``source`` imports Warp: POSIX
+    core dumps are disabled, while Windows Error Reporting is configured not to
+    collect expected child-process failures. Set ``hide_gpu`` for CPU-only
+    children so they do not enumerate CUDA devices or create CUDA contexts.
+
+    Args:
+        source: Python source passed to the child interpreter with ``-c``.
+        *args: Arguments exposed to ``source`` through ``sys.argv[1:]``.
+        timeout: Maximum number of seconds to wait for the child.
+        hide_gpu: Whether to hide GPUs from the child by setting
+            ``CUDA_VISIBLE_DEVICES`` to an empty string.
+        env_updates: Environment variables to add or replace in the inherited
+            child environment.
+
+    Returns:
+        The completed child process with captured text output.
+
+    Raises:
+        subprocess.TimeoutExpired: If the child exceeds ``timeout``. Any
+            partial captured output is written to the parent process first.
+    """
+    env = os.environ.copy()
+    if env_updates:
+        env.update(env_updates)
+    if hide_gpu:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+
+    if sys.platform == "win32":
+        source = (
+            "import ctypes as _ctypes;"
+            "_SEM_FAILCRITICALERRORS=0x0001;"
+            "_SEM_NOGPFAULTERRORBOX=0x0002;"
+            "_ctypes.windll.kernel32.SetErrorMode(_SEM_FAILCRITICALERRORS | _SEM_NOGPFAULTERRORBOX);\n"
+            f"{source}"
+        )
+    elif os.name == "posix":
+        source = f"import resource as _resource; _resource.setrlimit(_resource.RLIMIT_CORE, (0, 0));\n{source}"
+
+    try:
+        return subprocess.run(
+            [sys.executable, "-u", "-c", source, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as error:
+        for stream_name, output in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if not output:
+                continue
+            if isinstance(output, bytes):
+                output_text = output.decode(errors="replace")
+            else:
+                output_text = output
+            print(
+                f"Subprocess {stream_name} before timeout:\n{output_text}",
+                file=sys.stderr,
+                end="" if output_text.endswith("\n") else "\n",
+            )
+        raise
+
+
+def run_test_in_subprocess(
+    test: unittest.TestCase,
+    *,
+    timeout: float = 600,
+    hide_gpu: bool = False,
+    env_updates: Mapping[str, str] | None = None,
+) -> bool:
+    """Run an expected-to-pass test in an isolated child interpreter.
+
+    Call this at the start of a test and return from the test when it returns
+    ``True``. Use ``run_python_subprocess()`` instead when the child is expected
+    to fail or when its output is part of the assertion.
+
+    Args:
+        test: The current test case.
+        timeout: Maximum number of seconds to wait for the child.
+        hide_gpu: Whether to hide GPUs from the child by setting
+            ``CUDA_VISIBLE_DEVICES`` to an empty string.
+        env_updates: Environment variables to add or replace in the inherited
+            child environment.
+
+    Returns:
+        ``True`` in the parent after the child passes and ``False`` in the child
+        so the caller can execute the test body there.
+    """
+
+    test_id = test.id()
+    isolation_env = "WARP_ISOLATED_TEST_ID"
+    if os.environ.get(isolation_env) == test_id:
+        return False
+
+    child_env_updates = dict(env_updates or {})
+    child_env_updates[isolation_env] = test_id
+    result = run_python_subprocess(
+        "import unittest as _unittest; _unittest.main(module=None)",
+        test_id,
+        timeout=timeout,
+        hide_gpu=hide_gpu,
+        env_updates=child_env_updates,
+    )
+    if result.returncode != 0:
+        test.fail(
+            f"Isolated test process exited with code {result.returncode}.\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    return True
+
+
 # if check_output is True any output to stdout will be treated as an error
-def create_test_func(func, device, check_output, device_check=None, **kwargs):
+def create_test_func(func, device, check_output, device_check=None, enable_cpu_blocks=False, **kwargs):
     # pass args to func
     @functools.wraps(func)
     def test_func(self):
-        if device_check is not None:
-            device_check(self, device)
+        previous_enable_cpu_blocks = wp.config.enable_cpu_blocks
+        if enable_cpu_blocks:
+            wp.config.enable_cpu_blocks = True
+        try:
+            if device_check is not None:
+                device_check(self, device)
 
-        if check_output:
-            with CheckOutput(self):
+            if check_output:
+                with CheckOutput(self):
+                    func(self, device, **kwargs)
+            else:
                 func(self, device, **kwargs)
-        else:
-            func(self, device, **kwargs)
+        finally:
+            wp.config.enable_cpu_blocks = previous_enable_cpu_blocks
 
     return test_func
 
@@ -392,7 +549,7 @@ def skip_test_func(self):
 
 
 def sanitize_identifier(s):
-    """replace all non-identifier characters with '_'"""
+    """Replace all non-identifier characters with underscores."""
 
     s = str(s)
     if s.isidentifier():
@@ -485,7 +642,7 @@ def write_junit_results(
     tests_skipped: int,
     test_duration: float,
 ):
-    """Write a JUnit XML from our report data
+    """Write a JUnit XML from our report data.
 
     The report file is needed for GitLab to add test reports in merge requests.
     """

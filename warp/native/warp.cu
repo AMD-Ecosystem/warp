@@ -42,6 +42,19 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(__HIP_PLATFORM_AMD__)
+// True on success. A failed HIP runtime call also stays pending as the thread's last error, where rocPRIM and
+// Warp's launch checks would read it against unrelated work (see hip_driver_result in cuda_util.cpp); calls
+// whose failure is handled locally go through this so that nothing stays pending.
+static inline bool hip_call_ok(hipError_t result)
+{
+    if (result == hipSuccess)
+        return true;
+    (void)hipGetLastError();
+    return false;
+}
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
 #define check_any(result) (check_generic(result, __FILE__, __LINE__))
 #define check_nvrtc(code) (check_nvrtc_result(code, __FILE__, __LINE__))
 #if !defined(__HIP_PLATFORM_AMD__)
@@ -352,10 +365,10 @@ int cuda_init()
 #if defined(__HIP_PLATFORM_AMD__)
                 g_devices[i].is_ipc_supported = 0;
                 int prev_device = -1;
-                if (hipGetDevice(&prev_device) == hipSuccess) {
-                    if (hipSetDevice(i) == hipSuccess) {
+                if (hip_call_ok(hipGetDevice(&prev_device))) {
+                    if (hip_call_ok(hipSetDevice(i))) {
                         void* ipc_ptr = nullptr;
-                        if (hipMalloc(&ipc_ptr, 4) == hipSuccess) {
+                        if (hip_call_ok(hipMalloc(&ipc_ptr, 4))) {
                             CUipcMemHandle mem_handle;
                             if (cuIpcGetMemHandle_f(&mem_handle, (CUdeviceptr)ipc_ptr) == CUDA_SUCCESS) {
                                 g_devices[i].is_ipc_supported = 1;
@@ -2888,36 +2901,36 @@ static void apic_capture_array_scan_device(
     );
 }
 
-void wp_array_scan_int_device(
+bool wp_array_scan_int_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT32, inclusive);
-    scan_device((const int*)in, (int*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const int*)in, (int*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
-void wp_array_scan_int64_device(
+bool wp_array_scan_int64_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT64, inclusive);
-    scan_device((const int64_t*)in, (int64_t*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const int64_t*)in, (int64_t*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
-void wp_array_scan_float_device(
+bool wp_array_scan_float_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT32, inclusive);
-    scan_device((const float*)in, (float*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const float*)in, (float*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
-void wp_array_scan_double_device(
+bool wp_array_scan_double_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT64, inclusive);
-    scan_device((const double*)in, (double*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const double*)in, (double*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
 int wp_cuda_driver_version()
@@ -3160,8 +3173,7 @@ int wp_cuda_set_memory_coarse_grain(void* context, void* ptr, size_t size)
         return 0;
 
     int ordinal = wp_cuda_context_get_device_ordinal(context);
-    hipError_t err = hipMemAdvise(ptr, size, hipMemAdviseSetCoarseGrain, ordinal);
-    return err == hipSuccess ? 1 : 0;
+    return hip_call_ok(hipMemAdvise(ptr, size, hipMemAdviseSetCoarseGrain, ordinal)) ? 1 : 0;
 #else
     (void)context;
     (void)ptr;
@@ -3465,8 +3477,16 @@ uint64_t wp_cuda_context_check(void* context)
 
         // synchronize if the stream is not capturing
         if (status == cudaStreamCaptureStatusNone) {
+#if defined(__HIP_PLATFORM_AMD__)
+            // check_cuda() does not leave a failure pending on HIP (see hip_driver_result in
+            // cuda_util.cpp), so take a synchronization failure from the call itself.
+            cudaError_t sync_result = cudaDeviceSynchronize();
+            check_cuda(sync_result);
+            e = sync_result != cudaSuccess ? sync_result : cudaGetLastError();
+#else
             check_cuda(cudaDeviceSynchronize());
             e = cudaGetLastError();
+#endif  // defined(__HIP_PLATFORM_AMD__)
         }
     }
 
@@ -5037,7 +5057,7 @@ static bool is_valid_child_graph(void* child_graph)
 }
 
 // check if a graph can be used as a conditional body graph
-// https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#condtional-node-body-graph-requirements
+// https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html#conditional-node-body-graph-requirements
 bool wp_cuda_graph_check_conditional_body(void* body_graph)
 {
     static const std::unordered_set<CUgraphNodeType> allowed_nodes {
@@ -5623,7 +5643,14 @@ size_t wp_cuda_compile_program(
     // --Ofast-compile works inversely to normal -O optimization levels
     switch (optimization_level) {
     case 0:
+#if CUDA_VERSION >= 13010
+        // CUDA 13.1+ corrupts process-wide NVRTC compiler state after a
+        // --Ofast-compile=max build. Later builds can then emit invalid parameter
+        // addressing, so use the next-fastest setting until NVIDIA fixes NVRTC.
+        opts.push_back("--Ofast-compile=mid");
+#else
         opts.push_back("--Ofast-compile=max");
+#endif
         break;
     case 1:
         opts.push_back("--Ofast-compile=mid");
@@ -6006,7 +6033,12 @@ bool wp_cuda_compile_dot(
     int num_threads,
     int lda,
     int ldb,
-    int ldc
+    int ldc,
+    int alignment_A,
+    int alignment_B,
+    int alignment_C,
+    int enable_static_block_dim,
+    int suppress_errors
 )
 {
 
@@ -6057,10 +6089,31 @@ bool wp_cuda_compile_dot(
         ));
     }
 
+    // any non-positive value leaves cuBLASDx at its default (each value type's natural alignment)
+    if (alignment_A > 0 && alignment_B > 0 && alignment_C > 0) {
+        std::array<long long int, 3> align = { alignment_A, alignment_B, alignment_C };
+        CHECK_CUBLASDX(
+            cublasdxSetOperatorInt64s(h, cublasdxOperatorType::CUBLASDX_OPERATOR_ALIGNMENT, align.size(), align.data())
+        );
+    }
+
+    if (enable_static_block_dim) {
+        CHECK_CUBLASDX(cublasdxSetOperatorInt64(h, cublasdxOperatorType::CUBLASDX_OPERATOR_STATIC_BLOCK_DIM, 1));
+    }
+
     CHECK_CUBLASDX(cublasdxSetOptionStr(h, commondxOption::COMMONDX_OPTION_SYMBOL_NAME, symbol_name));
 
+    // generating the LTO is where cuBLASDx compiles the GEMM; a rejected configuration is
+    // expected when the caller probes an alignment it can fall back from, so do not report it then
     size_t lto_size = 0;
-    CHECK_CUBLASDX(cublasdxGetLTOIRSize(h, &lto_size));
+    commondxStatusType lto_status = cublasdxGetLTOIRSize(h, &lto_size);
+    if (lto_status != commondxStatusType::COMMONDX_SUCCESS) {
+        if (!suppress_errors) {
+            check_cublasdx(lto_status);
+        }
+        cublasdxDestroyDescriptor(h);
+        return false;
+    }
 
     std::vector<char> lto(lto_size);
     CHECK_CUBLASDX(cublasdxGetLTOIR(h, lto.size(), lto.data()));
@@ -6336,18 +6389,19 @@ bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size)
     // all this function must do: reject requests the device cannot satisfy,
     // matching the driver rejection CUDA produces.
     int static_smem_bytes = 0;
-    if (hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (hipFunction_t)kernel)
-        != hipSuccess)
+    if (!hip_call_ok(
+            hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (hipFunction_t)kernel)
+        ))
         return false;
 
     int device = -1;
-    if (hipGetDevice(&device) != hipSuccess)
+    if (!hip_call_ok(hipGetDevice(&device)))
         return false;
 
     // Same attribute the device's max_shared_memory_per_block is populated
     // from, so this check and the Python-side shortfall clause agree.
     int max_smem_bytes = 0;
-    if (hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeSharedMemPerBlockOptin, device) != hipSuccess)
+    if (!hip_call_ok(hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeSharedMemPerBlockOptin, device)))
         return false;
 
     return requested_smem_bytes <= max_smem_bytes - static_smem_bytes;
@@ -6376,7 +6430,7 @@ static int get_cuda_kernel_attribute(void* context, void* kernel, int attribute)
     // CUfunction_attribute resolves to a different type than it does in this HIP
     // translation unit, so a call from here compiles but does not link.
     int value = 0;
-    if (hipFuncGetAttribute(&value, (hipFunction_attribute)attribute, (hipFunction_t)kernel) != hipSuccess)
+    if (!hip_call_ok(hipFuncGetAttribute(&value, (hipFunction_attribute)attribute, (hipFunction_t)kernel)))
         return -1;
 #else
     int value = 0;
@@ -6686,10 +6740,10 @@ size_t wp_cuda_launch_kernel(
             if (ndim > APIC_LAUNCH_MAX_DIMS)
                 ndim = APIC_LAUNCH_MAX_DIMS;
 
-            int shape[APIC_LAUNCH_MAX_DIMS] = {};
+            uint32_t shape[APIC_LAUNCH_MAX_DIMS] = {};
             uint64_t launch_size = dim;
             if (args && args[0]) {
-                const int* bounds_shape = static_cast<const int*>(args[0]);
+                const uint32_t* bounds_shape = static_cast<const uint32_t*>(args[0]);
                 for (int d = 0; d < ndim; d++)
                     shape[d] = bounds_shape[d];
 
@@ -6697,7 +6751,7 @@ size_t wp_cuda_launch_kernel(
                 const uint8_t* bounds_bytes = static_cast<const uint8_t*>(args[0]);
                 launch_size = *reinterpret_cast<const size_t*>(bounds_bytes + size_offset);
             } else {
-                shape[0] = (int)dim;
+                shape[0] = static_cast<uint32_t>(dim);
             }
 
             apic_record_kernel_launch(
@@ -6736,8 +6790,9 @@ bool wp_cuda_get_suggested_block_size(
     // translation unit, so a call from here compiles but does not link. Every
     // other use of that wrapper sits in a CUDA-only branch, which is why this is
     // the first place it bites.
-    if (hipFuncGetAttribute(&max_threads_per_block, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (hipFunction_t)kernel)
-            == hipSuccess
+    if (hip_call_ok(
+            hipFuncGetAttribute(&max_threads_per_block, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (hipFunction_t)kernel)
+        )
         && max_threads_per_block > 0) {
         block_size_limit = max_threads_per_block;
     }

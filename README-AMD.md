@@ -1,6 +1,6 @@
 # Warp on AMD HIP/ROCm
 
-AMD HIP/ROCm build of NVIDIA Warp 1.17.0 (release tag v1.17.0).
+AMD HIP/ROCm build of NVIDIA Warp 1.18.0 (release tag v1.18.0).
 
 ## Quickstart
 

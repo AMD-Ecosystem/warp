@@ -239,10 +239,38 @@ CUDA_CALLABLE inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNode
     // it guarantees a single 128-bit global-memory transaction per node,
     // which matches the L2 cache-line granularity on MI250X / MI300X and
     // avoids partial-line fetches.
-    float4 f4 = __ldg((const float4*)(nodes) + index);
+    float4 f4 = __ldg(reinterpret_cast<const float4*>(nodes) + index);
     return (const wp::BVHPackedNodeHalf&)f4;
 #else
     return nodes[index];
+#endif
+}
+
+// read-only loads for the remaining BVH/mesh query inputs (primitive indices,
+// item bounds, mesh vertex indices); plain pointer dereferences compile to
+// generic loads because the arrays are reached through a descriptor pointer,
+// whereas __ldg uses the read-only data path. AABB queries also load the
+// candidate bounds into locals up front so the short-circuit overlap test
+// compiles to a single predicate chain instead of a branch per component;
+// the eager loads stay gated to the AABB instantiations because the extra
+// live registers measurably hurt the heavier sphere/capsule instantiations.
+// On HIP __ldg maps to a plain load (no separate read-only cache).
+CUDA_CALLABLE inline int bvh_load_int(const int* data, int index)
+{
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return __ldg(data + index);
+#else
+    return data[index];
+#endif
+}
+
+CUDA_CALLABLE inline vec3 bvh_load_vec3(const vec3* data, int index)
+{
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    const float* p = reinterpret_cast<const float*>(data + index);
+    return vec3(__ldg(p + 0), __ldg(p + 1), __ldg(p + 2));
+#else
+    return data[index];
 #endif
 }
 
@@ -414,7 +442,8 @@ struct bvh_query_t {
         : bvh()
         , stack()
         , count(0)
-        , primitive_counter(-1)
+        , prim_cur(0)
+        , prim_end(0)
         , input_lower()
         , input_upper()
         , bounds_nr(0)
@@ -439,8 +468,11 @@ struct bvh_query_t {
 
     int count;
 
-    // >= 0 if currently in a packed leaf node
-    int primitive_counter;
+    // primitive range of the packed leaf currently being enumerated;
+    // when prim_cur < prim_end the query resumes mid-leaf on the next
+    // bvh_query_next() call, without re-visiting the leaf node
+    int prim_cur;
+    int prim_end;
 
     // inputs
     wp::vec3 input_lower;  // start for ray
@@ -500,7 +532,12 @@ CUDA_CALLABLE inline bvh_query_t bvh_query(uint64_t id, const vec3& lower, const
 
 #if BVH_SHARED_STACK
     __shared__ int stack[BVH_QUERY_STACK_SIZE * WP_TILE_BLOCK_DIM];
-    query.stack.ptr = &stack[threadIdx.x];
+    // threadIdx.x is only unique within a 1D block. Flatten the block coordinates
+    // so external multidimensional launches still select one stack per thread.
+    const int linear_thread_idx = static_cast<int>(threadIdx.x)
+        + static_cast<int>(blockDim.x)
+            * (static_cast<int>(threadIdx.y) + static_cast<int>(blockDim.y) * static_cast<int>(threadIdx.z));
+    query.stack.ptr = &stack[linear_thread_idx];
 #endif
 
     query.bounds_nr = -1;
@@ -511,8 +548,6 @@ CUDA_CALLABLE inline bvh_query_t bvh_query(uint64_t id, const vec3& lower, const
 
     query.stack[0] = root == -1 ? *bvh.root : root;
     query.count = 1;
-    // ensure node-level AABB tests run on first iteration
-    query.primitive_counter = 0;
     query.input_lower = lower;
     query.input_upper = upper;
 
@@ -559,19 +594,40 @@ CUDA_CALLABLE inline bool bvh_query_next_impl(bvh_query_t& query, int& index, co
 {
     BVH bvh = query.bvh;
 
-    // Navigate through the bvh, find the first overlapping leaf node.
-    while (query.count) {
+    // A single flat loop: every iteration either emits one primitive from the
+    // packed leaf currently being enumerated, or pops and processes one node.
+    for (;;) {
+        if (query.prim_cur < query.prim_end) {
+            const int primitive_index = bvh_load_int(bvh.primitive_indices, query.prim_cur++);
+
+            if constexpr (QUERY_KIND == BvhQueryKind::AABB) {
+                const vec3 item_lower = bvh_load_vec3(bvh.item_lowers, primitive_index);
+                const vec3 item_upper = bvh_load_vec3(bvh.item_uppers, primitive_index);
+                if (!bvh_query_test<QUERY_KIND>(query, item_lower, item_upper, max_dist)) {
+                    continue;
+                }
+            } else if (!bvh_query_test<QUERY_KIND>(
+                           query, bvh.item_lowers[primitive_index], bvh.item_uppers[primitive_index], max_dist
+                       )) {
+                continue;
+            }
+            index = primitive_index;
+            query.bounds_nr = primitive_index;
+            return true;
+        }
+
+        if (!query.count)
+            return false;
+
         const int node_index = query.stack[--query.count];
 
         BVHPackedNodeHalf node_lower = bvh_load_node(bvh.node_lowers, node_index);
         BVHPackedNodeHalf node_upper = bvh_load_node(bvh.node_uppers, node_index);
 
-        if (query.primitive_counter == 0) {
-            if (!bvh_query_test<QUERY_KIND>(
-                    query, reinterpret_cast<vec3&>(node_lower), reinterpret_cast<vec3&>(node_upper), max_dist
-                )) {
-                continue;
-            }
+        if (!bvh_query_test<QUERY_KIND>(
+                query, reinterpret_cast<vec3&>(node_lower), reinterpret_cast<vec3&>(node_upper), max_dist
+            )) {
+            continue;
         }
 
         const int left_index = node_lower.i;
@@ -581,41 +637,24 @@ CUDA_CALLABLE inline bool bvh_query_next_impl(bvh_query_t& query, int& index, co
             const int start = left_index;
             const int end = right_index;
 
-            // Fast path when the actual leaf range contains exactly one primitive
+            // Fast path when the actual leaf range contains exactly one primitive:
+            // its AABB is the leaf node's AABB, which just passed the test above
             if (end - start == 1) {
-                int primitive_index = bvh.primitive_indices[start];
-                index = primitive_index;
-                query.bounds_nr = primitive_index;
-                return true;
-            } else {
-                int primitive_index = bvh.primitive_indices[start + (query.primitive_counter++)];
-
-                // if already visited the last primitive in the leaf node
-                // move to the next node and reset the primitive counter to 0
-                if (start + query.primitive_counter == end) {
-                    query.primitive_counter = 0;
-                }
-                // otherwise we need to keep this leaf node in stack for a future visit
-                else {
-                    query.stack[query.count++] = node_index;
-                }
-                if (!bvh_query_test<QUERY_KIND>(
-                        query, bvh.item_lowers[primitive_index], bvh.item_uppers[primitive_index], max_dist
-                    )) {
-                    continue;
-                }
+                int primitive_index = bvh_load_int(bvh.primitive_indices, start);
                 index = primitive_index;
                 query.bounds_nr = primitive_index;
                 return true;
             }
+
+            // packed leaf: enumerate its primitives through the scalar cursors,
+            // one per loop iteration, without re-pushing the leaf node
+            query.prim_cur = start;
+            query.prim_end = end;
         } else {
-            // if it's not a leaf node we treat it as if we have visited the last primitive
-            query.primitive_counter = 0;
             query.stack[query.count++] = left_index;
             query.stack[query.count++] = right_index;
         }
     }
-    return false;
 }
 
 // Per-kind public iterators. Each is a thin wrapper around the shared template skeleton;

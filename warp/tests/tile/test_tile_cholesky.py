@@ -46,7 +46,8 @@ def tile_math_cholesky(
     wp.tile_store(gx, x)
 
 
-def test_tile_cholesky_cholesky(test, device):
+def test_tile_cholesky_lower_factor_and_solve(test, device):
+    """Compute a lower Cholesky factor and solve a vector right-hand side."""
     A_h = np.ones((TILE_M, TILE_M), dtype=np.float64)
     D_h = 8.0 * np.ones(TILE_M, dtype=np.float64)
     L_h = np.zeros_like(A_h)
@@ -90,7 +91,8 @@ def tile_math_cholesky_inplace(
     wp.tile_store(gy, y)
 
 
-def test_tile_cholesky_cholesky_inplace(test, device):
+def test_tile_cholesky_lower_factor_and_solve_inplace(test, device):
+    """Compute a lower Cholesky factor and solve a vector right-hand side in place."""
     rng = np.random.default_rng(42)
     L_h = np.tril(rng.random((TILE_M, TILE_M)))  # Lower triangular matrix
     A_h = L_h @ L_h.T
@@ -136,7 +138,8 @@ def tile_math_cholesky_multiple_rhs(
     wp.tile_store(gz, z)
 
 
-def test_tile_cholesky_cholesky_multiple_rhs(test, device):
+def test_tile_cholesky_lower_factor_and_solve_multiple_rhs(test, device):
+    """Compute a lower Cholesky factor and solve multiple right-hand sides."""
     A_h = np.ones((TILE_M, TILE_M), dtype=np.float64)
     D_h = 8.0 * np.ones(TILE_M, dtype=np.float64)
     L_h = np.zeros_like(A_h)
@@ -194,7 +197,8 @@ def tile_math_cholesky_multiple_rhs_inplace(
     wp.tile_store(gz, z)
 
 
-def test_tile_cholesky_cholesky_multiple_rhs_inplace(test, device):
+def test_tile_cholesky_lower_factor_and_solve_multiple_rhs_inplace(test, device):
+    """Compute a lower Cholesky factor and solve multiple right-hand sides in place."""
     rng = np.random.default_rng(42)
     L_h = np.tril(rng.random((TILE_M, TILE_M)))  # Lower triangular matrix
     A_h = L_h @ L_h.T
@@ -469,7 +473,11 @@ def test_tile_cholesky_block_cholesky(test, device):
         scratch: wp.array2d[float],
         x: wp.array2d[float],
     ):
-        """Solve ``A x = b`` given the Cholesky factor ``L (A = L L^T)`` using blocked forward and backward substitution."""
+        """Solve a Cholesky-factored system with blocked substitution.
+
+        Apply forward and backward substitution to solve ``A x = b`` from the
+        factorization ``A = L L^T``.
+        """
 
         # Forward substitution: solve L y = b
         for i in range(0, TILE_M, BLOCK_SIZE):
@@ -861,30 +869,30 @@ class TestTileCholesky(unittest.TestCase):
 
 add_function_test(
     TestTileCholesky,
-    "test_tile_cholesky_cholesky",
-    test_tile_cholesky_cholesky,
+    "test_tile_cholesky_lower_factor_and_solve",
+    test_tile_cholesky_lower_factor_and_solve,
     devices=all_devices,
     check_output=False,
 )
 add_function_test(
     TestTileCholesky,
-    "test_tile_cholesky_cholesky_inplace",
-    test_tile_cholesky_cholesky_inplace,
+    "test_tile_cholesky_lower_factor_and_solve_inplace",
+    test_tile_cholesky_lower_factor_and_solve_inplace,
     devices=all_devices,
     check_output=False,
 )
 
 add_function_test(
     TestTileCholesky,
-    "test_tile_cholesky_cholesky_multiple_rhs",
-    test_tile_cholesky_cholesky_multiple_rhs,
+    "test_tile_cholesky_lower_factor_and_solve_multiple_rhs",
+    test_tile_cholesky_lower_factor_and_solve_multiple_rhs,
     devices=all_devices,
     check_output=False,
 )
 add_function_test(
     TestTileCholesky,
-    "test_tile_cholesky_cholesky_multiple_rhs_inplace",
-    test_tile_cholesky_cholesky_multiple_rhs_inplace,
+    "test_tile_cholesky_lower_factor_and_solve_multiple_rhs_inplace",
+    test_tile_cholesky_lower_factor_and_solve_multiple_rhs_inplace,
     devices=all_devices,
     check_output=False,
 )
@@ -979,6 +987,30 @@ add_function_test(
     devices=all_devices,
     check_output=False,
 )
+
+cpu_block_tests = (
+    ("test_tile_cholesky_lower_factor_and_solve", test_tile_cholesky_lower_factor_and_solve),
+    ("test_tile_cholesky_lower_factor_and_solve_inplace", test_tile_cholesky_lower_factor_and_solve_inplace),
+    (
+        "test_tile_cholesky_lower_factor_and_solve_multiple_rhs",
+        test_tile_cholesky_lower_factor_and_solve_multiple_rhs,
+    ),
+    ("test_tile_cholesky_upper", test_tile_cholesky_upper),
+    ("test_tile_cholesky_upper_inplace", test_tile_cholesky_upper_inplace),
+    ("test_tile_cholesky_solve_upper", test_tile_cholesky_solve_upper),
+    ("test_tile_cholesky_solve_upper_multiple_rhs", test_tile_cholesky_solve_upper_multiple_rhs),
+    ("test_tile_cholesky_lower_backward_fp32", test_tile_cholesky_lower_backward(wp.float32)),
+    ("test_tile_cholesky_upper_backward_fp32", test_tile_cholesky_upper_backward(wp.float32)),
+)
+for name, func in cpu_block_tests:
+    add_function_test(
+        TestTileCholesky,
+        f"{name}_cpu_blocks",
+        func,
+        devices=get_cpu_test_devices(),
+        check_output=False,
+        enable_cpu_blocks=True,
+    )
 
 
 if __name__ == "__main__":

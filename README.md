@@ -1,7 +1,7 @@
 [![PyPI version](https://badge.fury.io/py/warp-lang.svg)](https://badge.fury.io/py/warp-lang)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/license/Apache-2.0)
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/NVIDIA/warp?link=https%3A%2F%2Fgithub.com%2FNVIDIA%2Fwarp%2Fcommits%2Fmain)
-[![Downloads](https://static.pepy.tech/badge/warp-lang/month)](https://pepy.tech/project/warp-lang)
+[![Downloads](https://api.pepy.tech/badge/warp-lang/month)](https://pepy.tech/projects/warp-lang)
 [![codecov](https://codecov.io/github/NVIDIA/warp/graph/badge.svg?token=7O1KSM79FG)](https://codecov.io/github/NVIDIA/warp)
 ![GitHub - CI](https://github.com/NVIDIA/warp/actions/workflows/ci.yml/badge.svg)
 
@@ -36,6 +36,7 @@ import numpy as np
 num_particles = 1_000_000
 dt = 0.01
 
+
 @wp.kernel
 def gravity_step(pos: wp.array[wp.vec3], vel: wp.array[wp.vec3]):
     i = wp.tid()
@@ -44,6 +45,7 @@ def gravity_step(pos: wp.array[wp.vec3], vel: wp.array[wp.vec3]):
     acc = -1000.0 / dist_sq * wp.normalize(position)  # gravitational pull toward origin
     vel[i] = vel[i] + acc * dt
     pos[i] = pos[i] + vel[i] * dt
+
 
 rng = np.random.default_rng(42)
 positions = wp.array(rng.normal(size=(num_particles, 3)), dtype=wp.vec3)
@@ -57,7 +59,12 @@ print(positions.numpy())
 
 ## Installing
 
-Warp requires Python 3.10 or newer. We publish `warp-lang` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. CUDA acceleration requires a supported NVIDIA GPU and driver. The macOS wheels support CPU execution but not Metal acceleration.
+Warp requires Python 3.10 or newer. We publish `warp-lang` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. The macOS wheels support CPU execution but not Metal acceleration.
+
+PyPI and nightly wheels for Linux and Windows use CUDA Toolkit 13.4. They require an NVIDIA R580-series or newer driver and a Turing (`sm_75`) or newer GPU for CUDA acceleration. For CUDA 12 environments, download a `+cu12` wheel from [GitHub Releases](https://github.com/NVIDIA/warp/releases) or build Warp from source with CUDA 12.
+
+Windows on Arm supports experimental CUDA source builds with CUDA Toolkit 13.4 or newer; see the
+[Windows on Arm build instructions](https://github.com/NVIDIA/warp/blob/main/docs/user_guide/installation.rst#windows-arm64-builds).
 
 The easiest way to install Warp is from [PyPI](https://pypi.org/project/warp-lang/):
 
@@ -67,7 +74,7 @@ pip install warp-lang
 
 You can also use `pip install warp-lang[examples]` to install additional dependencies for running examples and USD-related features.
 
-For nightly builds, conda, CUDA 13 builds, building from source, and CUDA driver requirements, see the
+For nightly builds, conda, CUDA 12 compatibility wheels, building from source, and CUDA driver requirements, see the
 [Installation Guide](https://nvidia.github.io/warp/stable/user_guide/installation.html).
 
 ## Tutorial Notebooks
@@ -118,45 +125,58 @@ python -m warp.examples.browse
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_dem.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fluid.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_graph_capture.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_graph_capture.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_marching_cubes.png"></a></td>
+            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_mesh.png"></a></td>
         </tr>
         <tr>
             <td align="center">dem</td>
             <td align="center">fluid</td>
             <td align="center">graph capture</td>
-            <td align="center">marching cubes</td>
+            <td align="center">mesh</td>
         </tr>
         <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_mesh.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_nvdb.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_nvdb.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raycast.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_raymarch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raymarch.png"></a></td>
+            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_sample_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sample_mesh.png"></a></td>
         </tr>
         <tr>
-            <td align="center">mesh</td>
             <td align="center">nvdb</td>
             <td align="center">raycast</td>
             <td align="center">raymarch</td>
+            <td align="center">sample mesh</td>
         </tr>
         <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_sample_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sample_mesh.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_sph.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sph.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_torch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_torch.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_wave.png"></a></td>
+            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fft_poisson_navier_stokes_2d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fft_poisson_navier_stokes_2d.png"></a></td>
         </tr>
         <tr>
-            <td align="center">sample mesh</td>
             <td align="center">sph</td>
             <td align="center">torch</td>
             <td align="center">wave</td>
+            <td align="center">2-D incompressible turbulence in a periodic box</td>
         </tr>
         <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fft_poisson_navier_stokes_2d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fft_poisson_navier_stokes_2d.png"></a></td>
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fdtd_3d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fdtd_3d.png"></a></td>
         </tr>
         <tr>
-            <td align="center">2-D incompressible turbulence in a periodic box</td>
             <td align="center">3-D FDTD Luneburg lens</td>
+        </tr>
+    </tbody>
+</table>
+
+### warp/examples/geometry
+
+<table>
+    <tbody>
+        <tr>
+            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/geometry/example_isosurface.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/geometry_isosurface.png"></a></td>
+            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/geometry/example_sparse_marching_cubes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/geometry_sparse_marching_cubes.png"></a></td>
+        </tr>
+        <tr>
+            <td align="center">isosurface</td>
+            <td align="center">sparse marching cubes</td>
         </tr>
     </tbody>
 </table>
@@ -201,6 +221,12 @@ python -m warp.examples.browse
             <td align="center">darcy level-set optimization</td>
             <td align="center">elastic shape optimization</td>
         </tr>
+        <tr>
+            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_cantilever_topology_optimization.py"><img src="./docs/img/examples/fem_cantilever_topology_optimization.png"></a></td>
+        </tr>
+        <tr>
+            <td align="center">cantilever topology optimization</td>
+        </tr>
     </tbody>
 </table>
 
@@ -216,7 +242,7 @@ python -m warp.examples.browse
         </tr>
         <tr>
             <td align="center">diffray</td>
-            <td align="center">fluid checkpoint</td>
+            <td align="center">fluid checkpoint<br><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/optim/example_fluid_checkpoint.py">basic</a> · <a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/optim/example_fluid_checkpoint_custom_backward.py">custom backward</a></td>
             <td align="center">particle repulsion</td>
             <td align="center">navier-stokes perturbation</td>
         </tr>

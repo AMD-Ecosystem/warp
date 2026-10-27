@@ -28,7 +28,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from warp._src.generated_files import generate_exports_header_file  # noqa: PLC0415
 
-    generate_exports_header_file(str(repo_root))
+    export_path = repo_root / "warp" / "native" / "exports.h"
+    if generate_exports_header_file(str(repo_root)):
+        print(f"Generated {export_path}")
+    else:
+        print(f"{export_path} is up to date")
     return 0
 
 

@@ -97,14 +97,6 @@ RDNA executes a wavefront in lockstep without independent thread scheduling.
 Spinlocks built from `wp.atomic_cas`, where one lane must release a lock while
 its wave-mates spin on it, deadlock. `wp.atomic_cas` itself is correct.
 
-### Floating-point contraction can differ between kernels
-
-HIP kernels are compiled with `-ffp-contract=fast` when `fuse_fp` is set. The
-compiler may fuse multiply-adds across statements after inlining, so the same
-`@wp.func` can round differently in two kernels. Code that compares a value
-computed in one kernel with the same value computed in another kernel can see
-a difference of a few ULP. Status: platform limitation.
-
 ### Out-of-bounds accesses fault instead of being masked
 
 An out-of-bounds device access that goes unnoticed on CUDA raises
@@ -191,6 +183,12 @@ upstream in MuJoCo-Warp.
 level between runs: the binned-accumulator reduction in `deterministic.cu` is
 not bit-reproducible on gfx1151. Status: open.
 
+### Tile block-level axis reduction (Tier 3)
+
+Tile axis reductions over a dimension larger than 256 (the block-level path)
+return wrong results. Tier 1/2 and non-axis reductions are correct. Status:
+open.
+
 ### Tile-path array reduction is slow
 
 On gfx1151 the tile implementation of a whole-array sum is markedly slower
@@ -219,17 +217,6 @@ Newton workloads that capture graphs continuously (`test_mesh_backface`,
 partly `test_heightfield` and `test_remesh`); the failing call is an ordinary
 `wp.array` in `builder.finalize()`. ROCm 7.2.x does not show it. Mechanism not
 established. Workaround: ROCm 7.2.x for affected workloads.
-
-### Scratch allocation limit
-
-A kernel whose scratch need exceeds ROCm's `HSA_SCRATCH_SINGLE_LIMIT` gets a new
-scratch allocation on every dispatch, which delays each of its dispatches. Large
-kernels that spill registers on gfx1151 cross the default limit. When the
-variable is unset, Warp sets it to 1 GiB in the process environment before it
-initializes HIP; child processes that inherit that environment see the value. If
-PyTorch initialized ROCm first, the runtime has already read the limit and Warp
-logs a warning; set `HSA_SCRATCH_SINGLE_LIMIT=1073741824` in the environment
-before starting Python.
 
 ### Graph-capture memory leak on ROCm 7.2.x
 
@@ -337,6 +324,7 @@ Skipped on HIP:
 - `tile/test_tile_shared_memory` `test_tile_shared_mem_large`,
   `tile/test_tile_view` `test_tile_assign_2d`, `tile/test_tile_reduce` 3D
   axis-reduce backward — exceed 64 KB LDS.
+- `tile/test_tile_reduce` Tier 3 axis reduction — open bug (section 2).
 - `tile/test_tile_fft`, `test_tile_solve`, `test_tile_mlp` MathDx cases —
   libmathdx is CUDA-only.
 - `cuda/test_texture` mipmapped-array tests — error 801.

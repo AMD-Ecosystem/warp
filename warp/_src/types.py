@@ -34,6 +34,12 @@ import warp
 import warp.config
 from warp._src.logger import log_warning
 
+# NumPy versions before 2.4 incorrectly take an undocumented scalar path when
+# ``__array_interface__`` exposes a NULL data pointer. Keep a valid byte alive
+# for empty arrays so those versions can consume the interface.
+# https://github.com/numpy/numpy/issues/26037
+_ARRAY_INTERFACE_EMPTY_DATA = ctypes.c_byte()
+
 # type hints
 T = TypeVar("T")
 Length = TypeVar("Length", bound=int)
@@ -1084,7 +1090,11 @@ def vector(length, dtype):
 @functools.cache
 def matrix(shape, dtype):
     """Create a matrix type with the given shape and data type."""
-    assert len(shape) == 2
+    if len(shape) != 2:
+        dimension_label = "dimension" if len(shape) == 1 else "dimensions"
+        raise ValueError(
+            f"Matrix shape must have exactly two dimensions, got {len(shape)} {dimension_label} in shape {shape!r}"
+        )
 
     # canonicalize dtype
     if dtype is int:
@@ -1383,7 +1393,6 @@ def matrix(shape, dtype):
                         values = tuple(col_vec[x] for x in rows)
                         return vector(len(values), self._wp_scalar_type_)(*values)
 
-                assert ndim == 2
                 rows = range(*key[0].indices(self._shape_[1]))
                 cols = range(*key[1].indices(self._shape_[0]))
                 row_vecs = tuple(self.get_row(i) for i in rows)
@@ -1468,8 +1477,6 @@ def matrix(shape, dtype):
                             super().__setitem__(idx, mat_t.scalar_import(value[i] if v_shape else value))
 
                         return
-
-                assert ndim == 2
 
                 _, v_shape = flatten(value)
 
@@ -2335,7 +2342,7 @@ def _make_launch_bounds_class(ndim: int):
         (ctypes.Structure,),
         {
             "_fields_": (
-                ("shape", ctypes.c_int32 * ndim),
+                ("shape", ctypes.c_uint32 * ndim),
                 ("size", ctypes.c_size_t),
                 ("coord_mult", ctypes.c_size_t),
             ),
@@ -2948,7 +2955,8 @@ def scalars_equal_generic(a, b, match_generic=True):
 
 
 def seq_match_ellipsis(a, b) -> bool:
-    assert a and a[-1] is Ellipsis and len(a) == 2
+    if not a or a[-1] is not Ellipsis or len(a) != 2:
+        raise TypeError(f"An ellipsis sequence pattern must contain one type followed by Ellipsis, got {a!r}")
 
     # Compare the args against the type being repeated through the ellipsis.
     repeated_arg = a[0]
@@ -3281,10 +3289,10 @@ class array(Array[DType, NDim]):
         dtype (DType): The data type of the array.
         ndim (int): The number of array dimensions.
         size (int): The number of items in the array.
-        capacity (int): The amount of memory in bytes allocated for this array.
+        capacity (int): Maximum number of bytes addressable from ``ptr`` for this array.
         shape (tuple[int]): Dimensions of the array.
         strides (tuple[int]): Number of bytes in each dimension between successive elements of the array.
-        ptr (int): Pointer to underlying memory allocation backing the array.
+        ptr (int): Pointer to the array's first element. For a view, this may point inside a larger backing allocation.
         device (Device): The device where the array's memory allocation resides.
         pinned (bool): Indicates whether the array was allocated in pinned host memory.
         is_contiguous (bool): Indicates whether this array has a contiguous memory layout.
@@ -3353,8 +3361,9 @@ class array(Array[DType, NDim]):
             dtype: One of the available `data types <#data-types>`_, such as :class:`warp.float32`, :class:`warp.mat33`, or a custom `struct <#structs>`_. If dtype is ``Any`` and data is an ndarray, then it will be inferred from the array data type
             shape: Dimensions of the array
             strides: Number of bytes in each dimension between successive elements of the array
-            ptr: Address of an external memory address to alias (``data`` should be ``None``)
-            capacity: Maximum size in bytes of the ``ptr`` allocation (``data`` should be ``None``)
+            ptr: Address of the first element to alias (``data`` should be ``None``). This may point inside a larger
+                external allocation.
+            capacity: Maximum number of bytes addressable from ``ptr`` (``data`` should be ``None``).
             device: Device the array lives on
             copy: Whether the incoming ``data`` will be copied or aliased. Aliasing requires that
                 the incoming ``data`` already lives on the ``device`` specified and the data types match.
@@ -3381,6 +3390,12 @@ class array(Array[DType, NDim]):
 
         # reference to other array
         self._ref = None
+
+        self._storage_base_ptr: int | None = None
+        """Start of the complete backing storage; unlike ``ptr``, this may precede the array's first element."""
+
+        self._storage_nbytes: int | None = None
+        """Total backing-storage size; unlike ``capacity``, this includes bytes preceding ``ptr``."""
 
         # canonicalize dtype
         if dtype is int:
@@ -3988,8 +4003,15 @@ class array(Array[DType, NDim]):
                 arr_strides = self.strides
                 descr = None
 
+            if self.ptr:
+                data_ptr = self.ptr
+            elif self.size == 0:
+                data_ptr = ctypes.addressof(_ARRAY_INTERFACE_EMPTY_DATA)
+            else:
+                data_ptr = 0
+
             self._array_interface = {
-                "data": (self.ptr if self.ptr is not None else 0, False),
+                "data": (data_ptr, False),
                 "shape": tuple(arr_shape),
                 "strides": tuple(arr_strides),
                 "typestr": type_typestr(self.dtype),
@@ -4365,6 +4387,13 @@ class array(Array[DType, NDim]):
 
     def zero_(self):
         """Zero out the array entries."""
+        if self.size == 0:
+            # Skip the zero-byte memset, but still record the initialization:
+            # otherwise verify_autograd_array_access keeps a stale "read" mark
+            # on the empty array and a later guarded write reports a false
+            # write-after-read.
+            self.mark_init()
+            return
         self._apic_ensure_tracked()
         if self.is_contiguous:
             # simple memset is usually faster than generic fill
@@ -6194,6 +6223,9 @@ class Mesh:
         self._velocities = velocities
         self.indices = indices
         self.groups = groups
+        self.support_winding_number = support_winding_number
+        """Whether the mesh was built with the data structures that
+        :func:`warp.mesh_query_point_sign_winding_number` requires."""
         self.runtime = warp._src.context.runtime
 
         if bvh_constructor is None:
@@ -6347,6 +6379,11 @@ class Mesh:
             self.runtime.verify_cuda_device(self.device)
 
 
+# Must match wp_volume_validation_result in warp/native/warp.h.
+_VOLUME_VALIDATION_SUCCESS = 1
+_VOLUME_VALIDATION_UNSUPPORTED_LAYOUT = 2
+
+
 class Volume:
     """Sparse volumetric data structure based on NanoVDB for efficient 3D sampling."""
 
@@ -6355,6 +6392,7 @@ class Volume:
     LINEAR = constant(1)
     """Enum value to specify trilinear interpolation during sampling"""
     _NANOVDB_LEAF_TABLE_COUNT: ClassVar[int] = 512
+    _NANOVDB_NAME_SIZE: ClassVar[int] = 256
 
     class RebuildInfo(NamedTuple):
         """Capacity metadata for a :class:`Volume` allocated with rebuild support.
@@ -6583,6 +6621,15 @@ class Volume:
         transform_matrix: mat33f
         """Linear part of the index-to-world transform"""
 
+    @staticmethod
+    def _decode_nvdb_name(name_ptr: int) -> str:
+        """Decode a fixed-size NanoVDB name field."""
+        name = ctypes.string_at(name_ptr, Volume._NANOVDB_NAME_SIZE)
+        terminator = name.find(b"\0")
+        if terminator < 0:
+            raise RuntimeError("Invalid NanoVDB name")
+        return name[:terminator].decode("ascii")
+
     def get_grid_info(self) -> Volume.GridInfo:
         """Return the metadata associated with this Volume."""
 
@@ -6607,7 +6654,7 @@ class Volume:
             raise RuntimeError("Invalid volume")
 
         return Volume.GridInfo(
-            name.decode("ascii"),
+            Volume._decode_nvdb_name(name),
             grid_size.value,
             grid_index.value,
             grid_count.value,
@@ -6709,11 +6756,11 @@ class Volume:
             type_str_buffer,
         )
 
-        if buf.value is None:
+        if buf.value is None or name is None:
             raise RuntimeError("Invalid feature array")
 
         return Volume.FeatureArrayInfo(
-            name.decode("ascii"),
+            Volume._decode_nvdb_name(name),
             buf.value,
             value_size.value,
             value_count.value,
@@ -6815,7 +6862,17 @@ class Volume:
         if magic not in (0x304244566F6E614E, 0x314244566F6E614E):  # NanoVDB0 or NanoVDB1 in hex, little-endian
             raise RuntimeError("NanoVDB signature not found on grid!")
 
-        data_array = array(np.frombuffer(grid_data, dtype=np.byte), device=device)
+        grid_array = np.frombuffer(grid_data, dtype=np.byte)
+        warp.init()
+        validation_result = warp._src.context.runtime.core.wp_volume_validate_host(
+            grid_array.ctypes.data, grid_array.size
+        )
+        if validation_result == _VOLUME_VALIDATION_UNSUPPORTED_LAYOUT:
+            raise RuntimeError("Unsupported NanoVDB tree layout")
+        if validation_result != _VOLUME_VALIDATION_SUCCESS:
+            raise RuntimeError("Invalid NanoVDB grid structure")
+
+        data_array = array(grid_array, device=device)
         return cls(data_array)
 
     def save_to_nvdb(self, path, codec: Literal["none", "zip", "blosc"] = "none"):
@@ -7032,15 +7089,15 @@ class Volume:
     ) -> Volume:
         """Create a :class:`Volume` object from a dense 3D NumPy array.
 
-        This function is only supported for CUDA devices.
-
         Args:
             min_world: The 3D coordinate of the lower corner of the volume.
             voxel_size: The size of each voxel in spatial
                 coordinates. Can be a scalar for isotropic voxels or a 3-element
                 sequence ``(sx, sy, sz)`` for anisotropic voxels.
-            bg_value: Background value
-            device: The CUDA device to create the volume on, e.g.: ``"cuda"`` or ``"cuda:0"``.
+            bg_value: Value of unallocated voxels of the volume. A four-dimensional ``ndarray`` with a
+                length-three last axis makes a ``vec3f`` volume. For scalar data, a Python ``int``
+                ``bg_value`` makes an ``int32`` volume; other values make a ``float32`` volume.
+            device: The device to create the volume on.
 
         Returns:
             A ``warp.Volume`` object.
@@ -7127,8 +7184,6 @@ class Volume:
     ) -> Volume:
         """Allocate a new Volume based on the bounding box defined by min and max.
 
-        This function is only supported for CUDA devices.
-
         Allocate a volume that is large enough to contain voxels [min[0], min[1], min[2]] - [max[0], max[1], max[2]], inclusive.
         If points_in_world_space is true, then min and max are first converted to index space using the given voxel size
         (per-axis for anisotropic volumes) and translation, and the volume is allocated with those.
@@ -7141,10 +7196,14 @@ class Volume:
             max: Upper 3D coordinates of the bounding box in index space or world space, inclusive.
             voxel_size: Voxel size(s) of the new volume. Can be a scalar for isotropic
                 voxels or a 3-element sequence ``(sx, sy, sz)`` for anisotropic voxels.
-            bg_value: Value of unallocated voxels of the volume, also defines the volume's type,
-              a :class:`warp.vec3` volume is created if this is `array-like`, otherwise a float volume is created
+            bg_value: Value of unallocated voxels of the volume, also defines the volume's type.
+              An index volume will be created if ``bg_value`` is ``None``.
+              Other supported grid types are ``int32``, ``uint32``, ``int64``, ``float32``, ``float64``,
+              ``vec3f``, ``vec3d``, ``vec4f``, and ``vec4d``. A plain list or NumPy array always makes a
+              single-precision grid: ``vec3f`` for three values, ``vec4f`` for four. To get a
+              double-precision grid, pass a Warp vector such as ``vec3d``.
             translation: Translation between the index and world spaces.
-            device: The CUDA device to create the volume on, e.g.: ``"cuda"`` or ``"cuda:0"``.
+            device: The device to create the volume on.
         """
         voxel_size = cls._normalize_voxel_size(voxel_size)
 
@@ -7226,7 +7285,17 @@ class Volume:
 
     # nanovdb types for which we instantiate the grid builder
     # Should be in sync with WP_VOLUME_BUILDER_INSTANTIATE_TYPES in volume_builder.h
-    _supported_allocation_types = ("int32", "uint32", "int64", "float", "double", "Vec3f", "Vec3d", "Vec4f")
+    _supported_allocation_types = (
+        "int32",
+        "uint32",
+        "int64",
+        "float",
+        "double",
+        "Vec3f",
+        "Vec3d",
+        "Vec4f",
+        "Vec4d",
+    )
 
     REBUILD_SUCCESS: ClassVar[int] = 0
     """Rebuild completed without setting a status flag."""
@@ -7264,8 +7333,6 @@ class Volume:
     ) -> Volume:
         """Allocate a new :class:`Volume` with active tiles for each point ``tile_points``.
 
-        This function is supported on CPU and CUDA devices.
-
         The smallest unit of allocation is a dense tile of 8x8x8 voxels.
         This is the primary method for allocating sparse volumes.
         It uses an array of points indicating the tiles that must be allocated.
@@ -7292,7 +7359,10 @@ class Volume:
             voxel_size: Voxel size(s) of the new volume. Ignored if ``transform`` is given.
             bg_value: Value of unallocated voxels of the volume, also defines the volume's type.
               An index volume will be created if ``bg_value`` is ``None``.
-              Other supported grid types are ``int``, ``float``, ``vec3f``, and ``vec4f``.
+              Other supported grid types are ``int32``, ``uint32``, ``int64``, ``float32``, ``float64``,
+              ``vec3f``, ``vec3d``, ``vec4f``, and ``vec4d``. A plain list or NumPy array always makes a
+              single-precision grid: ``vec3f`` for three values, ``vec4f`` for four. To get a
+              double-precision grid, pass a Warp vector such as ``vec3d``.
             translation: Translation between the index and world spaces.
             transform: Linear transform between the index and world spaces.
               If ``None``, deduced from ``voxel_size``.
@@ -7306,7 +7376,7 @@ class Volume:
             status: Optional one-element ``uint32`` array receiving ``Volume.REBUILD_*`` status flags from the
               initial build. ``Volume.REBUILD_SUCCESS`` means the requested topology fit in the reserved capacity.
             point_mask: Optional ``int32`` array with one entry per point. Points with a zero mask value are ignored.
-            device: The device to create the volume on, e.g. ``"cpu"``, ``"cuda"``, or ``"cuda:0"``.
+            device: The device to create the volume on.
 
         Raises:
             RuntimeError: If ``tile_points``, ``point_mask``, or ``status`` is not a contiguous array of the
@@ -7516,7 +7586,7 @@ class Volume:
             status: Optional one-element ``uint32`` array receiving ``Volume.REBUILD_*`` status flags from the
                 initial build. ``Volume.REBUILD_SUCCESS`` means the requested topology fit in the reserved capacity.
             point_mask: Optional ``int32`` array with one entry per point. Points with a zero mask value are ignored.
-            device: The device to create the volume on, e.g. ``"cpu"``, ``"cuda"``, or ``"cuda:0"``.
+            device: The device to create the volume on.
 
         Raises:
             RuntimeError: If ``voxel_points``, ``point_mask``, or ``status`` is not a contiguous array of the

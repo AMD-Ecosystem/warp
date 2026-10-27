@@ -40,6 +40,19 @@ def scale_2(
     y[0] = x[0] ** 2.0
 
 
+@wp.func
+def square(x: float):
+    return x * x
+
+
+@wp.kernel(enable_backward=True)
+def scale_through_function(
+    x: wp.array[float],
+    y: wp.array[float],
+):
+    y[0] = square(x[0])
+
+
 def test_options_backward_1(test, device):
     x = wp.array([3.0], dtype=float, requires_grad=True, device=device)
     y = wp.zeros_like(x)
@@ -106,6 +119,24 @@ def test_options_backward_4(test, device):
     assert_np_equal(tape.gradients[x].numpy(), np.array(0.0))
 
 
+def test_kernel_enable_backward_propagates_to_function(test, device):
+    """Verify that a kernel-level backward override includes called Warp functions."""
+    x = wp.array([3.0], dtype=float, requires_grad=True, device=device)
+    y = wp.zeros_like(x)
+
+    old_enable_backward = wp.get_module_options()["enable_backward"]
+    try:
+        wp.set_module_options({"enable_backward": False})
+
+        with wp.Tape() as tape:
+            wp.launch(scale_through_function, dim=1, inputs=[x, y], device=device)
+
+        tape.backward(y)
+        assert_np_equal(tape.gradients[x].numpy(), np.array(6.0))
+    finally:
+        wp.set_module_options({"enable_backward": old_enable_backward})
+
+
 def test_options_opt_level(test, device):
     assert wp.config.optimization_level is None, "Default global `optimization_level` should be None"
     assert wp.get_module_options()["optimization_level"] is None, "Default module `optimization_level` should be None"
@@ -123,7 +154,7 @@ def test_options_opt_level(test, device):
 
 
 def test_options_cpu_compiler_flags_generic(test, device):
-    """Compiling with cpu_compiler_flags="" (generic target) should not crash."""
+    """Verify that compiling with cpu_compiler_flags="" (generic target) should not crash."""
     if device.is_cuda:
         return
 
@@ -141,7 +172,7 @@ def test_options_cpu_compiler_flags_generic(test, device):
 
 
 def test_options_cpu_compiler_flags_native(test, device):
-    """Compiling with cpu_compiler_flags="-march=native" should not crash."""
+    """Verify that compiling with cpu_compiler_flags="-march=native" should not crash."""
     if device.is_cuda:
         return
 
@@ -159,7 +190,7 @@ def test_options_cpu_compiler_flags_native(test, device):
 
 
 def test_options_opt_level_hash(test, device):
-    """Changing warp.config.optimization_level must change the module hash."""
+    """Verify that changing warp.config.optimization_level must change the module hash."""
     module = wp.get_module(__name__)
 
     # Ensure module option is None so the config value is used
@@ -197,13 +228,13 @@ devices = get_test_devices()
 
 class TestOptions(unittest.TestCase):
     def test_set_module_options_via_runpy(self):
-        """set_module_options/get_module_options should work when the calling module is run via runpy."""
+        """Verify that set_module_options/get_module_options should work when the calling module is run via runpy."""
         namespace = runpy.run_module("warp.tests.aux_test_options_runpy", run_name="__main__")
         self.assertTrue(namespace["_result"]["success"])
         self.assertFalse(namespace["_result"]["enable_backward"])
 
     def test_set_module_options_via_runpy_preimported(self):
-        """set_module_options should target __main__ even when the module is already in sys.modules.
+        """Verify that set_module_options should target __main__ even when the module is already in sys.modules.
 
         When a launcher does ``runpy.run_module(mod, run_name="__main__")``,
         the module may already be imported under its qualified name.
@@ -229,7 +260,7 @@ class TestOptions(unittest.TestCase):
         self.assertFalse(main_module.options["enable_backward"])
 
     def test_cpu_target_output_name_differentiation(self):
-        """CPU output filenames must distinguish LLVM and native ISA targets."""
+        """Verify that CPU output filenames must distinguish LLVM and native ISA targets."""
         module = wp.get_module(__name__)
         device = wp.get_device("cpu")
 
@@ -263,7 +294,7 @@ class TestOptions(unittest.TestCase):
             module.options["cpu_compiler_flags"] = old_flags
 
     def test_cpu_isa_aot_warning(self):
-        """compile_aot_module for CPU with -march=native must emit a portability warning."""
+        """Verify that compile_aot_module for CPU with -march=native must emit a portability warning."""
         module = wp.get_module(__name__)
         old_flags = wp.config.cpu_compiler_flags
 
@@ -289,7 +320,7 @@ class TestOptions(unittest.TestCase):
             wp._src.logger._warnings_seen.update(saved_warnings)
 
     def test_cpu_isa_aot_warning_metadata(self):
-        """compile_aot_module CPU -march=native warning must carry warning metadata."""
+        """Verify that compile_aot_module CPU -march=native warning must carry warning metadata."""
         module = wp.get_module(__name__)
         old_flags = wp.config.cpu_compiler_flags
 
@@ -318,7 +349,7 @@ class TestOptions(unittest.TestCase):
             module.hashers.clear()
 
     def test_get_caller_module_name_error_message(self):
-        """_get_caller_module_name should raise RuntimeError with a helpful message when all fallbacks fail."""
+        """Verify that _get_caller_module_name should raise RuntimeError with a helpful message when all fallbacks fail."""
         # Build a fake frame where all fallback steps fail:
         # - __name__ is None (not a normal module or __main__)
         # - __spec__ is None
@@ -344,6 +375,12 @@ add_function_test(TestOptions, "test_options_backward_1", test_options_backward_
 add_function_test(TestOptions, "test_options_backward_2", test_options_backward_2, devices=devices)
 add_function_test(TestOptions, "test_options_backward_3", test_options_backward_3, devices=devices)
 add_function_test(TestOptions, "test_options_backward_4", test_options_backward_4, devices=devices)
+add_function_test(
+    TestOptions,
+    "test_kernel_enable_backward_propagates_to_function",
+    test_kernel_enable_backward_propagates_to_function,
+    devices=devices,
+)
 add_function_test(TestOptions, "test_options_opt_level", test_options_opt_level, devices=devices, check_output=False)
 add_function_test(
     TestOptions, "test_options_cpu_compiler_flags_generic", test_options_cpu_compiler_flags_generic, devices=devices
