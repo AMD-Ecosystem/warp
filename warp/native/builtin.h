@@ -25,20 +25,25 @@
 #define CUDA_CALLABLE __host__ __device__
 #define CUDA_CALLABLE_DEVICE __device__
 
-// Shared memory helpers — on CUDA these are plain __shared__ declarations.
-// On HIP, types with non-trivial constructors (e.g. vec_t<3,float>) cannot
-// use __shared__ directly; we use raw byte storage + reinterpret_cast.
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+// Shared memory helpers. A __shared__ array of a type with a constructor
+// (vec_t<3,float>) is rejected by HIP, and NVRTC diagnoses the dynamic
+// initialization CUDA then ignores; both declare raw byte storage aligned
+// for T and view it as T. The element type must be trivially copyable and
+// destructible, as for the storage upstream uses in the tile reductions.
 #define WP_SHARED_ARRAY(T, name, count) \
-    __shared__ char name##_buf_[sizeof(T) * (count)]; \
+    static_assert( \
+        __is_trivially_copyable(T) && __is_trivially_destructible(T), \
+        "tile element type must be trivially copyable and destructible" \
+    ); \
+    __shared__ alignas(T) char name##_buf_[sizeof(T) * (count)]; \
     T* name = reinterpret_cast<T*>(name##_buf_)
 #define WP_SHARED_VAR(T, name) \
-    __shared__ char name##_buf_[sizeof(T)]; \
+    static_assert( \
+        __is_trivially_copyable(T) && __is_trivially_destructible(T), \
+        "tile element type must be trivially copyable and destructible" \
+    ); \
+    __shared__ alignas(T) char name##_buf_[sizeof(T)]; \
     T& name = *reinterpret_cast<T*>(name##_buf_)
-#else
-#define WP_SHARED_ARRAY(T, name, count) __shared__ T name[count]
-#define WP_SHARED_VAR(T, name) __shared__ T name
-#endif
 
 #endif
 
