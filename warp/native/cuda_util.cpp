@@ -18,6 +18,7 @@
 #endif
 #endif  // !__HIP_PLATFORM_AMD__
 
+#include <cstdlib>
 #include <mutex>
 #include <queue>
 #include <unordered_set>
@@ -254,6 +255,11 @@ static bool get_driver_entry_point(const char* name, int version, void** pfn)
 bool init_cuda_driver()
 {
 #if defined(__HIP_PLATFORM_AMD__)
+    // ROCm gives a kernel whose scratch exceeds HSA_SCRATCH_SINGLE_LIMIT a new scratch allocation on every dispatch,
+    // which delays each of its dispatches. Raise the default before the runtime reads it, unless the user set a value.
+#if !defined(_WIN32)
+    setenv("HSA_SCRATCH_SINGLE_LIMIT", "1073741824", 0);
+#endif
     hipError_t res = hipInit(0);
     if (res != hipSuccess) {
         fprintf(stderr, "Warp CUDA warning: Failed to initialize HIP runtime\n");
@@ -415,11 +421,31 @@ bool init_cuda_driver()
 
 bool is_cuda_driver_initialized() { return cuda_driver_initialized; }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// The CUDA driver API (cu*) reports a failure through its return value only. On HIP the stand-ins below are
+// HIP runtime calls, and a failed runtime call ALSO stays pending as the thread's last error. The next reader
+// of hipGetLastError() then blames it on unrelated work: rocPRIM reads it after every internal launch and
+// returns early, so scans, run-length encoding and sparse builds silently produce wrong results. No failure
+// may stay pending once Warp has its return code, so every stand-in returns through this helper and the two
+// result checkers below consume it as well.
+static inline hipError_t hip_driver_result(hipError_t result)
+{
+    // hipErrorNotReady is the normal answer of a stream or event query and sets nothing: leave whatever
+    // is pending alone there.
+    if (result != hipSuccess && result != hipErrorNotReady)
+        (void)hipGetLastError();
+    return result;
+}
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
 bool check_cuda_result(cudaError_t code, const char* func, const char* file, int line)
 {
     if (code == cudaSuccess)
         return true;
 
+#if defined(__HIP_PLATFORM_AMD__)
+    (void)hipGetLastError();  // reported below; do not leave it pending (see hip_driver_result)
+#endif
     wp::set_error_string(
         "Warp CUDA error %u: %s (in function %s, %s:%d)", unsigned(code), cudaGetErrorString(code), func, file, line
     );
@@ -432,6 +458,7 @@ bool check_cu_result(CUresult result, const char* func, const char* file, int li
         return true;
 
 #if defined(__HIP_PLATFORM_AMD__)
+    (void)hipGetLastError();  // reported below; do not leave it pending (see hip_driver_result)
     const char* errString = hipGetErrorString(result);
 #else
     const char* errString = NULL;
@@ -766,7 +793,7 @@ static CUresult driver_entry_point_error(const char* function)
 CUresult cuDriverGetVersion_f(int* version)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDriverGetVersion(version);
+    return hip_driver_result(hipDriverGetVersion(version));
 #else
     return pfn_cuDriverGetVersion ? pfn_cuDriverGetVersion(version) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -799,7 +826,7 @@ CUresult cuGetErrorString_f(CUresult result, const char** pstr)
 CUresult cuInit_f(unsigned int flags)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipInit(flags);
+    return hip_driver_result(hipInit(flags));
 #else
     return pfn_cuInit ? pfn_cuInit(flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -808,7 +835,7 @@ CUresult cuInit_f(unsigned int flags)
 CUresult cuDeviceGet_f(CUdevice* dev, int ordinal)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDeviceGet(dev, ordinal);
+    return hip_driver_result(hipDeviceGet(dev, ordinal));
 #else
     return pfn_cuDeviceGet ? pfn_cuDeviceGet(dev, ordinal) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -819,7 +846,7 @@ CUresult cuDeviceGetCount_f(int* count)
 #if defined(__HIP_PLATFORM_AMD__)
     if (!count)
         return CUDA_ERROR_NOT_INITIALIZED;
-    return hipGetDeviceCount(count);
+    return hip_driver_result(hipGetDeviceCount(count));
 #else
     if (pfn_cuDeviceGetCount)
         return pfn_cuDeviceGetCount(count);
@@ -835,7 +862,7 @@ CUresult cuDeviceGetCount_f(int* count)
 CUresult cuDeviceGetName_f(char* name, int len, CUdevice dev)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDeviceGetName(name, len, dev);
+    return hip_driver_result(hipDeviceGetName(name, len, dev));
 #else
     return pfn_cuDeviceGetName ? pfn_cuDeviceGetName(name, len, dev) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -849,7 +876,7 @@ CUresult cuDeviceGetAttribute_f(int* value, CUdevice_attribute attrib, CUdevice 
             *value = 0;
         return CUDA_SUCCESS;
     }
-    return hipDeviceGetAttribute(value, static_cast<hipDeviceAttribute_t>(attrib), dev);
+    return hip_driver_result(hipDeviceGetAttribute(value, static_cast<hipDeviceAttribute_t>(attrib), dev));
 #else
     return pfn_cuDeviceGetAttribute ? pfn_cuDeviceGetAttribute(value, attrib, dev) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -860,7 +887,7 @@ CUresult cuDeviceGetUuid_f(CUuuid* uuid, CUdevice dev)
 #if defined(__HIP_PLATFORM_AMD__)
     if (!uuid)
         return CUDA_ERROR_NOT_SUPPORTED;
-    return hipDeviceGetUuid(uuid, dev);
+    return hip_driver_result(hipDeviceGetUuid(uuid, dev));
 #else
     return pfn_cuDeviceGetUuid ? pfn_cuDeviceGetUuid(uuid, dev) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -894,7 +921,7 @@ CUresult cuDevicePrimaryCtxRelease_f(CUdevice dev)
 CUresult cuDeviceCanAccessPeer_f(int* can_access, CUdevice dev, CUdevice peer_dev)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDeviceCanAccessPeer(can_access, dev, peer_dev);
+    return hip_driver_result(hipDeviceCanAccessPeer(can_access, dev, peer_dev));
 #else
     return pfn_cuDeviceCanAccessPeer ? pfn_cuDeviceCanAccessPeer(can_access, dev, peer_dev) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -903,7 +930,7 @@ CUresult cuDeviceCanAccessPeer_f(int* can_access, CUdevice dev, CUdevice peer_de
 CUresult cuMemGetInfo_f(size_t* free, size_t* total)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipMemGetInfo(free, total);
+    return hip_driver_result(hipMemGetInfo(free, total));
 #else
     return pfn_cuMemGetInfo ? pfn_cuMemGetInfo(free, total) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -924,10 +951,10 @@ CUresult cuMemcpyBatchAsync_f(
 {
 #if defined(__HIP_PLATFORM_AMD__)
 #if HIP_VERSION >= 70100000
-    return hipMemcpyBatchAsync(
+    return hip_driver_result(hipMemcpyBatchAsync(
         reinterpret_cast<void**>(dsts), reinterpret_cast<void**>(srcs), sizes, count, attrs, attrsIdxs, numAttrs,
         failIdx, hStream
-    );
+    ));
 #else
     (void)dsts;
     (void)srcs;
@@ -956,7 +983,7 @@ CUresult cuCtxGetCurrent_f(CUcontext* ctx)
     int device = -1;
     hipError_t res = hipGetDevice(&device);
     if (res != hipSuccess)
-        return res;
+        return hip_driver_result(res);
     HipContext* context = get_hip_context_for_device(device);
     if (!context)
         return CUDA_ERROR_NOT_INITIALIZED;
@@ -972,7 +999,7 @@ CUresult cuCtxSetCurrent_f(CUcontext ctx)
 #if defined(__HIP_PLATFORM_AMD__)
     if (!ctx)
         return CUDA_SUCCESS;
-    return hipSetDevice(ctx->device);
+    return hip_driver_result(hipSetDevice(ctx->device));
 #else
     return pfn_cuCtxSetCurrent ? pfn_cuCtxSetCurrent(ctx) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1017,7 +1044,7 @@ CUresult cuCtxPopCurrent_f(CUcontext* ctx)
 CUresult cuCtxSynchronize_f()
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDeviceSynchronize();
+    return hip_driver_result(hipDeviceSynchronize());
 #else
     return pfn_cuCtxSynchronize ? pfn_cuCtxSynchronize() : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1052,7 +1079,7 @@ CUresult cuCtxGetDevice_f(CUdevice* dev)
     int device = -1;
     hipError_t res = hipGetDevice(&device);
     if (res != hipSuccess)
-        return res;
+        return hip_driver_result(res);
     *dev = static_cast<CUdevice>(device);
     return CUDA_SUCCESS;
 #else
@@ -1070,7 +1097,7 @@ CUresult cuCtxCreate_f(CUcontext* ctx, unsigned int flags, CUdevice dev)
     if (!context)
         return CUDA_ERROR_NOT_INITIALIZED;
     *ctx = context;
-    return hipSetDevice(context->device);
+    return hip_driver_result(hipSetDevice(context->device));
 #else
     return pfn_cuCtxCreate ? pfn_cuCtxCreate(ctx, flags, dev) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1091,7 +1118,7 @@ CUresult cuCtxEnablePeerAccess_f(CUcontext peer_ctx, unsigned int flags)
 #if defined(__HIP_PLATFORM_AMD__)
     if (!peer_ctx)
         return CUDA_ERROR_NOT_INITIALIZED;
-    return hipDeviceEnablePeerAccess(peer_ctx->device, flags);
+    return hip_driver_result(hipDeviceEnablePeerAccess(peer_ctx->device, flags));
 #else
     return pfn_cuCtxEnablePeerAccess ? pfn_cuCtxEnablePeerAccess(peer_ctx, flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1102,7 +1129,7 @@ CUresult cuCtxDisablePeerAccess_f(CUcontext peer_ctx)
 #if defined(__HIP_PLATFORM_AMD__)
     if (!peer_ctx)
         return CUDA_ERROR_NOT_INITIALIZED;
-    return hipDeviceDisablePeerAccess(peer_ctx->device);
+    return hip_driver_result(hipDeviceDisablePeerAccess(peer_ctx->device));
 #else
     return pfn_cuCtxDisablePeerAccess ? pfn_cuCtxDisablePeerAccess(peer_ctx) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1111,7 +1138,7 @@ CUresult cuCtxDisablePeerAccess_f(CUcontext peer_ctx)
 CUresult cuStreamCreate_f(CUstream* stream, unsigned int flags)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamCreateWithFlags(stream, flags);
+    return hip_driver_result(hipStreamCreateWithFlags(stream, flags));
 #else
     return pfn_cuStreamCreate ? pfn_cuStreamCreate(stream, flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1120,7 +1147,7 @@ CUresult cuStreamCreate_f(CUstream* stream, unsigned int flags)
 CUresult cuStreamDestroy_f(CUstream stream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamDestroy(stream);
+    return hip_driver_result(hipStreamDestroy(stream));
 #else
     return pfn_cuStreamDestroy ? pfn_cuStreamDestroy(stream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1129,7 +1156,7 @@ CUresult cuStreamDestroy_f(CUstream stream)
 CUresult cuStreamQuery_f(CUstream stream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamQuery(stream);
+    return hip_driver_result(hipStreamQuery(stream));
 #else
     return pfn_cuStreamQuery ? pfn_cuStreamQuery(stream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1138,7 +1165,7 @@ CUresult cuStreamQuery_f(CUstream stream)
 CUresult cuStreamSynchronize_f(CUstream stream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamSynchronize(stream);
+    return hip_driver_result(hipStreamSynchronize(stream));
 #else
     return pfn_cuStreamSynchronize ? pfn_cuStreamSynchronize(stream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1147,7 +1174,7 @@ CUresult cuStreamSynchronize_f(CUstream stream)
 CUresult cuStreamWaitEvent_f(CUstream stream, CUevent event, unsigned int flags)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamWaitEvent(stream, event, flags);
+    return hip_driver_result(hipStreamWaitEvent(stream, event, flags));
 #else
     return pfn_cuStreamWaitEvent ? pfn_cuStreamWaitEvent(stream, event, flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1174,10 +1201,10 @@ CUresult cuStreamGetCaptureInfo_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamGetCaptureInfo_v2(
+    return hip_driver_result(hipStreamGetCaptureInfo_v2(
         stream, captureStatus_out, reinterpret_cast<unsigned long long*>(id_out), graph_out, dependencies_out,
         numDependencies_out
-    );
+    ));
 #else
     return pfn_cuStreamGetCaptureInfo
         ? pfn_cuStreamGetCaptureInfo(
@@ -1192,7 +1219,7 @@ CUresult cuStreamUpdateCaptureDependencies_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamUpdateCaptureDependencies(stream, dependencies, numDependencies, flags);
+    return hip_driver_result(hipStreamUpdateCaptureDependencies(stream, dependencies, numDependencies, flags));
 #else
     return pfn_cuStreamUpdateCaptureDependencies
         ? pfn_cuStreamUpdateCaptureDependencies(stream, dependencies, numDependencies, flags)
@@ -1203,7 +1230,7 @@ CUresult cuStreamUpdateCaptureDependencies_f(
 CUresult cuStreamCreateWithPriority_f(CUstream* phStream, unsigned int flags, int priority)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamCreateWithPriority(phStream, flags, priority);
+    return hip_driver_result(hipStreamCreateWithPriority(phStream, flags, priority));
 #else
     return pfn_cuStreamCreateWithPriority ? pfn_cuStreamCreateWithPriority(phStream, flags, priority)
                                           : DRIVER_ENTRY_POINT_ERROR;
@@ -1213,7 +1240,7 @@ CUresult cuStreamCreateWithPriority_f(CUstream* phStream, unsigned int flags, in
 CUresult cuStreamGetPriority_f(CUstream hStream, int* priority)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipStreamGetPriority(hStream, priority);
+    return hip_driver_result(hipStreamGetPriority(hStream, priority));
 #else
     return pfn_cuStreamGetPriority ? pfn_cuStreamGetPriority(hStream, priority) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1222,7 +1249,7 @@ CUresult cuStreamGetPriority_f(CUstream hStream, int* priority)
 CUresult cuEventCreate_f(CUevent* event, unsigned int flags)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipEventCreateWithFlags(event, flags);
+    return hip_driver_result(hipEventCreateWithFlags(event, flags));
 #else
     return pfn_cuEventCreate ? pfn_cuEventCreate(event, flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1231,7 +1258,7 @@ CUresult cuEventCreate_f(CUevent* event, unsigned int flags)
 CUresult cuEventDestroy_f(CUevent event)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipEventDestroy(event);
+    return hip_driver_result(hipEventDestroy(event));
 #else
     return pfn_cuEventDestroy ? pfn_cuEventDestroy(event) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1240,7 +1267,7 @@ CUresult cuEventDestroy_f(CUevent event)
 CUresult cuEventQuery_f(CUevent event)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipEventQuery(event);
+    return hip_driver_result(hipEventQuery(event));
 #else
     return pfn_cuEventQuery ? pfn_cuEventQuery(event) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1249,7 +1276,7 @@ CUresult cuEventQuery_f(CUevent event)
 CUresult cuEventRecord_f(CUevent event, CUstream stream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipEventRecord(event, stream);
+    return hip_driver_result(hipEventRecord(event, stream));
 #else
     return pfn_cuEventRecord ? pfn_cuEventRecord(event, stream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1259,7 +1286,7 @@ CUresult cuEventRecordWithFlags_f(CUevent event, CUstream stream, unsigned int f
 {
 #if defined(__HIP_PLATFORM_AMD__)
     (void)flags;
-    return hipEventRecord(event, stream);
+    return hip_driver_result(hipEventRecord(event, stream));
 #else
     return pfn_cuEventRecordWithFlags ? pfn_cuEventRecordWithFlags(event, stream, flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1268,7 +1295,7 @@ CUresult cuEventRecordWithFlags_f(CUevent event, CUstream stream, unsigned int f
 CUresult cuEventSynchronize_f(CUevent event)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipEventSynchronize(event);
+    return hip_driver_result(hipEventSynchronize(event));
 #else
     return pfn_cuEventSynchronize ? pfn_cuEventSynchronize(event) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1303,7 +1330,7 @@ CUresult cuGraphAddNode_f(
 CUresult cuGraphNodeGetDependentNodes_f(CUgraphNode hNode, CUgraphNode* dependentNodes, size_t* numDependentNodes)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphNodeGetDependentNodes(hNode, dependentNodes, numDependentNodes);
+    return hip_driver_result(hipGraphNodeGetDependentNodes(hNode, dependentNodes, numDependentNodes));
 #else
     return pfn_cuGraphNodeGetDependentNodes ? pfn_cuGraphNodeGetDependentNodes(hNode, dependentNodes, numDependentNodes)
                                             : DRIVER_ENTRY_POINT_ERROR;
@@ -1313,7 +1340,7 @@ CUresult cuGraphNodeGetDependentNodes_f(CUgraphNode hNode, CUgraphNode* dependen
 CUresult cuGraphNodeGetType_f(CUgraphNode hNode, CUgraphNodeType* type)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphNodeGetType(hNode, type);
+    return hip_driver_result(hipGraphNodeGetType(hNode, type));
 #else
     return pfn_cuGraphNodeGetType ? pfn_cuGraphNodeGetType(hNode, type) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1327,7 +1354,7 @@ CUresult cuModuleLoadDataEx_f(
     (void)numOptions;
     (void)options;
     (void)optionValues;
-    return hipModuleLoadData(module, image);
+    return hip_driver_result(hipModuleLoadData(module, image));
 #else
     return pfn_cuModuleLoadDataEx ? pfn_cuModuleLoadDataEx(module, image, numOptions, options, optionValues)
                                   : DRIVER_ENTRY_POINT_ERROR;
@@ -1337,7 +1364,7 @@ CUresult cuModuleLoadDataEx_f(
 CUresult cuModuleUnload_f(CUmodule hmod)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipModuleUnload(hmod);
+    return hip_driver_result(hipModuleUnload(hmod));
 #else
     return pfn_cuModuleUnload ? pfn_cuModuleUnload(hmod) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1346,7 +1373,7 @@ CUresult cuModuleUnload_f(CUmodule hmod)
 CUresult cuModuleGetFunction_f(CUfunction* hfunc, CUmodule hmod, const char* name)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipModuleGetFunction(hfunc, hmod, name);
+    return hip_driver_result(hipModuleGetFunction(hfunc, hmod, name));
 #else
     return pfn_cuModuleGetFunction ? pfn_cuModuleGetFunction(hfunc, hmod, name) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1367,9 +1394,9 @@ CUresult cuLaunchKernel_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipModuleLaunchKernel(
+    return hip_driver_result(hipModuleLaunchKernel(
         f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra
-    );
+    ));
 #else
     return pfn_cuLaunchKernel ? pfn_cuLaunchKernel(
                                     f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes,
@@ -1389,7 +1416,9 @@ CUresult cuOccupancyMaxPotentialBlockSize_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipModuleOccupancyMaxPotentialBlockSize(minGridSize, blockSize, func, dynamicSMemSize, blockSizeLimit);
+    return hip_driver_result(
+        hipModuleOccupancyMaxPotentialBlockSize(minGridSize, blockSize, func, dynamicSMemSize, blockSizeLimit)
+    );
 #else
     return pfn_cuOccupancyMaxPotentialBlockSize
         ? pfn_cuOccupancyMaxPotentialBlockSize(
@@ -1406,10 +1435,10 @@ CUresult cuMemcpyPeerAsync_f(
 #if defined(__HIP_PLATFORM_AMD__)
     if (!dst_ctx || !src_ctx)
         return CUDA_ERROR_NOT_INITIALIZED;
-    return hipMemcpyPeerAsync(
+    return hip_driver_result(hipMemcpyPeerAsync(
         reinterpret_cast<void*>(dst_ptr), dst_ctx->device, reinterpret_cast<const void*>(src_ptr), src_ctx->device, n,
         stream
-    );
+    ));
 #else
     return pfn_cuMemcpyPeerAsync ? pfn_cuMemcpyPeerAsync(dst_ptr, dst_ctx, src_ptr, src_ctx, n, stream)
                                  : DRIVER_ENTRY_POINT_ERROR;
@@ -1419,7 +1448,7 @@ CUresult cuMemcpyPeerAsync_f(
 CUresult cuPointerGetAttribute_f(void* data, CUpointer_attribute attribute, CUdeviceptr ptr)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipPointerGetAttribute(data, attribute, ptr);
+    return hip_driver_result(hipPointerGetAttribute(data, attribute, ptr));
 #else
     return pfn_cuPointerGetAttribute ? pfn_cuPointerGetAttribute(data, attribute, ptr) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1428,7 +1457,7 @@ CUresult cuPointerGetAttribute_f(void* data, CUpointer_attribute attribute, CUde
 CUresult cuGraphicsMapResources_f(unsigned int count, CUgraphicsResource* resources, CUstream stream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphicsMapResources(count, resources, stream);
+    return hip_driver_result(hipGraphicsMapResources(count, resources, stream));
 #else
     return pfn_cuGraphicsMapResources ? pfn_cuGraphicsMapResources(count, resources, stream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1437,7 +1466,7 @@ CUresult cuGraphicsMapResources_f(unsigned int count, CUgraphicsResource* resour
 CUresult cuGraphicsUnmapResources_f(unsigned int count, CUgraphicsResource* resources, CUstream hStream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphicsUnmapResources(count, resources, hStream);
+    return hip_driver_result(hipGraphicsUnmapResources(count, resources, hStream));
 #else
     return pfn_cuGraphicsUnmapResources ? pfn_cuGraphicsUnmapResources(count, resources, hStream)
                                         : DRIVER_ENTRY_POINT_ERROR;
@@ -1447,7 +1476,7 @@ CUresult cuGraphicsUnmapResources_f(unsigned int count, CUgraphicsResource* reso
 CUresult cuGraphicsResourceGetMappedPointer_f(CUdeviceptr* pDevPtr, size_t* pSize, CUgraphicsResource resource)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphicsResourceGetMappedPointer(reinterpret_cast<void**>(pDevPtr), pSize, resource);
+    return hip_driver_result(hipGraphicsResourceGetMappedPointer(reinterpret_cast<void**>(pDevPtr), pSize, resource));
 #else
     return pfn_cuGraphicsResourceGetMappedPointer ? pfn_cuGraphicsResourceGetMappedPointer(pDevPtr, pSize, resource)
                                                   : DRIVER_ENTRY_POINT_ERROR;
@@ -1489,7 +1518,7 @@ CUresult cuGraphicsSubResourceGetMappedArray_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel);
+    return hip_driver_result(hipGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel));
 #else
     return pfn_cuGraphicsSubResourceGetMappedArray
         ? pfn_cuGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel)
@@ -1500,7 +1529,7 @@ CUresult cuGraphicsSubResourceGetMappedArray_f(
 CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipGraphicsUnregisterResource(resource);
+    return hip_driver_result(hipGraphicsUnregisterResource(resource));
 #else
     return pfn_cuGraphicsUnregisterResource ? pfn_cuGraphicsUnregisterResource(resource) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1509,7 +1538,7 @@ CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource)
 CUresult cuModuleGetGlobal_f(CUdeviceptr* dptr, size_t* bytes, CUmodule hmod, const char* name)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipModuleGetGlobal(reinterpret_cast<hipDeviceptr_t*>(dptr), bytes, hmod, name);
+    return hip_driver_result(hipModuleGetGlobal(reinterpret_cast<hipDeviceptr_t*>(dptr), bytes, hmod, name));
 #else
     return pfn_cuModuleGetGlobal ? pfn_cuModuleGetGlobal(dptr, bytes, hmod, name) : DRIVER_ENTRY_POINT_ERROR;
 }
@@ -1524,7 +1553,7 @@ CUresult cuOccupancyMaxActiveClusters_f(int* numClusters, CUfunction func, const
 CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int value)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipFuncSetAttribute(hfunc, static_cast<hipFuncAttribute>(attrib), value);
+    return hip_driver_result(hipFuncSetAttribute(hfunc, static_cast<hipFuncAttribute>(attrib), value));
 #else
     return pfn_cuFuncSetAttribute ? pfn_cuFuncSetAttribute(hfunc, attrib, value) : DRIVER_ENTRY_POINT_ERROR;
 }
@@ -1538,7 +1567,7 @@ CUresult cuFuncGetAttribute_f(int* pi, CUfunction_attribute attrib, CUfunction h
 CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipIpcGetEventHandle(pHandle, event);
+    return hip_driver_result(hipIpcGetEventHandle(pHandle, event));
 #else
     return pfn_cuIpcGetEventHandle ? pfn_cuIpcGetEventHandle(pHandle, event) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1547,7 +1576,7 @@ CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event)
 CUresult cuIpcOpenEventHandle_f(CUevent* phEvent, CUipcEventHandle handle)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipIpcOpenEventHandle(phEvent, handle);
+    return hip_driver_result(hipIpcOpenEventHandle(phEvent, handle));
 #else
     return pfn_cuIpcOpenEventHandle ? pfn_cuIpcOpenEventHandle(phEvent, handle) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1556,7 +1585,7 @@ CUresult cuIpcOpenEventHandle_f(CUevent* phEvent, CUipcEventHandle handle)
 CUresult cuIpcGetMemHandle_f(CUipcMemHandle* pHandle, CUdeviceptr dptr)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipIpcGetMemHandle(pHandle, reinterpret_cast<void*>(dptr));
+    return hip_driver_result(hipIpcGetMemHandle(pHandle, reinterpret_cast<void*>(dptr)));
 #else
     return pfn_cuIpcGetMemHandle ? pfn_cuIpcGetMemHandle(pHandle, dptr) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1565,7 +1594,7 @@ CUresult cuIpcGetMemHandle_f(CUipcMemHandle* pHandle, CUdeviceptr dptr)
 CUresult cuIpcOpenMemHandle_f(CUdeviceptr* pdptr, CUipcMemHandle handle, unsigned int flags)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipIpcOpenMemHandle(reinterpret_cast<void**>(pdptr), handle, flags);
+    return hip_driver_result(hipIpcOpenMemHandle(reinterpret_cast<void**>(pdptr), handle, flags));
 #else
     return pfn_cuIpcOpenMemHandle ? pfn_cuIpcOpenMemHandle(pdptr, handle, flags) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1574,7 +1603,7 @@ CUresult cuIpcOpenMemHandle_f(CUdeviceptr* pdptr, CUipcMemHandle handle, unsigne
 CUresult cuIpcCloseMemHandle_f(CUdeviceptr dptr)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipIpcCloseMemHandle(reinterpret_cast<void*>(dptr));
+    return hip_driver_result(hipIpcCloseMemHandle(reinterpret_cast<void*>(dptr)));
 #else
     return pfn_cuIpcCloseMemHandle ? pfn_cuIpcCloseMemHandle(dptr) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1584,7 +1613,7 @@ CUresult cuIpcCloseMemHandle_f(CUdeviceptr dptr)
 CUresult cuArrayCreate_f(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipArrayCreate(pHandle, pAllocateArray);
+    return hip_driver_result(hipArrayCreate(pHandle, pAllocateArray));
 #else
     return pfn_cuArrayCreate ? pfn_cuArrayCreate(pHandle, pAllocateArray) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1593,7 +1622,7 @@ CUresult cuArrayCreate_f(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocat
 CUresult cuArrayDestroy_f(CUarray hArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipArrayDestroy(hArray);
+    return hip_driver_result(hipArrayDestroy(hArray));
 #else
     return pfn_cuArrayDestroy ? pfn_cuArrayDestroy(hArray) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1602,7 +1631,7 @@ CUresult cuArrayDestroy_f(CUarray hArray)
 CUresult cuArray3DCreate_f(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipArray3DCreate(pHandle, pAllocateArray);
+    return hip_driver_result(hipArray3DCreate(pHandle, pAllocateArray));
 #else
     return pfn_cuArray3DCreate ? pfn_cuArray3DCreate(pHandle, pAllocateArray) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1611,7 +1640,7 @@ CUresult cuArray3DCreate_f(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAll
 CUresult cuArray3DGetDescriptor_f(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipArray3DGetDescriptor(pArrayDescriptor, hArray);
+    return hip_driver_result(hipArray3DGetDescriptor(pArrayDescriptor, hArray));
 #else
     return pfn_cuArray3DGetDescriptor ? pfn_cuArray3DGetDescriptor(pArrayDescriptor, hArray) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1620,7 +1649,7 @@ CUresult cuArray3DGetDescriptor_f(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUa
 CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipMemcpyParam2D(pCopy);
+    return hip_driver_result(hipMemcpyParam2D(pCopy));
 #else
     return pfn_cuMemcpy2D ? pfn_cuMemcpy2D(pCopy) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1629,7 +1658,7 @@ CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy)
 CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipMemcpyParam2DAsync(pCopy, hStream);
+    return hip_driver_result(hipMemcpyParam2DAsync(pCopy, hStream));
 #else
     return pfn_cuMemcpy2DAsync ? pfn_cuMemcpy2DAsync(pCopy, hStream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1638,7 +1667,7 @@ CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
 CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDrvMemcpy3D(pCopy);
+    return hip_driver_result(hipDrvMemcpy3D(pCopy));
 #else
     return pfn_cuMemcpy3D ? pfn_cuMemcpy3D(pCopy) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1647,7 +1676,7 @@ CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy)
 CUresult cuMemcpy3DAsync_f(const CUDA_MEMCPY3D* pCopy, CUstream hStream)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipDrvMemcpy3DAsync(pCopy, hStream);
+    return hip_driver_result(hipDrvMemcpy3DAsync(pCopy, hStream));
 #else
     return pfn_cuMemcpy3DAsync ? pfn_cuMemcpy3DAsync(pCopy, hStream) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1661,7 +1690,7 @@ CUresult cuTexObjectCreate_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipTexObjectCreate(pTexObject, pResDesc, pTexDesc, pResViewDesc);
+    return hip_driver_result(hipTexObjectCreate(pTexObject, pResDesc, pTexDesc, pResViewDesc));
 #else
     return pfn_cuTexObjectCreate ? pfn_cuTexObjectCreate(pTexObject, pResDesc, pTexDesc, pResViewDesc)
                                  : DRIVER_ENTRY_POINT_ERROR;
@@ -1671,7 +1700,7 @@ CUresult cuTexObjectCreate_f(
 CUresult cuTexObjectDestroy_f(CUtexObject texObject)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipTexObjectDestroy(texObject);
+    return hip_driver_result(hipTexObjectDestroy(texObject));
 #else
     return pfn_cuTexObjectDestroy ? pfn_cuTexObjectDestroy(texObject) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1683,7 +1712,9 @@ CUresult cuMipmappedArrayCreate_f(
 {
 #if defined(__HIP_PLATFORM_AMD__)
     // HIP takes a non-const descriptor pointer; it does not modify it
-    return hipMipmappedArrayCreate(pHandle, const_cast<HIP_ARRAY3D_DESCRIPTOR*>(pMipmappedArrayDesc), numMipmapLevels);
+    return hip_driver_result(
+        hipMipmappedArrayCreate(pHandle, const_cast<HIP_ARRAY3D_DESCRIPTOR*>(pMipmappedArrayDesc), numMipmapLevels)
+    );
 #else
     return pfn_cuMipmappedArrayCreate ? pfn_cuMipmappedArrayCreate(pHandle, pMipmappedArrayDesc, numMipmapLevels)
                                       : DRIVER_ENTRY_POINT_ERROR;
@@ -1693,7 +1724,7 @@ CUresult cuMipmappedArrayCreate_f(
 CUresult cuMipmappedArrayDestroy_f(CUmipmappedArray hMipmappedArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipMipmappedArrayDestroy(hMipmappedArray);
+    return hip_driver_result(hipMipmappedArrayDestroy(hMipmappedArray));
 #else
     return pfn_cuMipmappedArrayDestroy ? pfn_cuMipmappedArrayDestroy(hMipmappedArray) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1702,7 +1733,7 @@ CUresult cuMipmappedArrayDestroy_f(CUmipmappedArray hMipmappedArray)
 CUresult cuMipmappedArrayGetLevel_f(CUarray* pLevelArray, CUmipmappedArray hMipmappedArray, unsigned int level)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    return hipMipmappedArrayGetLevel(pLevelArray, hMipmappedArray, level);
+    return hip_driver_result(hipMipmappedArrayGetLevel(pLevelArray, hMipmappedArray, level));
 #else
     return pfn_cuMipmappedArrayGetLevel ? pfn_cuMipmappedArrayGetLevel(pLevelArray, hMipmappedArray, level)
                                         : DRIVER_ENTRY_POINT_ERROR;

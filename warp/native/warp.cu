@@ -42,6 +42,19 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(__HIP_PLATFORM_AMD__)
+// True on success. A failed HIP runtime call also stays pending as the thread's last error, where rocPRIM and
+// Warp's launch checks would read it against unrelated work (see hip_driver_result in cuda_util.cpp); calls
+// whose failure is handled locally go through this so that nothing stays pending.
+static inline bool hip_call_ok(hipError_t result)
+{
+    if (result == hipSuccess)
+        return true;
+    (void)hipGetLastError();
+    return false;
+}
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
 #define check_any(result) (check_generic(result, __FILE__, __LINE__))
 #define check_nvrtc(code) (check_nvrtc_result(code, __FILE__, __LINE__))
 #if !defined(__HIP_PLATFORM_AMD__)
@@ -352,10 +365,10 @@ int cuda_init()
 #if defined(__HIP_PLATFORM_AMD__)
                 g_devices[i].is_ipc_supported = 0;
                 int prev_device = -1;
-                if (hipGetDevice(&prev_device) == hipSuccess) {
-                    if (hipSetDevice(i) == hipSuccess) {
+                if (hip_call_ok(hipGetDevice(&prev_device))) {
+                    if (hip_call_ok(hipSetDevice(i))) {
                         void* ipc_ptr = nullptr;
-                        if (hipMalloc(&ipc_ptr, 4) == hipSuccess) {
+                        if (hip_call_ok(hipMalloc(&ipc_ptr, 4))) {
                             CUipcMemHandle mem_handle;
                             if (cuIpcGetMemHandle_f(&mem_handle, (CUdeviceptr)ipc_ptr) == CUDA_SUCCESS) {
                                 g_devices[i].is_ipc_supported = 1;
@@ -458,7 +471,9 @@ static ContextInfo* get_context_info(CUcontext ctx)
         if (check_cu(cuCtxGetDevice_f(&device))) {
             DeviceInfo* device_info = g_device_map[device];
 
-            // workaround for https://nvbugspro.nvidia.com/bug/4456003
+            // Work around a CUDA driver bug observed with Linux driver 535.54.03: cudaFreeAsync() could crash when
+            // directly freeing a graph allocation on an uninitialized default stream. Prime the stream's allocator
+            // bookkeeping with an ordinary asynchronous allocation and free.
             if (device_info->is_mempool_supported) {
                 void* dummy = NULL;
                 check_cuda(cudaMallocAsync(&dummy, 1, NULL));
@@ -530,6 +545,26 @@ CaptureInfo* find_capture_info(uint64_t capture_id)
             return capture;
     }
     return NULL;
+}
+
+// Remember a stream that an event wait has just pulled into a capture that began on another
+// stream. CUDA accepts the dependency-set join that wp_cuda_graph_end_capture() performs; HIP
+// still reports such streams as unjoined work, so they are joined back there with events.
+static void note_forked_stream(CUstream stream)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    if (g_captures.empty() || !wp_cuda_stream_is_capturing(stream))
+        return;
+    CaptureInfo* capture = find_capture_info(get_capture_id(stream));
+    if (!capture || capture->stream == stream)
+        return;
+    for (CUstream forked : capture->forked_streams)
+        if (forked == stream)
+            return;
+    capture->forked_streams.push_back(stream);
+#else
+    (void)stream;
+#endif
 }
 
 static inline bool is_context_capturing(CUcontext context)
@@ -1105,16 +1140,38 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
                 stable_capture = stable_capture_iter->second;
         }
         // Only intercept allocations made on the capture's origin stream:
-        // pausing requires EndCapture on the origin, which is invalid while a
-        // forked stream's capture frontier is active, and a failed pause
-        // leaves the stream wedged in capture state. Forked-stream
-        // allocations keep the pooled path (alloc nodes), which multi-stream
-        // captures used before this opt-in existed.
+        // pausing requires EndCapture on the origin, and ending the capture
+        // from a forked stream is invalid. Forked-stream allocations keep the
+        // pooled path (alloc nodes), which multi-stream captures used before
+        // this opt-in existed.
         if (stable_capture && static_cast<CUstream>(stream) == stable_capture->stream) {
-            // Pause/resume must run on the stream that began the capture;
-            // ending the capture from a forked stream is invalid. The plain
-            // allocation itself is not stream-bound.
+            // Pause/resume must run on the stream that began the capture. The
+            // plain allocation itself is not stream-bound.
             CUstream origin_stream = stable_capture->stream;
+
+            // HIP refuses to end a capture while a stream that an event wait
+            // pulled into it still has unjoined work (hipErrorStreamCaptureUnjoined),
+            // and a failed pause leaves the origin stream in capture state for
+            // the rest of the process. Join every live fork into the origin
+            // before the pause and fork it again after the resume, so its
+            // later work stays in the capture; the added edges only order the
+            // fork's work around the allocation. The events live until the
+            // capture ends.
+            std::vector<CUstream> live_forks;
+            for (CUstream forked : stable_capture->forked_streams) {
+                if (forked != origin_stream && wp_cuda_stream_is_capturing(forked))
+                    live_forks.push_back(forked);
+            }
+            for (CUstream forked : live_forks) {
+                CUevent join_event = NULL;
+                if (!check_cu(cuEventCreate_f(&join_event, CU_EVENT_DISABLE_TIMING)))
+                    return NULL;
+                stable_capture->pause_events.push_back(join_event);
+                if (!check_cu(cuEventRecordWithFlags_f(join_event, forked, CU_EVENT_RECORD_DEFAULT))
+                    || !check_cu(cuStreamWaitEvent_f(origin_stream, join_event, CU_EVENT_WAIT_DEFAULT)))
+                    return NULL;
+            }
+
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(context, origin_stream, &graph))
                 return NULL;
@@ -1122,6 +1179,14 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
             if (!wp_cuda_graph_resume_capture(context, origin_stream, graph)) {
                 wp_free_device_default(context, stable_ptr);
                 return NULL;
+            }
+            for (CUstream forked : live_forks) {
+                CUevent fork_event = NULL;
+                if (!check_cu(cuEventCreate_f(&fork_event, CU_EVENT_DISABLE_TIMING)))
+                    break;
+                stable_capture->pause_events.push_back(fork_event);
+                check_cu(cuEventRecordWithFlags_f(fork_event, origin_stream, CU_EVENT_RECORD_DEFAULT));
+                check_cu(cuStreamWaitEvent_f(forked, fork_event, CU_EVENT_WAIT_DEFAULT));
             }
             if (stable_ptr) {
                 GraphAllocInfo alloc_info;
@@ -2866,36 +2931,36 @@ static void apic_capture_array_scan_device(
     );
 }
 
-void wp_array_scan_int_device(
+bool wp_array_scan_int_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT32, inclusive);
-    scan_device((const int*)in, (int*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const int*)in, (int*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
-void wp_array_scan_int64_device(
+bool wp_array_scan_int64_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT64, inclusive);
-    scan_device((const int64_t*)in, (int64_t*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const int64_t*)in, (int64_t*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
-void wp_array_scan_float_device(
+bool wp_array_scan_float_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT32, inclusive);
-    scan_device((const float*)in, (float*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const float*)in, (float*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
-void wp_array_scan_double_device(
+bool wp_array_scan_double_device(
     uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
 )
 {
     apic_capture_array_scan_device(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT64, inclusive);
-    scan_device((const double*)in, (double*)out, len, in_stride, out_stride, type_len, inclusive);
+    return scan_device((const double*)in, (double*)out, len, in_stride, out_stride, type_len, inclusive);
 }
 
 int wp_cuda_driver_version()
@@ -3138,8 +3203,7 @@ int wp_cuda_set_memory_coarse_grain(void* context, void* ptr, size_t size)
         return 0;
 
     int ordinal = wp_cuda_context_get_device_ordinal(context);
-    hipError_t err = hipMemAdvise(ptr, size, hipMemAdviseSetCoarseGrain, ordinal);
-    return err == hipSuccess ? 1 : 0;
+    return hip_call_ok(hipMemAdvise(ptr, size, hipMemAdviseSetCoarseGrain, ordinal)) ? 1 : 0;
 #else
     (void)context;
     (void)ptr;
@@ -3443,8 +3507,16 @@ uint64_t wp_cuda_context_check(void* context)
 
         // synchronize if the stream is not capturing
         if (status == cudaStreamCaptureStatusNone) {
+#if defined(__HIP_PLATFORM_AMD__)
+            // check_cuda() does not leave a failure pending on HIP (see hip_driver_result in
+            // cuda_util.cpp), so take a synchronization failure from the call itself.
+            cudaError_t sync_result = cudaDeviceSynchronize();
+            check_cuda(sync_result);
+            e = sync_result != cudaSuccess ? sync_result : cudaGetLastError();
+#else
             check_cuda(cudaDeviceSynchronize());
             e = cudaGetLastError();
+#endif  // defined(__HIP_PLATFORM_AMD__)
         }
     }
 
@@ -3506,6 +3578,7 @@ void wp_cuda_context_set_stream(void* context, void* stream, int sync)
                 CUevent cached_event = old_stream_info->cached_event;
                 check_cu(cuEventRecord_f(cached_event, old_stream));
                 check_cu(cuStreamWaitEvent_f(new_stream, cached_event, CU_EVENT_WAIT_DEFAULT));
+                note_forked_stream(new_stream);
             }
         }
 
@@ -3844,6 +3917,7 @@ void wp_cuda_stream_wait_event(void* stream, void* event, bool external)
             cuStreamWaitEvent_f(static_cast<CUstream>(stream), static_cast<CUevent>(event), CU_EVENT_WAIT_DEFAULT)
         );
     }
+    note_forked_stream(static_cast<CUstream>(stream));
 }
 
 void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, bool external)
@@ -3861,6 +3935,7 @@ void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, b
 
     check_cu(cuEventRecordWithFlags_f(static_cast<CUevent>(event), static_cast<CUstream>(other_stream), record_flags));
     check_cu(cuStreamWaitEvent_f(static_cast<CUstream>(stream), static_cast<CUevent>(event), wait_flags));
+    note_forked_stream(static_cast<CUstream>(stream));
 }
 
 int wp_cuda_stream_is_capturing(void* stream)
@@ -3892,7 +3967,19 @@ int wp_cuda_thread_exchange_capture_mode(int mode)
     return int(capture_mode);
 }
 
-uint64_t wp_cuda_stream_get_capture_id(void* stream) { return get_capture_id(static_cast<CUstream>(stream)); }
+uint64_t wp_cuda_stream_get_capture_id(void* stream)
+{
+    uint64_t id = get_capture_id(static_cast<CUstream>(stream));
+#if defined(__HIP_PLATFORM_AMD__)
+    // ROCm gives a resumed capture a new id (see wp_cuda_graph_resume_capture), and stable
+    // capture allocations pause and resume the capture. Report the id the capture began
+    // with: Python keys its capture registry by it, and a miss there skips module retention.
+    auto capture_iter = g_captures.find(id);
+    if (capture_iter != g_captures.end())
+        return capture_iter->second->begin_id;
+#endif
+    return id;
+}
 
 int wp_cuda_stream_get_priority(void* stream)
 {
@@ -4049,6 +4136,7 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
     capture->stream = cuda_stream;
     capture->context = context ? static_cast<CUcontext>(context) : get_current_context();
     capture->id = capture_id;
+    capture->begin_id = capture_id;
     capture->external = bool(external);
     capture->mode = capture_mode;
 
@@ -4087,14 +4175,41 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     bool external = capture->external;
     uint64_t capture_id = capture->id;
     std::vector<FreeInfo> tmp_allocs = capture->tmp_allocs;
+    std::vector<CUstream> forked_streams = capture->forked_streams;
+    std::vector<CUevent> pause_events = capture->pause_events;
 
     // clear capture info
     stream_info->capture = NULL;
     g_captures.erase(capture_id);
     delete capture;
 
+    // HIP counts a forked stream as unjoined until the capture stream waits on an event recorded on
+    // it, whatever the dependency set below says, and hipStreamEndCapture then fails with
+    // hipErrorStreamCaptureUnjoined. Join every stream that an event wait pulled into this capture.
+    std::vector<CUevent> join_events = pause_events;  // the stable-allocation pauses' events go with the capture
+#if defined(__HIP_PLATFORM_AMD__)
+    for (CUstream forked : forked_streams) {
+        if (!wp_cuda_stream_is_capturing(forked))
+            continue;
+        CUevent join_event = NULL;
+        if (!check_cu(cuEventCreate_f(&join_event, CU_EVENT_DISABLE_TIMING)))
+            continue;
+        check_cu(cuEventRecordWithFlags_f(join_event, forked, CU_EVENT_RECORD_DEFAULT));
+        check_cu(cuStreamWaitEvent_f(cuda_stream, join_event, CU_EVENT_WAIT_DEFAULT));
+        join_events.push_back(join_event);
+    }
+#else
+    (void)forked_streams;
+#endif
+    auto destroy_join_events = [&join_events]() {
+        for (CUevent join_event : join_events)
+            check_cu(cuEventDestroy_f(join_event));
+        join_events.clear();
+    };
+
     // a lambda to clean up on exit in case of error
-    auto clean_up = [cuda_stream, capture_id, external]() {
+    auto clean_up = [cuda_stream, capture_id, external, &destroy_join_events]() {
+        destroy_join_events();
         // unreference outstanding graph allocs so that they will be released with the user reference
         for (auto it = g_graph_allocs.begin(); it != g_graph_allocs.end(); /*noop*/) {
             GraphAllocInfo& alloc_info = it->second;
@@ -4184,11 +4299,15 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     }
 
     // for external captures, we don't instantiate the graph ourselves, so we're done
-    if (external)
+    if (external) {
+        destroy_join_events();
         return true;
+    }
 
     // end the capture
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
+    bool ended = check_cuda(cudaStreamEndCapture(cuda_stream, &graph));
+    destroy_join_events();
+    if (!ended)
         return false;
 
     // process deferred free list if no more captures are ongoing
@@ -4792,12 +4911,10 @@ bool wp_cuda_graph_insert_if_else(
         return false;
     }
 
-    // int driver_version = wp_cuda_driver_version();
-
-    // IF-ELSE nodes are only supported with CUDA 12.8+
-    // Somehow child graphs produce wrong results when an else branch is used
-    // Seems to be a bug in the CUDA driver: https://nvbugs/5241330
-    if (num_branches == 1 /*|| driver_version >= 12080*/) {
+    // Multi-graph IF-ELSE nodes are supported starting with CUDA 12.8, but CUDA 12.8 and 12.9 drivers
+    // can reparent nodes from child graphs incorrectly during instantiation. Use two single-body conditional nodes
+    // until CUDA 12.x is no longer supported; the driver issue was fixed in CUDA 13.0.
+    if (num_branches == 1) {
         cudaGraphConditionalHandle handle;
         check_cuda(cudaGraphConditionalHandleCreate(&handle, cuda_graph));
 
@@ -4971,7 +5088,7 @@ static bool is_valid_child_graph(void* child_graph)
 }
 
 // check if a graph can be used as a conditional body graph
-// https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#condtional-node-body-graph-requirements
+// https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html#conditional-node-body-graph-requirements
 bool wp_cuda_graph_check_conditional_body(void* body_graph)
 {
     static const std::unordered_set<CUgraphNodeType> allowed_nodes {
@@ -5405,8 +5522,13 @@ size_t wp_cuda_compile_program(
         opts.push_back(stored_options.back().c_str());
     }
 
+    // clang's HIP default already contracts (fast-honor-pragmas), so fuse_fp=false has to say so
+    // explicitly to match --fmad=false on CUDA.
     if (fuse_fp) {
         stored_options.push_back("-ffp-contract=fast");
+        opts.push_back(stored_options.back().c_str());
+    } else {
+        stored_options.push_back("-ffp-contract=off");
         opts.push_back(stored_options.back().c_str());
     }
 
@@ -5528,14 +5650,9 @@ size_t wp_cuda_compile_program(
 
 #if CUDA_VERSION >= 12080 && CUDA_VERSION < 13000
     // CUDA 12 miscompiles optimized CUBIN texture sampling when texture handles
-    // vary across lanes. Confirmed on CUDA 12.9 for sm_101 and sm_120; sm_121 is
-    // included because it shares the sm_120 family. CUDA 12.8 is covered as a
-    // precaution only: it is a supported build toolkit but is not exercised in
-    // CI, so it has been tested neither way.
-    //
-    // This is the NVRTC target architecture, not the driver-reported one: Warp
-    // remaps Thor's sm_110 to sm_101 when building against CUDA 12.
-    const bool is_affected_texture_cubin_target = arch == 101 || arch == 120 || arch == 121;
+    // vary across lanes on sm_90 and newer targets. CUDA 12.8 is covered as a
+    // precaution because it is not exercised in CI.
+    const bool is_affected_texture_cubin_target = arch >= 90;
 #else
     // CUDA 13 CUBIN has not reproduced the miscompile on any target tested so far.
     const bool is_affected_texture_cubin_target = false;
@@ -5557,7 +5674,14 @@ size_t wp_cuda_compile_program(
     // --Ofast-compile works inversely to normal -O optimization levels
     switch (optimization_level) {
     case 0:
+#if CUDA_VERSION >= 13010
+        // CUDA 13.1+ corrupts process-wide NVRTC compiler state after a
+        // --Ofast-compile=max build. Later builds can then emit invalid parameter
+        // addressing, so use the next-fastest setting until NVIDIA fixes NVRTC.
+        opts.push_back("--Ofast-compile=mid");
+#else
         opts.push_back("--Ofast-compile=max");
+#endif
         break;
     case 1:
         opts.push_back("--Ofast-compile=mid");
@@ -5940,7 +6064,12 @@ bool wp_cuda_compile_dot(
     int num_threads,
     int lda,
     int ldb,
-    int ldc
+    int ldc,
+    int alignment_A,
+    int alignment_B,
+    int alignment_C,
+    int enable_static_block_dim,
+    int suppress_errors
 )
 {
 
@@ -5991,10 +6120,31 @@ bool wp_cuda_compile_dot(
         ));
     }
 
+    // any non-positive value leaves cuBLASDx at its default (each value type's natural alignment)
+    if (alignment_A > 0 && alignment_B > 0 && alignment_C > 0) {
+        std::array<long long int, 3> align = { alignment_A, alignment_B, alignment_C };
+        CHECK_CUBLASDX(
+            cublasdxSetOperatorInt64s(h, cublasdxOperatorType::CUBLASDX_OPERATOR_ALIGNMENT, align.size(), align.data())
+        );
+    }
+
+    if (enable_static_block_dim) {
+        CHECK_CUBLASDX(cublasdxSetOperatorInt64(h, cublasdxOperatorType::CUBLASDX_OPERATOR_STATIC_BLOCK_DIM, 1));
+    }
+
     CHECK_CUBLASDX(cublasdxSetOptionStr(h, commondxOption::COMMONDX_OPTION_SYMBOL_NAME, symbol_name));
 
+    // generating the LTO is where cuBLASDx compiles the GEMM; a rejected configuration is
+    // expected when the caller probes an alignment it can fall back from, so do not report it then
     size_t lto_size = 0;
-    CHECK_CUBLASDX(cublasdxGetLTOIRSize(h, &lto_size));
+    commondxStatusType lto_status = cublasdxGetLTOIRSize(h, &lto_size);
+    if (lto_status != commondxStatusType::COMMONDX_SUCCESS) {
+        if (!suppress_errors) {
+            check_cublasdx(lto_status);
+        }
+        cublasdxDestroyDescriptor(h);
+        return false;
+    }
 
     std::vector<char> lto(lto_size);
     CHECK_CUBLASDX(cublasdxGetLTOIR(h, lto.size(), lto.data()));
@@ -6270,18 +6420,19 @@ bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size)
     // all this function must do: reject requests the device cannot satisfy,
     // matching the driver rejection CUDA produces.
     int static_smem_bytes = 0;
-    if (hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (hipFunction_t)kernel)
-        != hipSuccess)
+    if (!hip_call_ok(
+            hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (hipFunction_t)kernel)
+        ))
         return false;
 
     int device = -1;
-    if (hipGetDevice(&device) != hipSuccess)
+    if (!hip_call_ok(hipGetDevice(&device)))
         return false;
 
     // Same attribute the device's max_shared_memory_per_block is populated
     // from, so this check and the Python-side shortfall clause agree.
     int max_smem_bytes = 0;
-    if (hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeSharedMemPerBlockOptin, device) != hipSuccess)
+    if (!hip_call_ok(hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeSharedMemPerBlockOptin, device)))
         return false;
 
     return requested_smem_bytes <= max_smem_bytes - static_smem_bytes;
@@ -6310,7 +6461,7 @@ static int get_cuda_kernel_attribute(void* context, void* kernel, int attribute)
     // CUfunction_attribute resolves to a different type than it does in this HIP
     // translation unit, so a call from here compiles but does not link.
     int value = 0;
-    if (hipFuncGetAttribute(&value, (hipFunction_attribute)attribute, (hipFunction_t)kernel) != hipSuccess)
+    if (!hip_call_ok(hipFuncGetAttribute(&value, (hipFunction_attribute)attribute, (hipFunction_t)kernel)))
         return -1;
 #else
     int value = 0;
@@ -6620,10 +6771,10 @@ size_t wp_cuda_launch_kernel(
             if (ndim > APIC_LAUNCH_MAX_DIMS)
                 ndim = APIC_LAUNCH_MAX_DIMS;
 
-            int shape[APIC_LAUNCH_MAX_DIMS] = {};
+            uint32_t shape[APIC_LAUNCH_MAX_DIMS] = {};
             uint64_t launch_size = dim;
             if (args && args[0]) {
-                const int* bounds_shape = static_cast<const int*>(args[0]);
+                const uint32_t* bounds_shape = static_cast<const uint32_t*>(args[0]);
                 for (int d = 0; d < ndim; d++)
                     shape[d] = bounds_shape[d];
 
@@ -6631,7 +6782,7 @@ size_t wp_cuda_launch_kernel(
                 const uint8_t* bounds_bytes = static_cast<const uint8_t*>(args[0]);
                 launch_size = *reinterpret_cast<const size_t*>(bounds_bytes + size_offset);
             } else {
-                shape[0] = (int)dim;
+                shape[0] = static_cast<uint32_t>(dim);
             }
 
             apic_record_kernel_launch(
@@ -6670,8 +6821,9 @@ bool wp_cuda_get_suggested_block_size(
     // translation unit, so a call from here compiles but does not link. Every
     // other use of that wrapper sits in a CUDA-only branch, which is why this is
     // the first place it bites.
-    if (hipFuncGetAttribute(&max_threads_per_block, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (hipFunction_t)kernel)
-            == hipSuccess
+    if (hip_call_ok(
+            hipFuncGetAttribute(&max_threads_per_block, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (hipFunction_t)kernel)
+        )
         && max_threads_per_block > 0) {
         block_size_limit = max_threads_per_block;
     }

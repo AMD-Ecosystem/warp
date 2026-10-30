@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import subprocess
 import sys
 import unittest
 from functools import cache
@@ -564,8 +563,11 @@ def compare_3darrays(x: wp.array3d[float], y: wp.array3d[float], z: wp.array3d[i
 
 
 def test_transpose(test, device):
-    # test default transpose in non-square 2d case
-    # wp does not support copying from/to non-contiguous arrays so check in kernel
+    """Test default transposition of a nonsquare two-dimensional array.
+
+    Warp does not support copying to or from noncontiguous arrays, so check the
+    result in a kernel.
+    """
     np_arr = np.array([[1, 2], [3, 4], [5, 6]], dtype=float)
     arr = wp.array(np_arr, dtype=float, device=device)
     arr_transpose = arr.transpose()
@@ -667,7 +669,7 @@ def test_fill_scalar(test, device):
 
 
 def test_fill_vector(test, device):
-    # test filling a vector array with scalar or vector values (vec_type, list, or numpy array)
+    """Fill a vector array with scalar and vector values."""
 
     dim_x = 4
 
@@ -806,7 +808,7 @@ def test_fill_vector(test, device):
 
 
 def test_fill_matrix(test, device):
-    # test filling a matrix array with scalar or matrix values (mat_type, nested list, or 2d numpy array)
+    """Fill a matrix array with scalar and matrix values."""
 
     dim_x = 4
 
@@ -1073,8 +1075,11 @@ def test_fill_struct(test, device):
 
 
 def test_fill_slices(test, device):
-    # test fill_ and zero_ for non-contiguous arrays
-    # Note: we don't need to test the whole range of dtypes (vectors, matrices, structs) here
+    """Test filling and zeroing noncontiguous array slices.
+
+    A representative data type is sufficient because other tests cover vectors,
+    matrices, and structs.
+    """
 
     dim_x = 8
 
@@ -1768,8 +1773,7 @@ def test_round_trip(test, device):
 
 
 def test_empty_array(test, device):
-    # Test whether common operations work with empty (zero-sized) arrays
-    # without throwing exceptions.
+    """Test common operations on empty arrays."""
 
     def test_empty_ops(ndim, nrows, ncols, wptype, nptype):
         shape = (0,) * ndim
@@ -1844,7 +1848,7 @@ def test_empty_array(test, device):
 
 
 def test_empty_from_numpy(test, device):
-    # Test whether wrapping an empty (zero-sized) numpy array works correctly
+    """Wrap an empty NumPy array as a Warp array."""
 
     def test_empty_from_data(ndim, nrows, ncols, wptype, nptype):
         shape = (0,) * ndim
@@ -1884,7 +1888,7 @@ def test_empty_from_numpy(test, device):
 
 
 def test_empty_from_list(test, device):
-    # Test whether creating an array from an empty Python list works correctly
+    """Create a Warp array from an empty Python list."""
 
     def test_empty_from_data(nrows, ncols, wptype):
         if ncols > 0:
@@ -3013,7 +3017,7 @@ def inc_matrix(a: wp.array[wp.mat22f]):
 
 
 def test_direct_from_numpy(test, device):
-    """Pass NumPy arrays to Warp kernels directly"""
+    """Pass NumPy arrays directly to Warp kernels."""
 
     n = 12
 
@@ -3096,8 +3100,10 @@ def test_kernel_array_from_ptr_variable_shape(test, device):
 
 
 def test_array_shape_int_promotion(test, device):
-    # Verify that numpy integer shape elements are promoted to Python int
-    # to prevent 32-bit overflow in capacity calculations.
+    """Promote NumPy integer shape elements before capacity calculations.
+
+    Convert them to Python integers to prevent 32-bit overflow.
+    """
     for dtype in (np.int32, np.int64):
         arr = wp.zeros(np.array([4, 3, 2], dtype=dtype), dtype=wp.float32, device=device)
         test.assertEqual(arr.shape, (4, 3, 2))
@@ -3171,7 +3177,7 @@ def test_retain_grad(test, device):
 
 
 def test_retain_grad_validation(test, device):
-    # retain_grad=True without requires_grad=True should raise
+    """Reject ``retain_grad`` when ``requires_grad`` is disabled."""
     with test.assertRaises(ValueError):
         wp.zeros(10, dtype=float, retain_grad=True, device=device)
 
@@ -3286,8 +3292,10 @@ def test_array_from_int64_domain(test, device):
 
 
 def test_numpy_array_interface(test, device):
-    # We should be able to convert between NumPy and Warp arrays using __array_interface__ on CPU.
-    # This tests all scalar types supported by both.
+    """Convert between NumPy and Warp arrays through ``__array_interface__``.
+
+    Cover every scalar type supported by both libraries on CPU.
+    """
 
     n = 10
 
@@ -3307,6 +3315,19 @@ def test_numpy_array_interface(test, device):
         assert a1.dtype == a2.dtype
         assert a1.shape == a2.shape
         assert a1.strides == a2.strides
+
+
+def test_numpy_array_interface_empty(test, device):
+    """Verify that NumPy accepts an empty Warp array through the array interface."""
+    a = wp.zeros((1, 0), dtype=wp.vec2f, device=device)
+
+    test.assertNotEqual(a.__array_interface__["data"][0], 0)
+
+    na = np.asarray(a)
+
+    test.assertEqual(na.shape, (1, 0, 2))
+    test.assertEqual(na.dtype, np.dtype(np.float32))
+    test.assertEqual(na.strides, (0, 8, 4))
 
 
 @wp.kernel
@@ -3645,18 +3666,12 @@ def _run_runtime_zero_step_subprocess(device_alias: str, timeout: int = 120):
     CPU execution aborts, while CUDA execution leaves the context unusable
     after trapping.
     """
-    return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; from warp.tests.test_array import _trigger_runtime_zero_step; "
-            "_trigger_runtime_zero_step(sys.argv[1])",
-            device_alias,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    return run_python_subprocess(
+        "import sys; from warp.tests.test_array import _trigger_runtime_zero_step; "
+        "_trigger_runtime_zero_step(sys.argv[1])",
+        device_alias,
         timeout=timeout,
+        hide_gpu=device_alias == "cpu",
     )
 
 
@@ -3666,10 +3681,9 @@ def test_array_runtime_zero_step(test, device):
     Run each case in a subprocess because the CPU path aborts and the CUDA
     path leaves the context unusable after trapping.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32" and device.is_cuda:
         test.skipTest(
-            "Skip on Windows because the intentional host abort or CUDA trap may destabilize QA hosts, which cannot "
-            "be identified reliably."
+            "Skip on Windows because the intentional CUDA trap may destabilize release-qualification systems."
         )
 
     result = _run_runtime_zero_step_subprocess(device.alias)
@@ -4113,7 +4127,7 @@ class TestArray(unittest.TestCase):
             _ = array[::0]
 
     def test_array_new_del(self):
-        # test the scenario in which an array instance is created but not initialized before gc
+        """Delete an array that was allocated without initialization."""
         instance = wp.array.__new__(wp.array)
         instance.__del__()
 
@@ -4226,6 +4240,7 @@ add_function_test(TestArray, "test_array_of_structs_roundtrip", test_array_of_st
 add_function_test(TestArray, "test_array_from_numpy", test_array_from_numpy, devices=devices)
 add_function_test(TestArray, "test_array_aliasing_from_numpy", test_array_aliasing_from_numpy, devices=["cpu"])
 add_function_test(TestArray, "test_numpy_array_interface", test_numpy_array_interface, devices=["cpu"])
+add_function_test(TestArray, "test_numpy_array_interface_empty", test_numpy_array_interface_empty, devices=["cpu"])
 
 add_function_test(TestArray, "test_array_inplace_diff_ops", test_array_inplace_diff_ops, devices=devices)
 add_function_test(TestArray, "test_array_inplace_non_diff_ops", test_array_inplace_non_diff_ops, devices=devices)

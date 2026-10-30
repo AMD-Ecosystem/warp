@@ -34,6 +34,16 @@ def generic_kernel(a: wp.array[Any]):
     a[tid] = a[tid]
 
 
+@wp.struct
+class ExternalConstantParams:
+    value: wp.float32
+
+
+@wp.kernel(enable_backward=False, entry_point_abi="external_constant_params", module="unique")
+def external_constant_params_kernel(params: ExternalConstantParams):
+    value = params.value
+
+
 def test_suggested_block_size_basic(test, device):
     block_size, min_grid_size = wp.get_suggested_block_size(simple_kernel, device)
     test.assertGreater(block_size, 0)
@@ -76,7 +86,7 @@ def _constructor_kernel_func(a: wp.array[float]):
 
 
 def test_suggested_block_size_kernel_constructor(test, device):
-    """Kernel created via wp.Kernel() constructor works with get_suggested_block_size."""
+    """Verify block-size suggestions for a directly constructed kernel."""
     kernel = wp.Kernel(func=_constructor_kernel_func)
     block_size, min_grid_size = wp.get_suggested_block_size(kernel, device)
     test.assertGreater(block_size, 0)
@@ -86,9 +96,19 @@ def test_suggested_block_size_kernel_constructor(test, device):
 
 
 def test_suggested_block_size_rejects_generic_parent(test, device):
-    """Generic kernel parents produce an actionable overload-selection error."""
+    """Verify that generic kernel parents produce an actionable overload-selection error."""
     with test.assertRaisesRegex(RuntimeError, "requires a concrete overload.*wp.overload"):
         wp.get_suggested_block_size(generic_kernel, device)
+
+
+def test_suggested_block_size_accepts_external_constant_params(test, device):
+    """Verify occupancy queries accept external constant-params kernels."""
+    # This ABI cannot use wp.launch(), but occupancy only needs its raw CUDA
+    # entry point and does not launch the kernel.
+    block_size, min_grid_size = wp.get_suggested_block_size(external_constant_params_kernel, device)
+
+    test.assertGreater(block_size, 0)
+    test.assertGreater(min_grid_size, 0)
 
 
 devices = get_selected_cuda_test_devices()
@@ -96,7 +116,7 @@ devices = get_selected_cuda_test_devices()
 
 class TestOccupancy(unittest.TestCase):
     def test_suggested_block_size_cpu(self):
-        """CPU fallback returns (1, 1)."""
+        """Verify that CPU fallback returns (1, 1)."""
         for kernel in (simple_kernel, generic_kernel):
             with self.subTest(kernel=kernel.key):
                 result = wp.get_suggested_block_size(kernel, "cpu")
@@ -132,6 +152,12 @@ add_function_test(
     TestOccupancy,
     "test_suggested_block_size_rejects_generic_parent",
     test_suggested_block_size_rejects_generic_parent,
+    devices=devices,
+)
+add_function_test(
+    TestOccupancy,
+    "test_suggested_block_size_accepts_external_constant_params",
+    test_suggested_block_size_accepts_external_constant_params,
     devices=devices,
 )
 

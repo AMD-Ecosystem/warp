@@ -77,7 +77,7 @@ def norm_huber(v: Any, delta: float = 1.0) -> float:
 
     Args:
         v (Vector[Float, Any]): The vector to compute the Huber norm of.
-        delta (float): The threshold value, defaults to 1.0.
+        delta (float): The threshold value.
 
     Returns:
         float: The Huber norm of the vector.
@@ -100,7 +100,7 @@ def norm_pseudo_huber(v: Any, delta: float = 1.0) -> float:
 
     Args:
         v (Vector[Float, Any]): The vector to compute the Huber norm of.
-        delta (float): The threshold value, defaults to 1.0.
+        delta (float): The threshold value.
 
     Returns:
         float: The Huber norm of the vector.
@@ -120,7 +120,7 @@ def smooth_normalize(v: Any, delta: float = 1.0) -> Any:
 
     Args:
         v (Vector[Float, Any]): The vector to normalize.
-        delta (float): The threshold value, defaults to 1.0.
+        delta (float): The threshold value.
 
     Returns:
         Vector[Float, Any]: The normalized vector.
@@ -747,72 +747,108 @@ wp.func(
 wp._src.context.register_api_function(
     norm_l1,
     group="Vector Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     norm_l2,
     group="Vector Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     norm_huber,
     group="Vector Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     norm_pseudo_huber,
     group="Vector Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     smooth_normalize,
     group="Vector Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     quat_from_euler,
     group="Quaternion Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     quat_to_euler,
     group="Quaternion Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     quat_to_rpy,
     group="Quaternion Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     quat_twist,
     group="Quaternion Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     quat_twist_angle,
     group="Quaternion Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     quat_twist_angle_signed,
     group="Quaternion Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     velocity_at_point,
     group="Spatial Math",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     transform_from_matrix,
     group="Transformations",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     transform_to_matrix,
     group="Transformations",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     transform_compose,
     group="Transformations",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     transform_decompose,
     group="Transformations",
+    python_callable=True,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     transform_twist,
     group="Spatial Math",
+    python_callable=False,
+    differentiable=True,
 )
 wp._src.context.register_api_function(
     transform_wrench,
     group="Spatial Math",
+    python_callable=False,
+    differentiable=True,
 )

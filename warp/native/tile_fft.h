@@ -313,14 +313,17 @@ template <int DirectionSign, typename Complex, int Ept, typename Fwd, typename T
 inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int batch, Tile& Xinout)
 {
     if constexpr (wp_is_null_func<Fwd>::value) {
-// hipcc does not define __CUDA_ARCH__, so testing it alone selects the CPU
-// path during HIP device compilation and the GPU then runs the sequential
-// implementation, which assumes block_dim==1 and returns the input untransformed.
-// Test for device compilation the same way the rest of the codebase does
-// (see crt.h and builtin.h).
+// hipcc does not define __CUDA_ARCH__; test for HIP device compilation too so the GPU
+// path is taken on HIP devices (see crt.h and builtin.h).
 #if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
-        // CPU sequential — block_dim==1 makes Xinout.data row-major contiguous.
-        tile_fft_cpu_impl<DirectionSign, Complex>(batch, Ept, Xinout.data);
+        // Select the sequential or cooperative CPU path at compile time.
+        if constexpr (WP_TILE_BLOCK_DIM == 1) {
+            tile_fft_cpu_impl<DirectionSign, Complex>(batch, Ept, Xinout.data);
+        } else {
+            // Register tiles are distributed across CPU fibers, so scatter to
+            // one shared buffer and use the cooperative butterfly path.
+            tile_fft_gpu_impl<DirectionSign, Complex>(batch, Ept, shared_bytes, Xinout);
+        }
 #else
         // GPU cooperative on a shared-memory scratch.
         tile_fft_gpu_impl<DirectionSign, Complex>(batch, Ept, shared_bytes, Xinout);

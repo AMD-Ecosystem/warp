@@ -7,7 +7,7 @@ import os
 import shutil
 
 import warp  # ensure all API functions are loaded  # noqa: F401
-from warp._src.context import export_stubs
+from warp._src.generated_files import generate_stubs_file
 
 parser = argparse.ArgumentParser(
     description="Warp Sphinx Documentation Builder",
@@ -125,12 +125,14 @@ logger.info("Starting Warp documentation build")
 
 # generate stubs for autocomplete
 logger.info("Generating API stubs for autocomplete")
-with open(os.path.join(base_path, "warp", "__init__.pyi"), "w", encoding="utf-8") as stub_file:
-    export_stubs(stub_file)
-
-# code formatting of __init__.pyi
-logger.info("Formatting __init__.pyi (a 'Failed' message in the output below is expected)")
-format_file_with_ruff(os.path.join(base_path, "warp", "__init__.pyi"))
+stub_path = os.path.join(base_path, "warp", "__init__.pyi")
+if generate_stubs_file(base_path):
+    logger.info(f"Generated {stub_path}")
+    # code formatting of __init__.pyi
+    logger.info("Formatting __init__.pyi (a 'Failed' message in the output below is expected)")
+    format_file_with_ruff(stub_path)
+else:
+    logger.info(f"{stub_path} is up to date")
 
 source_dir = os.path.join(base_path, "docs")
 

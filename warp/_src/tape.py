@@ -155,6 +155,8 @@ class Tape:
                     adj_outputs.append(self.get_adjoint(a))
 
                 if enable_backward:
+                    from warp._src.context import _ResolvedBlockDim  # noqa: PLC0415
+
                     wp.launch(
                         kernel=kernel,
                         dim=dim,
@@ -165,7 +167,7 @@ class Tape:
                         device=device,
                         adjoint=True,
                         max_blocks=max_blocks,
-                        block_dim=block_dim,
+                        block_dim=_ResolvedBlockDim(block_dim),
                     )
 
         # reads are consumed; see the Note in the docstring
@@ -174,6 +176,10 @@ class Tape:
 
     # record a kernel launch on the tape
     def record_launch(self, kernel, dim, max_blocks, inputs, outputs, device, block_dim=0, metadata=None):
+        from warp._src.context import _resolve_launch_block_dim, runtime  # noqa: PLC0415
+
+        device = runtime.get_device(device)
+        block_dim = _resolve_launch_block_dim(device, block_dim)
         if metadata is None:
             metadata = {}
         self.launches.append([kernel, dim, max_blocks, inputs, outputs, device, block_dim, metadata])
@@ -252,7 +258,8 @@ class Tape:
         :attr:`warp.array.grad` and tracks it in ``gradients`` so it can
         be zeroed later. For instances created with :func:`warp.struct`, a mirrored
         struct is created with adjoints for array fields, and nested structs are
-        handled recursively. Non-differentiable values are passed through unchanged.
+        handled recursively. Registered native values receive a default-initialized
+        value so reverse-launch argument packing preserves their ABI.
 
         Args:
             a: Kernel argument to map to an adjoint. Can be a :class:`warp.array`,
@@ -261,6 +268,9 @@ class Tape:
         Returns:
             The adjoint object for ``a`` or ``None`` if no adjoint is required.
         """
+        if wp._src.types.is_native_type(type(a)):
+            return type(a)()
+
         if not wp._src.types.is_array(a) and not wp._src.types.is_struct(a):
             # if input is a simple type (e.g.: float, vec3, etc) or a non-Warp array,
             # then no gradient needed (we only return gradients through Warp arrays and structs)
@@ -286,6 +296,8 @@ class Tape:
                     setattr(adj, name, grad)
                 elif isinstance(a._cls.vars[name].type, wp._src.codegen.Struct):
                     setattr(adj, name, self.get_adjoint(getattr(a, name)))
+                elif wp._src.types.is_native_type(a._cls.vars[name].type):
+                    setattr(adj, name, a._cls.vars[name].type())
                 else:
                     setattr(adj, name, getattr(a, name))
 
@@ -1143,7 +1155,7 @@ def visit_tape(
         for id, x in enumerate(launch.inputs):
             name = kernel.adj.args[id].label
             if isinstance(x, wp.array):
-                if x.ptr is None:
+                if x.size == 0:  # skip zero-size arrays (ptr may be non-None on HIP)
                     continue
                 # if x.ptr in array_to_launch and len(array_to_launch[x.ptr]) > 1:
                 #     launch_arg_i = array_to_launch[x.ptr]
@@ -1160,6 +1172,8 @@ def visit_tape(
             elif wp._src.types.is_struct(x):
                 for varname, var in get_struct_vars(x).items():
                     if isinstance(var, wp.array):
+                        if var.size == 0:  # skip zero-size nested arrays (ptr may be non-None on HIP)
+                            continue
                         if not hide_readonly_arrays or var.ptr in computed_nodes or var.ptr in input_output_ptr:
                             add_array_node(var, f"{name}.{varname}", active_scope_stack)
                             input_arrays.append(var.ptr)
@@ -1170,7 +1184,7 @@ def visit_tape(
         output_arrays = []
         for id, x in enumerate(launch.outputs):
             name = kernel.adj.args[id + len(launch.inputs)].label
-            if isinstance(x, wp.array) and x.ptr is not None:
+            if isinstance(x, wp.array) and x.size > 0:  # skip zero-size arrays
                 add_array_node(x, name, active_scope_stack)
                 output_arrays.append(x.ptr)
                 computed_nodes.add(x.ptr)
@@ -1178,6 +1192,8 @@ def visit_tape(
             elif wp._src.types.is_struct(x):
                 for varname, var in get_struct_vars(x).items():
                     if isinstance(var, wp.array):
+                        if var.size == 0:  # skip zero-size nested arrays (ptr may be non-None on HIP)
+                            continue
                         add_array_node(var, f"{name}.{varname}", active_scope_stack)
                         output_arrays.append(var.ptr)
                         computed_nodes.add(var.ptr)

@@ -36,7 +36,7 @@ def _c_copyright_header(year: int | str) -> str:
 """
 
 
-def _regenerate_version_header(base_path: Path, version: str) -> None:
+def _regenerate_version_header(base_path: Path, version: str) -> bool:
     """Regenerate warp/native/version.h from the given version string.
 
     Only writes the file when the content has actually changed, so that file
@@ -45,6 +45,9 @@ def _regenerate_version_header(base_path: Path, version: str) -> None:
 
     NOTE: Output must stay byte-identical to
     warp._src.generated_files.generate_version_header.
+
+    Returns:
+        True if the file was updated, or False if it was already current.
     """
     version_header_path = base_path / "warp" / "native" / "version.h"
 
@@ -57,12 +60,13 @@ def _regenerate_version_header(base_path: Path, version: str) -> None:
     try:
         with open(version_header_path) as f:
             if f.read() == new_content:
-                return
+                return False
     except FileNotFoundError:
         pass
 
     with open(version_header_path, "w") as f:
         f.write(new_content)
+    return True
 
 
 def read_version_md(path: Path) -> str:
@@ -115,12 +119,15 @@ def check_version_consistency(base_path: Path, verbose: bool = False) -> bool:
 
     # Regenerate version.h from VERSION.md (the source of truth).
     # pre-commit detects the file modification and asks the developer to stage it.
-    _regenerate_version_header(base_path, version_md)
+    version_header_changed = _regenerate_version_header(base_path, version_md)
 
     if verbose:
         print(f"VERSION.md:             {version_md}")
         print(f"config.py:              {config_py_version}")
-        print("version.h:              regenerated from VERSION.md")
+        if version_header_changed:
+            print("version.h:              regenerated from VERSION.md")
+        else:
+            print("version.h:              up to date")
 
     # Check that config.py (a source file) matches VERSION.md
     if version_md != config_py_version:

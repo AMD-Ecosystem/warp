@@ -23,7 +23,6 @@ from sphinx import addnodes
 from sphinx.environment.adapters.toctree import note_toctree
 from sphinx.ext.autosummary import autosummary_toc
 from sphinx.ext.autosummary.generate import AutosummaryRenderer
-from sphinx.ext.napoleon.docstring import GoogleDocstring
 
 _RE_WP_DOT = re.compile(r"\bwp\.")
 
@@ -33,6 +32,7 @@ HERE = os.path.dirname(__file__)
 WARP_PATH = os.path.realpath(os.path.join(HERE, ".."))
 
 sys.path.insert(0, WARP_PATH)
+sys.path.insert(0, os.path.join(HERE, "_ext"))
 
 try:
     import warp as wp
@@ -74,6 +74,8 @@ extensions = [
     # Third-party extensions.
     "myst_parser",  # Parses markdown files.
     "sphinx_copybutton",  # Adds a copy button to code blocks.
+    # Local extensions, from `docs/_ext`.
+    "wp_function_tags",  # Renders the property tags and source links of Warp functions.
 ]
 
 # Generate targets for Markdown headings through level 2 so standard fragment
@@ -89,6 +91,8 @@ nitpicky = True
 nitpick_ignore_regex = [
     # Public type aliases indexed as py:data but referenced as py:class (Sphinx limitation)
     (r"py:class", r"(warp\.|wp\.)?(Scalar|Int|Float|DeviceLike)"),
+    # numpy.typing aliases used in annotations but imported only under TYPE_CHECKING
+    (r"py:class", r"npt\.ArrayLike"),
     # Internal meta-types used in builtin function signatures (not exported)
     (
         r"py:class",
@@ -125,6 +129,15 @@ nitpick_ignore_regex = [
     (r"py:class", r"<(property|functools\.cached_property) object at .*>"),
     # Autosummary-generated member stubs for Warp classes (Texture*, fem.*, etc.)
     (r"py:obj", r"warp\.(Texture\w+|fixedarray|indexedarray|indexedfabricarray|fabricarray|fem\.).*"),
+    # Members inherited from IsoSurfaceBase, listed in member tables but documented on the base class
+    (r"py:obj", r"warp\.geometry\.IsoSurface(MarchingCubes|Nets)\.(resize|surface|extract)"),
+    # Everything on the deprecated `wp.MarchingCubes` alias is inherited from, and
+    # documented on, `warp.geometry.IsoSurfaceMarchingCubes`
+    (r"py:(obj|attr)", r"warp\.MarchingCubes\..*"),
+    (
+        r"py:attr",
+        r"(CUBE_CORNER_OFFSETS|EDGE_TO_CORNERS|CASE_TO_TRI_RANGE|TRI_LOCAL_INDICES)",
+    ),
     # Internal C++/Python interop methods on geometric types
     (
         r"py:obj",
@@ -221,7 +234,9 @@ html_context = {
     "doc_path": "docs",
 }
 html_css_files = ["custom.css"]
+html_js_files = ["copy-page-source.js"]
 html_static_path = ["_static"]
+html_copy_source = True
 html_show_sphinx = False
 
 
@@ -321,6 +336,7 @@ autosummary_filename_map = {
 }
 
 AUTOSUMMARY_ANNOTATION_OVERRIDES = {
+    "warp.config.enable_mempools_at_init": ": bool = True",
     "warp.config.launch_array_access_mode": (
         ": warp.config.LaunchArrayAccessMode = warp.config.LaunchArrayAccessMode.RELAXED"
     ),
@@ -337,80 +353,47 @@ for _builtin_name in wp._src.context.builtin_functions:
     autosummary_filename_map.setdefault(_internal, _public)
 
 
-def normalize_docstring(doc: str) -> str:
-    """Normalize docstrings for consistent RST indentation and formatting."""
-    if not doc:
-        return ""
-    cleaned = inspect.cleandoc(doc)
-    if not cleaned:
-        return ""
-    rst = str(GoogleDocstring(cleaned))
-    # Rewrite ``wp.`` aliases in :type:/:rtype: fields so Sphinx cross-references
-    # resolve correctly.  Only target field-list lines to avoid mangling code
-    # examples that legitimately use ``import warp as wp``.
-    return re.sub(r"^(:(rtype|type\s+\w+):.*)\bwp\.", r"\1warp.", rst, flags=re.MULTILINE) if "wp." in rst else rst
-
-
-def _get_builtin_overloads_info(symbol: str) -> list[dict[str, object]]:
-    head = wp._src.context.builtin_functions[symbol]
-
-    # Collect all overloads, filtering out hidden ones.
-    # Note: head.overloads already includes the head itself (see Function.__init__)
-    all_funcs = head.overloads if hasattr(head, "overloads") else [head]
-    visible_overloads = [f for f in all_funcs if not f.hidden]
-
-    overloads_info = []
-    seen_overloads = set()
-    for func in visible_overloads:
-        args = {k: wp._src.context.type_str(v) for k, v in func.input_types.items()}
-        args_str = ", ".join(f"{k}: {v}" for k, v in args.items())
-
-        try:
-            return_type = wp._src.context.type_str(func.value_func(None, None))
-        except Exception:
-            return_type = "None"
-
-        if hasattr(func, "overloads"):
-            sig = wp._src.context.resolve_exported_function_sig(func)
-            is_exported = sig is not None
-        else:
-            is_exported = False
-
-        doc = normalize_docstring(func.doc)
-        overload_key = (args_str, return_type, is_exported, func.is_differentiable, doc)
-        if overload_key in seen_overloads:
-            continue
-
-        seen_overloads.add(overload_key)
-        overloads_info.append(
-            {
-                "args": args_str,
-                "return_type": return_type,
-                "is_exported": is_exported,
-                "is_differentiable": func.is_differentiable,
-                "doc": doc,
-            }
-        )
-
-    return overloads_info
+from docs._ext.warp_function_reference import describe_function, source_url  # noqa: E402
 
 
 class AutosummaryRenderer(AutosummaryRenderer):
-    # Module containing Warp's built-ins functions and requiring special handling.
-    BUILTINS_TEMPLATE_FILE = "builtins.rst"
+    # Template documenting built-ins and other Warp functions, requiring special handling.
+    WARP_FUNCTION_TEMPLATE_FILE = "warp_function.rst"
 
     def render(self, template_name, context):
         context["wp_annotation_override"] = AUTOSUMMARY_ANNOTATION_OVERRIDES.get(context.get("fullname"))
 
-        if template_name == self.BUILTINS_TEMPLATE_FILE:
+        # Autosummary classifies a `warp._src.context.Function` as data, which renders
+        # its `repr()` in place of a signature.  Route the registered ones through the
+        # function template instead so they document like the built-ins, without
+        # having to split the module pages into per-template blocks.
+        if context.get("fullname") in wp._src.context.api_functions:
+            template_name = self.WARP_FUNCTION_TEMPLATE_FILE
+
+        if template_name == self.WARP_FUNCTION_TEMPLATE_FILE:
             fullname = context["fullname"]
             symbol = fullname.split(".")[-1]
+            module = context["module"]
+
+            # Module-scoped API functions keep their own namespace; built-ins are
+            # documented from the `warp._src.lang` placeholder module and published
+            # under the flat `warp.` namespace instead.
+            publication = wp._src.context.api_functions.get(f"{module}.{symbol}")
+            if publication is None and module == "warp._src.lang":
+                publication = wp._src.context.api_functions.get(f"warp.{symbol}")
+            if publication is None:
+                func = wp._src.context.builtin_functions[symbol]
+                display_name = f"warp.{symbol}"
+            else:
+                func = publication.function
+                display_name = publication.public_name
 
             # Insert metadata that can be accessed from the template.
             context.update(
                 {
-                    "wp_display_name": f"warp.{symbol}",
-                    "wp_overloads": _get_builtin_overloads_info(symbol),
+                    "wp_display_name": display_name,
+                    "wp_module": module,
+                    "wp_overloads": describe_function(func, publication, GITHUB_VERSION),
                 }
             )
 
@@ -458,6 +441,12 @@ _intersphinx_mapping = {
 # timeout (seconds).
 intersphinx_timeout = 2
 
+# PyTorch's ``stable`` documentation URLs are client-side redirect stubs that
+# preserve fragments in browsers. The linkcheck builder cannot follow those
+# redirects before validating anchors, so only skip anchor checks for them;
+# URL availability is still checked.
+linkcheck_anchors_ignore_for_url = [r"https://docs\.pytorch\.org/docs/stable/.*"]
+
 _sphinx_logger = sphinx.util.logging.getLogger(__name__)
 # WARP_DOCS_OFFLINE=1 skips external resolution entirely for known-offline builds.
 if os.environ.get("WARP_DOCS_OFFLINE") == "1":
@@ -476,7 +465,7 @@ def linkcode_resolve(domain, info):
     This is used for the sphinx.ext.linkcode extension.
 
     References:
-        https://github.com/google/jax/blob/main/docs/conf.py
+        https://github.com/jax-ml/jax/blob/main/docs/conf.py
         https://www.sphinx-doc.org/en/master/usage/extensions/linkcode.html
     """
     if domain != "py":
@@ -486,20 +475,18 @@ def linkcode_resolve(domain, info):
     if not info["fullname"]:
         return None
 
+    if info["module"] == "warp._src.lang" or f"{info['module']}.{info['fullname']}" in wp._src.context.api_functions:
+        return None  # The Warp function template links each overload to its own source.
+
     try:
         mod = sys.modules.get(info["module"])
         obj = operator.attrgetter(info["fullname"])(mod)
-        if isinstance(obj, property):
-            obj = obj.fget
-        filename = inspect.getsourcefile(obj)
-        source, linenum = inspect.getsourcelines(obj)
     except Exception:
         return None
+    if isinstance(obj, property):
+        obj = obj.fget
 
-    filename = os.path.relpath(filename, start=os.path.dirname(wp.__file__))
-    lines = f"#L{linenum}-L{linenum + len(source)}" if linenum else ""
-
-    return f"https://github.com/NVIDIA/warp/blob/{GITHUB_VERSION}/warp/{filename}{lines}"
+    return source_url(obj, GITHUB_VERSION)
 
 
 # -- sphinx_copybutton -------------------------------------------------------
@@ -779,6 +766,12 @@ def generate_reference_docs(app):
     docs.generate_reference.run()
 
 
+def hide_generated_api_edit_link(_app, pagename, _templatename, context, _doctree):
+    """Hide edit links for generated API stubs that are not tracked in Git."""
+    if pagename.startswith("api_reference/_generated/"):
+        context["theme_use_edit_page_button"] = False
+
+
 def drop_autosummary_toctrees(app, doctree):
     # autosummary's `:toctree:` wraps its generated toctree in
     # `autosummary_toc`, a `nodes.comment` subclass. HTML writers skip the
@@ -912,6 +905,7 @@ def setup(app):
     # Priority must be lower than autosummary's default (500) so that the
     # reference .rst files exist before autosummary scans for stub directives.
     app.connect("builder-inited", generate_reference_docs, priority=400)
+    app.connect("html-page-context", hide_generated_api_edit_link)
     app.connect("autodoc-process-docstring", filter_builtin_docstrings)
     app.connect("autodoc-process-docstring", rewrite_wp_in_docstrings)
     app.connect("autodoc-process-docstring", populate_reexported_docstrings)

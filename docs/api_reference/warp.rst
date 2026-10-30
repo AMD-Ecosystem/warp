@@ -11,6 +11,7 @@ Submodules
 
 These modules are automatically available when you ``import warp``.
 
+- :mod:`warp.build_experimental`
 - :mod:`warp.config`
 - :mod:`warp.types`
 - :mod:`warp.utils`
@@ -22,6 +23,7 @@ These modules must be explicitly imported (e.g., ``import warp.autograd``).
 
 - :mod:`warp.autograd`
 - :mod:`warp.fem`
+- :mod:`warp.geometry`
 - :mod:`warp.optim`
 - :mod:`warp.render`
 - :mod:`warp.sparse`
@@ -299,6 +301,7 @@ Kernel Execution
    Kernel
    Launch
    Module
+   ModuleBuildOptions
    get_cuda_kernel_properties
    get_suggested_block_size
    launch
@@ -630,5 +633,4 @@ Misc
    :nosignatures:
    :toctree: _generated
 
-   MarchingCubes
    RegisteredGLBuffer

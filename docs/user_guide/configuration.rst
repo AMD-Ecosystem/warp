@@ -31,6 +31,39 @@ For example, the location of the user kernel cache can be changed with:
     wp.init()
 
 See :doc:`../api_reference/warp_config` for a complete list of global settings.
+See :doc:`execution_and_performance/reducing_compilation_and_startup_time` for
+guidance on settings that affect compilation and startup.
+
+Experimental CPU Block Execution
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 1.18.0
+
+By default, an omitted or non-positive ``block_dim`` selects one logical thread
+per block on CPU and 256 threads per block on CUDA. CPU launches also preserve
+the historical effective ``block_dim`` of ``1`` when a larger value is
+requested. To honor an explicit CPU ``block_dim`` from 2 through 1024, enable
+the experimental cooperative-block path:
+
+.. code-block:: python
+
+    wp.config.enable_cpu_blocks = True
+    wp.launch(kernel, dim=count, block_dim=64, device="cpu")
+
+The setting applies to :func:`wp.launch() <warp.launch>` and
+:func:`wp.launch_tiled() <warp.launch_tiled>`. Warp resolves the effective block
+dimension when the launch is created, so recorded commands and captured launches
+retain that value if the setting later changes. An explicit CPU value greater
+than 1024 raises ``ValueError`` even when the feature is disabled.
+
+CPU block execution currently targets correctness testing and CPU/CUDA semantic
+equivalence; it does not provide SIMD or multi-core acceleration.
+
+AddressSanitizer fiber switching is not yet supported. In an AddressSanitizer
+build, an enabled CPU launch with ``block_dim > 1`` raises
+``NotImplementedError``; one-lane CPU launches remain available. See
+:ref:`CPU Tile Semantics <cpu_tile_semantics>` for how the option affects tile
+kernels.
 
 .. _module-settings:
 
@@ -87,12 +120,17 @@ The options for a module can also be queried using :func:`wp.get_module_options(
 |``strip_hash``                        | Boolean | ``False``   | If ``True``, avoids using a content-based hash to identify the module    |
 |                                      |         |             | and its functions.                                                       |
 +--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
+|``extra_build_options``               | Object  | ``None``    | Experimental extra build inputs for CPU and CUDA modules. Set to an      |
+|                                      |         |             | :class:`warp.ModuleBuildOptions` instance.                               |
++--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
 |``enable_mathdx_gemm``                | Boolean | ``None``    | A module-level override of the :attr:`warp.config.enable_mathdx_gemm`    |
 |                                      |         |             | setting. ``None`` defers to the global setting at compile time.          |
 +--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
 |``enable_mathdx_solver``              | Boolean | ``None``    | A module-level override of the :attr:`warp.config.enable_mathdx_solver`  |
 |                                      |         |             | setting. ``None`` defers to the global setting at compile time.          |
 +--------------------------------------+---------+-------------+--------------------------------------------------------------------------+
+
+.. _kernel-settings:
 
 Kernel Settings
 ---------------
@@ -107,6 +145,14 @@ Kernel-level settings can be passed as arguments to the :func:`@wp.kernel <warp.
      - Type
      - Default Value
      - Description
+   * - ``name``
+     - String
+     - ``None``
+     - Sets the kernel key used for registration and native code generation. If
+       ``None``, Warp derives the key from the Python callable passed to
+       ``wp.kernel``. A custom name must be a valid C++ identifier. When
+       ``strip_hash=True``, Warp uses the key without a hash suffix as the base
+       of the generated native entry-point names.
    * - ``enable_backward``
      - Boolean
      - ``None``
@@ -150,6 +196,14 @@ Kernel-level settings can be passed as arguments to the :func:`@wp.kernel <warp.
        Keys are validated against the module's known options (see
        `Module Settings`_ above). For shared modules, use
        :func:`wp.set_module_options() <warp.set_module_options>` instead.
+   * - ``entry_point_abi``
+     - String
+     - ``None``
+     - Selects the experimental entry-point ABI. ``"warp"`` uses the regular
+       launch-compatible CPU and CUDA ABI. ``"external_constant_params"`` is
+       CUDA-only and binds one struct argument from constant memory symbol
+       ``params``; it requires ``enable_backward=False`` and cannot be launched
+       with :func:`warp.launch`.
 
 .. code-block:: python
 
@@ -245,3 +299,57 @@ Declaring ``cluster_dim`` only forms the cluster; *using* it — distributed
 shared memory, cluster barriers, and cluster rank queries — requires native CUDA
 code. See :ref:`thread-block-clusters` in the C++/CUDA workflows guide for a
 worked distributed-shared-memory example.
+
+Function Settings
+-----------------
+
+Function-level settings can be passed as arguments to the :func:`@wp.func <warp.func>` decorator.
+
+.. list-table::
+   :widths: 20 15 15 50
+   :header-rows: 1
+
+   * - Setting
+     - Type
+     - Default Value
+     - Description
+   * - ``name``
+     - String
+     - ``None``
+     - Sets the function key used for registration and native code generation.
+       If ``None``, Warp derives the key from the Python callable.
+   * - ``module``
+     - Module | ``"unique"`` | str
+     - ``None``
+     - Controls which module the function belongs to, following the same rules
+       as the equivalent kernel setting.
+   * - ``inline``
+     - Boolean | ``None``
+     - ``None``
+     - Whether the function is inlined into its call sites. ``None`` leaves the
+       choice to the backend compiler. ``True`` requires inlining (CUDA
+       ``__forceinline__``), overriding the compiler's own heuristic. ``False``
+       keeps the function out of line (CUDA ``__noinline__``).
+
+.. code-block:: python
+
+    @wp.func(inline=False)
+    def expensive_helper(x: wp.vec3) -> wp.vec3:
+        # kept out of line in every kernel that calls it
+        return wp.normalize(x) * wp.length(x)
+
+
+    @wp.func(inline=True)
+    def cheap_helper(x: float) -> float:
+        # inlined even where the backend compiler would not choose to
+        return x * 2.0
+
+By default, the backend compiler decides whether to inline a function at each call site. Set
+``inline=False`` to prevent inlining or ``inline=True`` to require it.
+
+Inlining duplicates the function body at each call site. This can increase register pressure and
+instruction-cache use. Keeping a function out of line avoids that duplication but adds
+function-call overhead. The best choice depends on the workload, so measure both options.
+
+The hint covers the generated adjoint as well as the forward function, and is lowered per
+backend, so the same function remains valid for CPU and CUDA.
