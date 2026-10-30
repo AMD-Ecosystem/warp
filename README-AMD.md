@@ -44,7 +44,7 @@ pip install -e .
 python tools/run_gfx1151_smoke.py
 ```
 
-Recommended ROCm version: **7.14.0**. See [Choosing a ROCm version](#choosing-a-rocm-version),
+Recommended ROCm version: **7.14.1**. See [Choosing a ROCm version](#choosing-a-rocm-version),
 including a validated container route that needs no host ROCm upgrade.
 
 A passing smoke test means the build loads and runs kernels. It does **not**
@@ -80,45 +80,45 @@ find /opt/rocm -name rocminfo -executable 2>/dev/null
 
 ## Choosing a ROCm version
 
-**Recommended: ROCm 7.14.0.** ROCm 7.2.x is also validated and remains
-necessary for one workload class below.
+**Recommended: ROCm 7.14.1.** ROCm 7.14.0 and 7.2.x are also validated; 7.2.x
+remains necessary for one workload class below.
 
 The two releases fail in opposite directions:
 
 **ROCm 7.2.x does not reclaim memory allocated inside a captured graph.** Every
 graph replay leaks, so sustained simulation degrades badly: the ANYmal C
 walking example loses most of its throughput within a few hundred frames and
-keeps degrading. On ROCm 7.14.0 the same example holds a steady rate.
+keeps degrading. On ROCm 7.14 the same example holds a steady rate.
 
-**ROCm 7.14.0 fails small device allocations under capture-heavy load.**
+**ROCm 7.14 fails small device allocations under capture-heavy load.**
 `hipMalloc` returns NULL for small requests while most device memory is free,
 which makes several Newton test modules fail.
 
-For sustained simulation and reinforcement-learning rollouts, use 7.14.0. For
+For sustained simulation and reinforcement-learning rollouts, use 7.14.1. For
 workloads that trip the allocation failure, 7.2.x remains necessary. Both are
 described in `KNOWN_ISSUES-AMD.md`.
 
-Two 7.14.0 specifics:
+Two 7.14 specifics:
 
 - The runtime libraries live under `/opt/rocm/core-7.14/lib` behind an
   `/etc/alternatives` symlink chain, and no `ld.so.conf.d` entry is installed,
   so `warp.so` does not load until that directory is on `LD_LIBRARY_PATH`
   (command under [Prerequisites](#prerequisites)).
 - A native 7.14 install is not required: the validated configuration runs the
-  7.14.0 userspace in a container over the host's existing kernel driver
+  7.14 userspace in a container over the host's existing kernel driver
   (7.2.1-era driver confirmed working underneath). See
   [ROCm 7.14 in a container](#rocm-714-in-a-container).
 
 ### ROCm 7.14 in a container
 
-The validated container is `rocm/dev-ubuntu-24.04:7.14.0-full` under rootless
+The validated container is `rocm/dev-ubuntu-24.04:7.14.1-full` under rootless
 podman with GPU passthrough. Build from the repository checkout:
 
 ```bash
 podman run --rm \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --security-opt seccomp=unconfined \
-  -v "$PWD":/work rocm/dev-ubuntu-24.04:7.14.0-full \
+  -v "$PWD":/work rocm/dev-ubuntu-24.04:7.14.1-full \
   bash -c 'export PIP_BREAK_SYSTEM_PACKAGES=1 && \
            pip install numpy setuptools packaging wheel && \
            cd /work && python3 build_lib.py --no-cuda --rocm-path=/opt/rocm --hip-arch=gfx1151 --quick'
@@ -132,8 +132,8 @@ container) set `LD_LIBRARY_PATH` as under [Prerequisites](#prerequisites).
 
 The container's ROCm tree can also be installed natively, side by side with an
 existing apt-installed ROCm: copy `/opt/rocm/core-7.14` out of the image to
-`/opt/rocm-7.14.0`, register it with
-`update-alternatives --install /opt/rocm rocm /opt/rocm-7.14.0 <priority>`,
+`/opt/rocm-7.14.1`, register it with
+`update-alternatives --install /opt/rocm rocm /opt/rocm-7.14.1 <priority>`,
 and point one `ld.so.conf.d` entry at `/opt/rocm/lib` (replacing any entry
 pinned to another version — two registered versions in the linker path let a
 process mix libraries). This layout is validated: the host build, smoke test,
@@ -146,16 +146,15 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 | Component | Version |
 |---|---|
 | OS | Ubuntu 24.04.3 |
-| Kernel | 7.0.0-28-generic, in-tree `amdgpu` (6.17.0-1017-oem also validated; some other kernels are known bad — see [Troubleshooting](#troubleshooting)) |
+| Kernel | 7.0.0-34-generic, in-tree `amdgpu` (7.0.0-28-generic and 6.17.0-1017-oem also validated; some other kernels are known bad — see [Troubleshooting](#troubleshooting)) |
 | GPU | AMD Radeon 8060S (gfx1151), 96 GiB unified memory |
-| ROCm | 7.14.0 (recommended). Validated both in a `rocm/dev-ubuntu-24.04:7.14.0-full` container and as a native install of the same tree at `/opt/rocm-7.14.0`, selected via `update-alternatives`, with 7.2.1 kept alongside. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
+| ROCm | 7.14.1 (recommended), installed natively at `/opt/rocm-7.14.1` from the `rocm/dev-ubuntu-24.04:7.14.1-full` image and selected via `update-alternatives`; the same image also validated as a container. 7.14.0 and 7.2.1 validated earlier. **See [Choosing a ROCm version](#choosing-a-rocm-version).** |
 | Newton | 1.5.1 from PyPI (`newton[sim,importers,examples]`) |
 | MuJoCo | 3.11.0 |
 | MuJoCo-Warp | 3.11.0 |
 | usd-core | 26.3 (Newton 1.5.1 requires `>=25.5,<26.5`) |
-| JAX | 0.11.0 |
-| PyTorch | 2.12/2.13 nightlies from `https://rocm.nightlies.amd.com/v2/gfx1151/` on the ROCm 7.2.1 host. Not usable inside the 7.14.0 container: the wheel bundles a rocm-sdk whose `libamd_comgr` conflicts with the container's LLVM. |
-| Python | 3.12 (3.11 also tested) |
+| PyTorch | 2.10.0+rocm7.13.0a20260513, the newest build on `https://rocm.nightlies.amd.com/v2/gfx1151/`, on the ROCm 7.14.1 host. Not usable inside the 7.14.0 container: the wheel bundles a rocm-sdk whose `libamd_comgr` conflicts with the container's LLVM. |
+| Python | 3.12 (3.12.3 tested; 3.11 also tested) |
 | GCC | 13 (13.3.0 tested) |
 
 ### Kernel selection
@@ -165,7 +164,8 @@ kernel's does.
 
 | Kernel | Status |
 |---|---|
-| `7.0.0-28-generic` | Validated (current test configuration) |
+| `7.0.0-34-generic` | Validated (current test configuration) |
+| `7.0.0-28-generic` | Validated |
 | `6.17.0-1017-oem` (srcversion `FC7DA320ED9D733CA6A3F1E`) | Validated |
 | `6.17.0-1020-oem` | Known bad: page-faults on the first GPU dispatch (CPF MAPPING_ERROR / PERMISSION_FAULTS), hanging the process at 100% CPU |
 | `amdgpu-dkms` 30.30 (6.16.x) and 31.20 (6.19.x) series | Known bad: same fault class |
@@ -192,8 +192,8 @@ follows. Confirm the holds with `apt-mark showhold | grep linux`.
 
 ## Prerequisites
 
-- ROCm at `/opt/rocm`. Recommended: 7.14.0, natively or via
-  [the container](#rocm-714-in-a-container); 7.2.1 and 7.2.4 also validated.
+- ROCm at `/opt/rocm`. Recommended: 7.14.1, natively or via
+  [the container](#rocm-714-in-a-container); 7.14.0, 7.2.1 and 7.2.4 also validated.
   See [Choosing a ROCm version](#choosing-a-rocm-version).
   **On 7.14 the runtime libraries moved** to `/opt/rocm/core-<version>/lib`
   with no `ld.so.conf.d` entry installed, so `warp.so` will not load until that

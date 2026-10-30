@@ -1,6 +1,6 @@
-# Known issues — Warp v1.17.0 on ROCm / gfx1151
+# Known issues — Warp v1.18.0 on ROCm / gfx1151
 
-Scope: the HIP/ROCm port of Warp v1.17.0 on gfx1151 (Radeon 8060S, Strix
+Scope: the HIP/ROCm port of Warp v1.18.0 on gfx1151 (Radeon 8060S, Strix
 Halo, RDNA 3.5, wave32). Each entry gives the symptom, what it affects, the
 workaround if one exists, and its status.
 
