@@ -8,15 +8,15 @@
 Warp on ROCm documentation
 ********************************************************************
 
-Accelerate physics simulation, robotics, and spatial computing workloads with
-Warp on ROCm for AMD Instinct GPUs, writing GPU kernels in regular Python that
-are JIT-compiled to efficient HIP code.
-
 `Warp <https://github.com/AMD-Ecosystem/warp>`__ is a Python framework for writing
 high-performance simulation and graphics code. Warp takes regular Python
 functions and JIT compiles them to efficient kernel code that can run on the
 CPU or GPU. It comes with a rich set of primitives that make it easy to write
 programs for physics simulation, perception, robotics, and geometry processing.
+
+Accelerate physics simulation, robotics, and spatial computing workloads with
+Warp on ROCm for AMD Instinct GPUs, writing GPU kernels in regular Python that
+are JIT-compiled to efficient HIP code.
 
 Warp on ROCm adds HIP support so that Warp kernels run on AMD Instinct MI325X,
 MI350X, and MI355X GPUs. Warp kernels are differentiable and can be used
