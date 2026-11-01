@@ -4014,6 +4014,11 @@ int wp_cuda_thread_exchange_capture_mode(int mode)
     return int(capture_mode);
 }
 
+bool wp_cuda_any_capture_active()
+{
+    return !g_captures.empty();
+}
+
 uint64_t wp_cuda_stream_get_capture_id(void* stream)
 {
     uint64_t id = get_capture_id(static_cast<CUstream>(stream));

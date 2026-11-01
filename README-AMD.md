@@ -456,6 +456,7 @@ All are off by default; the defaults are the validated configuration.
 | `WARP_ENABLE_UMA_HYBRID=1` | Serve allocations of 64 KB or more from unified (managed) memory for zero-copy CPU access. |
 | `WARP_HIP_GRAPH_FREE_NODES=1` | Enable graph memory-free nodes. |
 | `WARP_HIP_USE_ASYNC_POOL=1` | Use the stream-ordered pool for all allocations rather than only during graph capture. |
+| `WARP_HIP_ALLOC_CACHE=1` | Reuse freed device memory instead of returning each block with a plain free, which costs the device. Freed blocks wait until one device synchronize shows that no queued work uses them, then serve new allocations of the same size; up to 2 GiB is kept. Helps workloads that free many temporaries per step, such as MuJoCo-Warp through Newton. The synchronize invalidates a graph capture that another library runs at the same time in relaxed mode on another stream or in thread-local mode on another thread (for example `torch.cuda.graph` with `capture_error_mode="relaxed"` or `"thread_local"`); a plain free would leave it intact. |
 
 `WARP_HIP_FAST_FP_ATOMICS` is worth knowing about if a kernel funnels a reduction
 through one atomic address, where the default lowering is slow — see
@@ -466,7 +467,7 @@ works on them. It is **not** safe on managed memory Warp did not allocate that
 way, such as `CudaManagedAllocator` arrays: the hardware atomic silently discards
 updates to host-coherent memory.
 
-The other three change allocation or graph behaviour from the defaults.
+The others change allocation or graph behaviour from the defaults.
 `WARP_HIP_GRAPH_FREE_NODES=1` in particular fixes some examples and breaks
 others — see
 [KNOWN_ISSUES-AMD.md](KNOWN_ISSUES-AMD.md).

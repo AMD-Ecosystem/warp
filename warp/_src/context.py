@@ -5580,10 +5580,26 @@ class CudaHipCaptureAwareAllocator:
     allocation nodes whose frees are ordered against the graph's leaf nodes.
     We therefore route only capture-time allocations through the pool and track
     them so free() can dispatch to the matching path.
+
+    A plain hipFree costs the device, so workloads that free many temporaries
+    per step can opt in to reuse (WARP_HIP_ALLOC_CACHE=1). Freed plain blocks
+    then wait in a pending list; one device synchronize later proves that no
+    queued work can still use them, and they serve new allocations of the same
+    size. A block is never handed out again before that synchronize. The
+    synchronize is skipped while a capture Warp knows of is active, but it
+    invalidates a capture that another library runs at the same time in
+    relaxed mode on another stream or in thread-local mode on another thread,
+    which a plain free would leave intact.
     """
 
     deallocate_requires_context_guard = True
     memory_kind = MemoryKind.CUDA_DEVICE
+
+    # synchronize once this many frees or bytes are pending
+    PENDING_MAX_COUNT = 256
+    PENDING_MAX_BYTES = 256 << 20
+    # free reusable blocks beyond this many bytes
+    READY_MAX_BYTES = 2 << 30
 
     def __init__(self, device):
         assert device.is_cuda
@@ -5591,20 +5607,118 @@ class CudaHipCaptureAwareAllocator:
         self._default = CudaDefaultAllocator(device)
         self._pool = CudaMempoolAllocator(device)
         self._pool_ptrs = set()
+        self._cache_enabled = os.environ.get("WARP_HIP_ALLOC_CACHE", "0") == "1"
+        self._pending = []  # (ptr, size) freed, possibly still in use by queued work
+        self._pending_bytes = 0
+        self._ready = {}  # size -> [ptr], no queued work can use these
+        self._ready_bytes = 0
+        # frees can come from several threads (and from finalizers), and the synchronize releases the GIL
+        self._lock = threading.RLock()
+        self._retiring = False
+        self._retry_count = 0  # after a failed synchronize, wait for this many pending frees before retrying
 
     def allocate(self, size_in_bytes):
         if self.device.is_capturing:
             ptr = self._pool.allocate(size_in_bytes)
             self._pool_ptrs.add(ptr)
             return ptr
-        return self._default.allocate(size_in_bytes)
+        if self._caching():
+            with self._lock:
+                blocks = self._ready.get(size_in_bytes)
+                if blocks:
+                    self._ready_bytes -= size_in_bytes
+                    return blocks.pop()
+        try:
+            return self._default.allocate(size_in_bytes)
+        except RuntimeError:
+            if not (self._pending or self._ready_bytes) or runtime.captures:
+                raise
+            # out of memory: give the cached blocks back and try once more
+            self.release_cached()
+            return self._default.allocate(size_in_bytes)
 
     def deallocate(self, ptr, size_in_bytes):
         if ptr in self._pool_ptrs:
             self._pool_ptrs.discard(ptr)
             self._pool.deallocate(ptr, size_in_bytes)
+        elif self._caching():
+            with self._lock:
+                self._pending.append((ptr, size_in_bytes))
+                self._pending_bytes += size_in_bytes
+                due = (
+                    len(self._pending) >= self.PENDING_MAX_COUNT or self._pending_bytes >= self.PENDING_MAX_BYTES
+                ) and len(self._pending) >= self._retry_count
+            if due:
+                self._retire_pending()
         else:
             self._default.deallocate(ptr, size_in_bytes)
+
+    def _caching(self):
+        # the allocation tracker accounts every block at hipMalloc/hipFree, so it bypasses the cache
+        return self._cache_enabled and not runtime.core.wp_alloc_tracker_is_enabled()
+
+    def _retire_pending(self):
+        """Synchronize the device once, then make the blocks freed before it reusable.
+
+        Blocks stay pending when the synchronize cannot run or fails, so a block is
+        only ever reused after a successful synchronize that follows its free.
+        """
+        with self._lock:
+            if self._retiring or not self._pending:
+                return
+            # a device synchronize would invalidate any capture in progress: one Warp knows of on any
+            # stream, or one started by another library (e.g. torch.cuda.graph) on the current stream
+            if (
+                runtime.captures
+                or runtime.core.wp_cuda_any_capture_active()
+                or runtime.core.wp_cuda_stream_is_capturing(self.device.stream.cuda_stream)
+            ):
+                return
+            self._retiring = True
+            batch, self._pending = self._pending, []
+            batch_bytes, self._pending_bytes = self._pending_bytes, 0
+        synchronized = False
+        excess = []
+        try:
+            synchronized = self._synchronize()
+        finally:
+            with self._lock:
+                if not synchronized:
+                    # e.g. a capture on another stream that Warp does not know of: retry after another batch
+                    self._pending[:0] = batch
+                    self._pending_bytes += batch_bytes
+                    self._retry_count = len(self._pending) + self.PENDING_MAX_COUNT
+                else:
+                    self._retry_count = 0
+                    for ptr, size in batch:
+                        self._ready.setdefault(size, []).append(ptr)
+                        self._ready_bytes += size
+                    if self._ready_bytes > self.READY_MAX_BYTES:
+                        for size, blocks in sorted(self._ready.items(), reverse=True):
+                            while blocks and self._ready_bytes > self.READY_MAX_BYTES:
+                                excess.append((blocks.pop(), size))
+                                self._ready_bytes -= size
+                        self._ready = {size: blocks for size, blocks in self._ready.items() if blocks}
+                # cleared last, so a free from a finalizer above cannot start a nested retire
+                self._retiring = False
+        # the device was idle at the synchronize, so these frees do not stall
+        for ptr, size in excess:
+            self._default.deallocate(ptr, size)
+
+    def _synchronize(self):
+        return runtime.core.wp_cuda_context_synchronize(self.device.context)
+
+    def release_cached(self):
+        """Free every reusable block, after making pending blocks reusable where possible.
+
+        Must not be called during graph capture.
+        """
+        self._retire_pending()
+        with self._lock:
+            ready, self._ready, self._ready_bytes = self._ready, {}, 0
+        for size, blocks in ready.items():
+            for ptr in blocks:
+                self._default.deallocate(ptr, size)
 
     def is_managed(self, ptr):
         return False
@@ -8266,6 +8380,8 @@ class Runtime:
             self.core.wp_cuda_thread_exchange_capture_mode.restype = ctypes.c_int
             self.core.wp_cuda_stream_get_capture_id.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_stream_get_capture_id.restype = ctypes.c_uint64
+            self.core.wp_cuda_any_capture_active.argtypes = []
+            self.core.wp_cuda_any_capture_active.restype = ctypes.c_bool
             self.core.wp_cuda_stream_get_priority.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_stream_get_priority.restype = ctypes.c_int
 

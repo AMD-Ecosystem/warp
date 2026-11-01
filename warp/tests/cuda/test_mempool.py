@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import gc
+import sys
+import threading
 import unittest
+
+import numpy as np
 
 import warp as wp
 from warp.tests.unittest_utils import *
@@ -261,6 +266,360 @@ def test_graph_capture_allocation_capability(test, _):
         test.assertEqual(_is_graph_capture_allocation_enabled(device), device.is_mempool_enabled)
 
 
+@wp.kernel
+def slow_copy_kernel(src: wp.array[float], dst: wp.array[float], iters: int, zero: float):
+    # a few threads spin, then each copies a strided share of the array, leaving the rest of the device free
+    tid = wp.tid()
+    acc = float(0.0)
+    for i in range(iters):
+        acc = wp.sin(acc + float(i))
+    # the start index depends on the loop through a runtime zero, so no load can be issued before it
+    j = tid + int(acc * zero)
+    stride = 64
+    while j < src.shape[0]:
+        dst[j] = src[j]
+        j += stride
+
+
+@wp.kernel
+def fill_kernel(dst: wp.array[float], value: float):
+    dst[wp.tid()] = value
+
+
+def test_mempool_free_while_in_use(test, device):
+    """A block freed while queued work still reads it must not be overwritten through a new allocation."""
+    device = wp.get_device(device)
+    n = 1 << 16
+    reader = wp.Stream(device)
+    writer = wp.Stream(device)
+    with wp.ScopedMempool(device, True):
+        for _ in range(3):
+            src = wp.full(n, 1.0, dtype=float, device=device)
+            dst = wp.zeros(n, dtype=float, device=device)
+            wp.synchronize_device(device)
+            wp.launch(slow_copy_kernel, dim=64, inputs=[src, dst, 1000000, 0.0], device=device, stream=reader)
+            del src
+            gc.collect()
+            # many same-size allocations overwritten on another stream while the reader still runs
+            fresh = []
+            for _ in range(8):
+                a = wp.empty(n, dtype=float, device=device)
+                wp.launch(fill_kernel, dim=n, inputs=[a, 7.0], device=device, stream=writer)
+                fresh.append(a)
+            wp.synchronize_device(device)
+            assert_np_equal(dst.numpy(), np.ones(n, dtype=np.float32))
+            del fresh
+
+
+class _HipAllocationCache:
+    """Turn the opt-in HIP allocation cache on for one test; None outside HIP or while tracking allocations."""
+
+    def __init__(self, device):
+        from warp._src.context import CudaHipCaptureAwareAllocator  # noqa: PLC0415
+
+        allocator = device.mempool_enabled_allocator
+        self.allocator = allocator if isinstance(allocator, CudaHipCaptureAwareAllocator) else None
+
+    def __enter__(self):
+        if self.allocator is None:
+            return None
+        self.was_enabled = self.allocator._cache_enabled
+        self.allocator._cache_enabled = True
+        if not self.allocator._caching():
+            self.allocator._cache_enabled = self.was_enabled
+            return None
+        return self.allocator
+
+    def __exit__(self, *exc):
+        if self.allocator is not None:
+            self.allocator.release_cached()
+            self.allocator._cache_enabled = self.was_enabled
+
+
+def test_mempool_cache_concurrent_frees(test, device):
+    """Frees from two threads while a synchronize is in progress never cache one block twice."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_concurrent_frees(test, device, allocator)
+
+
+def _cache_concurrent_frees(test, device, allocator):
+    n = 1024
+    limit = allocator.PENDING_MAX_COUNT
+    busy = wp.zeros(64, dtype=float, device=device)
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        with wp.ScopedMempool(device, True):
+            for _ in range(100):
+                gc.collect()
+                allocator.release_cached()
+                wp.synchronize_device(device)
+                a = [wp.empty(n, dtype=float, device=device) for _ in range(limit - 1)]
+                b = [wp.empty(n, dtype=float, device=device) for _ in range(300)]
+                c = [wp.empty(n, dtype=float, device=device) for _ in range(300)]
+                # keep the device busy so the synchronize releases the GIL for a while
+                wp.launch(slow_copy_kernel, dim=1, inputs=[busy, busy, 20000, 0.0], device=device)
+                del a  # one free short of a synchronize
+
+                def free_b():
+                    while b:
+                        b.pop()
+
+                t = threading.Thread(target=free_b)
+                t.start()
+                while c:
+                    c.pop()
+                t.join()
+                wp.synchronize_device(device)
+                cached = [p for blocks in allocator._ready.values() for p in blocks]
+                cached += [p for p, _ in allocator._pending]
+                test.assertEqual(len(cached), len(set(cached)), "a block was cached twice")
+    finally:
+        sys.setswitchinterval(switch)
+
+
+def test_mempool_cache_external_capture(test, device):
+    """Blocks freed during a capture Warp did not start are not reused without a synchronize."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_external_capture(test, device, allocator)
+
+
+def _cache_external_capture(test, device, allocator):
+    from warp._src.context import CaptureMode, runtime  # noqa: PLC0415
+
+    n = 1024
+    stream = wp.Stream(device)
+    allocator.PENDING_MAX_COUNT = 16
+    try:
+        with wp.ScopedMempool(device, True):
+            allocator.release_cached()
+            arrays = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            freed = {x.ptr for x in arrays}
+            with wp.ScopedStream(stream):
+                # a capture started below Warp's capture registry, as another library would start one
+                test.assertTrue(
+                    runtime.core.wp_cuda_graph_begin_capture(
+                        device.context, stream.cuda_stream, 0, int(CaptureMode.THREAD_LOCAL)
+                    )
+                )
+                del arrays
+                graph = ctypes.c_void_p()
+                runtime.core.wp_cuda_graph_end_capture(device.context, stream.cuda_stream, ctypes.byref(graph))
+                if graph:
+                    runtime.core.wp_cuda_graph_destroy(device.context, graph)
+            fresh = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            test.assertFalse(freed & {x.ptr for x in fresh}, "a block freed during the capture was reused")
+            del fresh
+    finally:
+        del allocator.PENDING_MAX_COUNT
+
+
+def test_mempool_cache_capture_other_stream(test, device):
+    """Frees during a capture on another stream do not invalidate that capture."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_capture_other_stream(test, device, allocator)
+
+
+def _cache_capture_other_stream(test, device, allocator):
+    from warp._src.context import CaptureMode, runtime  # noqa: PLC0415
+
+    n = 1024
+    stream = wp.Stream(device)
+    allocator.PENDING_MAX_COUNT = 16
+    try:
+        with wp.ScopedMempool(device, True):
+            allocator.release_cached()
+            arrays = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            test.assertTrue(
+                runtime.core.wp_cuda_graph_begin_capture(
+                    device.context, stream.cuda_stream, 0, int(CaptureMode.RELAXED)
+                )
+            )
+            del arrays  # freed on the device's current stream, which is not capturing
+            graph = ctypes.c_void_p()
+            ended = runtime.core.wp_cuda_graph_end_capture(device.context, stream.cuda_stream, ctypes.byref(graph))
+            if graph:
+                runtime.core.wp_cuda_graph_destroy(device.context, graph)
+            test.assertTrue(ended and graph, "the capture was invalidated")
+    finally:
+        del allocator.PENDING_MAX_COUNT
+
+
+def test_mempool_cache_unregistered_capture(test, device):
+    """Blocks freed during a capture started directly through HIP are not reused without a synchronize."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_unregistered_capture(test, device, allocator)
+
+
+def _cache_unregistered_capture(test, device, allocator):
+    hip = ctypes.CDLL("libamdhip64.so.7")
+    n = 1024
+    stream = wp.Stream(device)
+    allocator.PENDING_MAX_COUNT = 16
+    try:
+        with wp.ScopedMempool(device, True):
+            allocator.release_cached()
+            arrays = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            freed = {x.ptr for x in arrays}
+            with wp.ScopedStream(stream):
+                # as another library would: neither Warp nor its native layer knows of this capture
+                test.assertEqual(hip.hipStreamBeginCapture(ctypes.c_void_p(stream.cuda_stream), 2), 0)
+                del arrays
+                graph = ctypes.c_void_p()
+                ended = hip.hipStreamEndCapture(ctypes.c_void_p(stream.cuda_stream), ctypes.byref(graph))
+                if graph:
+                    hip.hipGraphDestroy(graph)
+                test.assertEqual(ended, 0, "the capture was invalidated")
+            fresh = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            test.assertFalse(freed & {x.ptr for x in fresh}, "a block freed during the capture was reused")
+            del fresh
+    finally:
+        del allocator.PENDING_MAX_COUNT
+
+
+def test_mempool_cache_free_during_synchronize(test, device):
+    """A block freed while a synchronize is in progress waits for the next one."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_free_during_synchronize(test, device, allocator)
+
+
+def _cache_free_during_synchronize(test, device, allocator):
+    n = 1024
+    with wp.ScopedMempool(device, True):
+        allocator.release_cached()
+        before = [wp.empty(n, dtype=float, device=device) for _ in range(4)]
+        during = [wp.empty(n, dtype=float, device=device)]
+        late = during[0].ptr
+        synchronize = allocator._synchronize
+
+        def synchronize_and_free():
+            done = synchronize()
+            during.clear()  # freed after the synchronize was issued
+            return done
+
+        allocator._synchronize = synchronize_and_free
+        try:
+            del before
+            allocator._retire_pending()
+        finally:
+            del allocator._synchronize
+        ready = [p for blocks in allocator._ready.values() for p in blocks]
+        test.assertNotIn(late, ready, "a block freed during the synchronize became reusable")
+        test.assertIn(late, [p for p, _ in allocator._pending])
+
+
+def test_mempool_cache_reuse_waits_for_reader(test, device):
+    """A reused block is not overwritten while work on another stream still reads it."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_reuse_waits_for_reader(test, device, allocator)
+
+
+def _cache_reuse_waits_for_reader(test, device, allocator):
+    n = 1 << 16
+    reader = wp.Stream(device)
+    writer = wp.Stream(device)
+    allocator.PENDING_MAX_COUNT = 8
+    try:
+        with wp.ScopedMempool(device, True):
+            for _ in range(3):
+                allocator.release_cached()
+                src = wp.full(n, 1.0, dtype=float, device=device)
+                dst = wp.zeros(n, dtype=float, device=device)
+                filler = [wp.empty(n, dtype=float, device=device) for _ in range(8)]
+                wp.synchronize_device(device)
+                wp.launch(slow_copy_kernel, dim=64, inputs=[src, dst, 1000000, 0.0], device=device, stream=reader)
+                del src
+                filler.clear()  # the ninth free crosses the threshold while the reader runs
+                fresh = []
+                for _ in range(9):
+                    a = wp.empty(n, dtype=float, device=device)
+                    wp.launch(fill_kernel, dim=n, inputs=[a, 7.0], device=device, stream=writer)
+                    fresh.append(a)
+                wp.synchronize_device(device)
+                assert_np_equal(dst.numpy(), np.ones(n, dtype=np.float32))
+                del fresh
+    finally:
+        del allocator.PENDING_MAX_COUNT
+
+
+def test_mempool_cache_failed_synchronize(test, device):
+    """Blocks are not reused when the synchronize that would release them fails."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_failed_synchronize(test, device, allocator)
+
+
+def _cache_failed_synchronize(test, device, allocator):
+    n = 1024
+    allocator.PENDING_MAX_COUNT = 8
+    allocator._synchronize = lambda: False
+    try:
+        with wp.ScopedMempool(device, True):
+            allocator.release_cached()
+            arrays = [wp.empty(n, dtype=float, device=device) for _ in range(16)]
+            freed = {x.ptr for x in arrays}
+            del arrays
+            fresh = [wp.empty(n, dtype=float, device=device) for _ in range(16)]
+            test.assertFalse(freed & {x.ptr for x in fresh}, "a block was reused after a failed synchronize")
+            del fresh
+    finally:
+        del allocator._synchronize
+        del allocator.PENDING_MAX_COUNT
+
+
+def test_mempool_cache_unregistered_capture_other_stream(test, device):
+    """Blocks freed while an unknown capture on another stream blocks the synchronize are not reused."""
+    device = wp.get_device(device)
+    with _HipAllocationCache(device) as allocator:
+        if allocator is None:
+            test.skipTest("no HIP allocation cache on this device")
+        _cache_unregistered_capture_other_stream(test, device, allocator)
+
+
+def _cache_unregistered_capture_other_stream(test, device, allocator):
+    hip = ctypes.CDLL("libamdhip64.so.7")
+    n = 1024
+    stream = wp.Stream(device)
+    allocator.PENDING_MAX_COUNT = 16
+    try:
+        with wp.ScopedMempool(device, True):
+            allocator.release_cached()
+            arrays = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            freed = {x.ptr for x in arrays}
+            # relaxed capture unknown to Warp on another stream: the device synchronize fails while it runs
+            test.assertEqual(hip.hipStreamBeginCapture(ctypes.c_void_p(stream.cuda_stream), 2), 0)
+            del arrays
+            fresh = [wp.empty(n, dtype=float, device=device) for _ in range(64)]
+            graph = ctypes.c_void_p()
+            hip.hipStreamEndCapture(ctypes.c_void_p(stream.cuda_stream), ctypes.byref(graph))
+            if graph:
+                hip.hipGraphDestroy(graph)
+            test.assertFalse(freed & {x.ptr for x in fresh}, "a block was reused without a successful synchronize")
+            del fresh
+    finally:
+        del allocator.PENDING_MAX_COUNT
+
+
 class TestMempool(unittest.TestCase):
     pass
 
@@ -278,6 +637,57 @@ add_function_test(
     TestMempool, "test_mempool_usage_queries", test_mempool_usage_queries, devices=cuda_devices_with_mempools
 )
 add_function_test(TestMempool, "test_mempool_access_self", test_mempool_access_self, devices=cuda_devices_with_mempools)
+add_function_test(
+    TestMempool, "test_mempool_free_while_in_use", test_mempool_free_while_in_use, devices=cuda_devices_with_mempools
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_reuse_waits_for_reader",
+    test_mempool_cache_reuse_waits_for_reader,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_failed_synchronize",
+    test_mempool_cache_failed_synchronize,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_unregistered_capture_other_stream",
+    test_mempool_cache_unregistered_capture_other_stream,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_concurrent_frees",
+    test_mempool_cache_concurrent_frees,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_external_capture",
+    test_mempool_cache_external_capture,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_capture_other_stream",
+    test_mempool_cache_capture_other_stream,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_unregistered_capture",
+    test_mempool_cache_unregistered_capture,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_cache_free_during_synchronize",
+    test_mempool_cache_free_during_synchronize,
+    devices=cuda_devices_with_mempools,
+)
 
 # CPU has no CUDA-style mempool; it uses a separate graph-capture allocation capability.
 add_function_test(TestMempool, "test_mempool_cpu_unsupported", test_mempool_cpu_unsupported)
