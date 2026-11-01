@@ -353,6 +353,35 @@ def test_event_elapsed_time_graph(test, device):
     test.assertGreater(elapsed, 0)
 
 
+def test_event_external_same_stream(test, device):
+    """An external record and an external wait on one stream inside one capture keep the stream's order."""
+    with wp.ScopedDevice(device):
+        event = wp.Event()
+        n = 1024
+        a = wp.zeros(n, dtype=float)
+        b = wp.zeros(n, dtype=float)
+
+        # the runtime reports errors on stderr; the wait must not produce one
+        capture_stderr = StdErrCapture()
+        capture_stderr.begin()
+        try:
+            with wp.ScopedCapture() as capture:
+                wp.launch(inc, dim=n, inputs=[a])
+                wp.record_event(event, external=True)
+                wp.wait_event(event, external=True)
+                wp.launch(inc_new, dim=n, inputs=[a, b])
+        finally:
+            errors = capture_stderr.end()
+        test.assertNotIn("error", errors.lower())
+
+        for _ in range(3):
+            wp.capture_launch(capture.graph)
+        wp.synchronize_device()
+
+        assert_np_equal(a.numpy(), np.full(n, 3.0, dtype=np.float32))
+        assert_np_equal(b.numpy(), np.full(n, 4.0, dtype=np.float32))
+
+
 def test_event_external(test, device):
     with wp.ScopedDevice(device):
         # event used to synchronize two graphs (external event)
@@ -716,6 +745,9 @@ add_function_test(TestStreams, "test_event_synchronize", test_event_synchronize,
 add_function_test(TestStreams, "test_event_elapsed_time", test_event_elapsed_time, devices=devices)
 add_function_test(TestStreams, "test_event_elapsed_time_graph", test_event_elapsed_time_graph, devices=devices)
 add_function_test(TestStreams, "test_event_external", test_event_external, devices=devices)
+add_function_test(
+    TestStreams, "test_event_external_same_stream", test_event_external_same_stream, devices=devices
+)
 
 add_function_test(TestStreams, "test_graph_destroy_during_capture", test_graph_destroy_during_capture, devices=devices)
 

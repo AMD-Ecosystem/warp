@@ -3904,10 +3904,52 @@ void* wp_cuda_stream_get_current() { return get_current_stream(); }
 
 void wp_cuda_stream_synchronize(void* stream) { check_cu(cuStreamSynchronize_f(static_cast<CUstream>(stream))); }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// The stream and capture of each event's last record made during a capture. ROCm faults on an
+// external wait on the stream that recorded the event in the same capture. That wait adds no
+// ordering beyond the stream's own, so it is skipped.
+struct HipCaptureRecord
+{
+    CUstream stream;
+    uint64_t capture_id;
+};
+static std::unordered_map<CUevent, HipCaptureRecord>& g_hip_capture_records
+    = *new std::unordered_map<CUevent, HipCaptureRecord>();
+static std::mutex& g_hip_capture_records_mutex = *new std::mutex();
+// Events Warp created. Only these are tracked: an event created elsewhere can be recorded
+// through another API that Warp does not see, so its last record cannot be known.
+static std::unordered_set<CUevent>& g_hip_owned_events = *new std::unordered_set<CUevent>();
+
+// Remember where an event was just recorded, or forget it when recorded outside a capture.
+static void hip_note_event_record(void* event, void* stream)
+{
+    std::lock_guard<std::mutex> lock(g_hip_capture_records_mutex);
+    if (g_hip_owned_events.count(static_cast<CUevent>(event)) && !g_captures.empty()
+        && wp_cuda_stream_is_capturing(stream))
+        g_hip_capture_records[static_cast<CUevent>(event)]
+            = { static_cast<CUstream>(stream), wp_cuda_stream_get_capture_id(stream) };
+    else
+        g_hip_capture_records.erase(static_cast<CUevent>(event));
+}
+
+// Whether an external wait on stream for event adds nothing to the stream's own order.
+static bool hip_wait_is_redundant(void* event, void* stream)
+{
+    std::lock_guard<std::mutex> lock(g_hip_capture_records_mutex);
+    auto record = g_hip_capture_records.find(static_cast<CUevent>(event));
+    return record != g_hip_capture_records.end() && record->second.stream == static_cast<CUstream>(stream)
+        && record->second.capture_id == wp_cuda_stream_get_capture_id(stream);
+}
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
 void wp_cuda_stream_wait_event(void* stream, void* event, bool external)
 {
     // the external flag can only be used during graph capture
     if (external && !g_captures.empty() && wp_cuda_stream_is_capturing(stream)) {
+#if defined(__HIP_PLATFORM_AMD__)
+        if (hip_wait_is_redundant(event, stream))
+            return;
+#endif  // defined(__HIP_PLATFORM_AMD__)
         // wait for an external event during graph capture
         check_cu(
             cuStreamWaitEvent_f(static_cast<CUstream>(stream), static_cast<CUevent>(event), CU_EVENT_WAIT_EXTERNAL)
@@ -3934,6 +3976,11 @@ void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, b
     }
 
     check_cu(cuEventRecordWithFlags_f(static_cast<CUevent>(event), static_cast<CUstream>(other_stream), record_flags));
+#if defined(__HIP_PLATFORM_AMD__)
+    hip_note_event_record(event, other_stream);
+    if (wait_flags == CU_EVENT_WAIT_EXTERNAL && hip_wait_is_redundant(event, stream))
+        return;
+#endif  // defined(__HIP_PLATFORM_AMD__)
     check_cu(cuStreamWaitEvent_f(static_cast<CUstream>(stream), static_cast<CUevent>(event), wait_flags));
     note_forked_stream(static_cast<CUstream>(stream));
 }
@@ -3994,9 +4041,13 @@ void* wp_cuda_event_create(void* context, unsigned flags)
     ContextGuard guard(context, true);
 
     CUevent event;
-    if (check_cu(cuEventCreate_f(&event, flags)))
+    if (check_cu(cuEventCreate_f(&event, flags))) {
+#if defined(__HIP_PLATFORM_AMD__)
+        std::lock_guard<std::mutex> lock(g_hip_capture_records_mutex);
+        g_hip_owned_events.insert(event);
+#endif  // defined(__HIP_PLATFORM_AMD__)
         return event;
-    else
+    } else
         return NULL;
 }
 
@@ -4019,6 +4070,11 @@ void wp_cuda_event_destroy(void* event)
     {
         std::lock_guard<std::mutex> lock(g_hip_external_capture_events_mutex);
         g_hip_external_capture_events.erase(static_cast<CUevent>(event));
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_hip_capture_records_mutex);
+        g_hip_capture_records.erase(static_cast<CUevent>(event));
+        g_hip_owned_events.erase(static_cast<CUevent>(event));
     }
 #endif  // defined(__HIP_PLATFORM_AMD__)
     check_cu(cuEventDestroy_f(static_cast<CUevent>(event)));
@@ -4051,6 +4107,9 @@ void wp_cuda_event_record(void* event, void* stream, bool external)
     } else {
         check_cu(cuEventRecord_f(static_cast<CUevent>(event), static_cast<CUstream>(stream)));
     }
+#if defined(__HIP_PLATFORM_AMD__)
+    hip_note_event_record(event, stream);
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 void wp_cuda_event_synchronize(void* event)
