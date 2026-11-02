@@ -1,0 +1,8 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        ROCm/rocm-security-gh/.github/workflows/security-baseline.yml: ref-pin

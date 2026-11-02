@@ -1,0 +1,14 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Local scan: trivy fs --config .github/scan_tools_configs/trivy.yml .
+
+scan:
+  skip-dirs:
+    - .git
+    - .venv*
+    - venv*
+    - build
+    - dist
+    - node_modules
+    - __pycache__
