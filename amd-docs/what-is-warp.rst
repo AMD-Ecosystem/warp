@@ -19,7 +19,7 @@ physics simulation, perception, robotics, and geometry processing. In addition,
 Warp kernels are differentiable and can be used as part of machine-learning
 pipelines with frameworks such as PyTorch.
 
-Warp on ROCm is a port of Warp that adds a HIP backend for AMD Instinct GPUs.
+Warp on ROCm is a port that adds a HIP backend for AMD Instinct GPUs.
 HIP is detected automatically at build time, and AMD GPUs are exposed to Warp
 programs through the same ``cuda:N`` device names used upstream, so existing
 Warp code runs on AMD Instinct GPUs without modification.
