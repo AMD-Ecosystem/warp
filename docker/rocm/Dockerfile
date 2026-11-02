@@ -4,6 +4,11 @@
 # library and install it in editable mode, so the build context must be the
 # repo root. Build locally (from the repo root) with:
 #   docker build --network=host -f docker/rocm/Dockerfile --target warp_gfx942 -t <tag> .
+#
+# Both targets run as the unprivileged `warp` user. GPU access needs the host's
+# GPU device groups, e.g.:
+#   docker run --device=/dev/kfd --device=/dev/dri \
+#     --group-add video --group-add render <tag>
 
 ARG ROCM_VERSION=7.2
 ARG UBUNTU_VERSION=24.04
@@ -42,12 +47,17 @@ RUN pip install --break-system-packages \
 
 ARG HIP_ARCH=gfx942
 
-COPY . /workspace/warp
+RUN (getent group render || groupadd --system render) \
+    && useradd --create-home --shell /bin/bash --groups video,render warp
+
+COPY --chown=warp:warp . /workspace/warp
 WORKDIR /workspace/warp
 
 RUN ROCM_PATH=/opt/rocm python build_lib.py --hip-arch=${HIP_ARCH} --hipcc-options="-Xarch_device -fno-inline" && \
-    pip install -e . --break-system-packages
+    pip install -e . --break-system-packages && \
+    find /workspace/warp ! -user warp -exec chown warp:warp {} +
 
+USER warp
 
 
 # ROCm 10.1.0 / gfx950 image for the Mujoco Warp workload.
@@ -111,8 +121,14 @@ RUN ln -sf /usr/bin/python3 /usr/local/bin/python
 
 ARG HIP_ARCH=gfx950
 
-COPY . /workspace/warp
+RUN (getent group render || groupadd --system render) \
+    && useradd --create-home --shell /bin/bash --groups video,render warp
+
+COPY --chown=warp:warp . /workspace/warp
 WORKDIR /workspace/warp
 
 RUN ROCM_PATH=/opt/rocm python build_lib.py --hip-arch=${HIP_ARCH} --hipcc-options="-Xarch_device -fno-inline" && \
-    pip install -e . --break-system-packages
+    pip install -e . --break-system-packages && \
+    find /workspace/warp ! -user warp -exec chown warp:warp {} +
+
+USER warp
