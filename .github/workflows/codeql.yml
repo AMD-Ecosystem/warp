@@ -16,10 +16,10 @@ on:
       - release-*
   schedule:
     - cron: "45 9 * * *"
+  workflow_dispatch:
 
 jobs:
   analyze:
-    if: github.event_name != 'schedule' || github.repository == 'NVIDIA/warp'
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -34,11 +34,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
         queries: security-extended
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
