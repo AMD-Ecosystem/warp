@@ -201,6 +201,7 @@ omit = [
 
 [tool.uv]
 managed = true
+environments = ["python_version >= '3.11'"]
 
 [[tool.uv.index]]
 name = "testpypi"
