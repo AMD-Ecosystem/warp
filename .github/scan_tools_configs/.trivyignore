@@ -17,3 +17,7 @@
 # This file sits beside the configured trivy.yml, so the scan uses it.
 # A .trivyignore at the repository root applies only when this file is
 # absent; the two are never merged.
+
+# The ROCm images run as root so the container can open the host GPU devices
+# (/dev/kfd, /dev/dri) with the standard docker run flags.
+AVD-DS-0002 exp:2027-05-01
