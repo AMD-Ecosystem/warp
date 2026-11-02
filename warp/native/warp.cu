@@ -5577,7 +5577,11 @@ size_t wp_cuda_compile_program(
     }
 
     if (fast_math) {
+        // -ffast-math leaves fp32 denormals on, unlike --use_fast_math on CUDA, so a guard such as
+        // `if (l > 0)` passes for a denormal `l` that the approximate rcp/rsq then treat as zero.
         stored_options.push_back("-ffast-math");
+        opts.push_back(stored_options.back().c_str());
+        stored_options.push_back("-fgpu-flush-denormals-to-zero");
         opts.push_back(stored_options.back().c_str());
     }
 

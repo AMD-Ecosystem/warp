@@ -272,6 +272,32 @@ def test_approx_inverse_backward(test, device):
         np.testing.assert_allclose(grad_m, expected_grad, rtol=1e-4)
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def tiny_vector_kernel(a: wp.array[float], scaled: wp.array[float], unit: wp.array[float]):
+    i = wp.tid()
+    scaled[i] = a[i] * 1.5
+    n = wp.normalize(wp.vec3(a[i], 0.0, 0.0))
+    unit[i] = n[0]
+
+
+wp.set_module_options({"fast_math": True}, module=tiny_vector_kernel.module)
+
+
+def test_fast_math_denormals(test, device):
+    # --use_fast_math flushes fp32 denormals to zero, and normalizing a vector whose squared length
+    # is denormal must give zero or a unit vector, never Inf/NaN.
+    a = wp.array([1.0e-40, 1.0e-21, 1.0e-20, 1.0e-19, 1.0], dtype=float, device=device)
+    scaled = wp.zeros(5, dtype=float, device=device)
+    unit = wp.zeros(5, dtype=float, device=device)
+    wp.launch(tiny_vector_kernel, dim=5, inputs=[a, scaled, unit], device=device)
+
+    test.assertEqual(scaled.numpy()[0], 0.0)
+    u = unit.numpy()
+    test.assertTrue(np.all(np.isfinite(u)), u)
+    for x in u:
+        test.assertTrue(x == 0.0 or abs(x - 1.0) < 1.0e-3, u)
+
+
 class TestFastMath(unittest.TestCase):
     def test_fast_math_cpu(self):
         """Handle negative power bases with fast math enabled."""
@@ -316,6 +342,7 @@ devices = get_test_devices()
 
 add_function_test(TestFastMath, "test_fast_math_cuda", test_fast_math_cuda, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_fast_math_disabled", test_fast_math_disabled, devices=devices)
+add_function_test(TestFastMath, "test_fast_math_denormals", test_fast_math_denormals, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
 add_function_test(
