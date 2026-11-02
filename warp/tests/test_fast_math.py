@@ -298,6 +298,25 @@ def test_fast_math_denormals(test, device):
         test.assertTrue(x == 0.0 or abs(x - 1.0) < 1.0e-3, u)
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def cancel_kernel(a: wp.array[float], b: wp.array[float], out: wp.array[float]):
+    i = wp.tid()
+    out[i] = (a[i] + b[i]) - b[i]
+
+
+wp.set_module_options({"fast_math": True}, module=cancel_kernel.module)
+
+
+def test_fast_math_no_reassociation(test, device):
+    # --use_fast_math does not reassociate, so (a + b) - b rounds a + b first rather than folding to a.
+    a = wp.array([1.0, 1.0], dtype=float, device=device)
+    b = wp.array([1.0e8, 0.0], dtype=float, device=device)
+    out = wp.zeros(2, dtype=float, device=device)
+    wp.launch(cancel_kernel, dim=2, inputs=[a, b, out], device=device)
+
+    np.testing.assert_array_equal(out.numpy(), np.array([0.0, 1.0], dtype=np.float32))
+
+
 class TestFastMath(unittest.TestCase):
     def test_fast_math_cpu(self):
         """Handle negative power bases with fast math enabled."""
@@ -343,6 +362,9 @@ devices = get_test_devices()
 add_function_test(TestFastMath, "test_fast_math_cuda", test_fast_math_cuda, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_fast_math_disabled", test_fast_math_disabled, devices=devices)
 add_function_test(TestFastMath, "test_fast_math_denormals", test_fast_math_denormals, devices=get_cuda_test_devices())
+add_function_test(
+    TestFastMath, "test_fast_math_no_reassociation", test_fast_math_no_reassociation, devices=get_cuda_test_devices()
+)
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
 add_function_test(
