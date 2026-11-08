@@ -1,0 +1,1 @@
+On HIP, a memory pool that still has the driver's default release threshold gets the maximum at initialization, so it keeps freed blocks across synchronizations, unless `warp.config.mempool_release_threshold` is set; rocPRIM's look-back kernels have hung on freshly mapped pool memory.

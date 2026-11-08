@@ -8883,17 +8883,24 @@ class Runtime:
                 # give them reasonable aliases (e.g., "cuda:0.0", "cuda:0.1")
                 self.cuda_custom_context_count = [0] * cuda_device_count
 
-                # apply the configured memory pool release threshold
-                if warp.config.mempool_release_threshold is not None:
-                    for device in self.cuda_primary_devices:
-                        if device.is_mempool_supported:
-                            threshold = warp.config.mempool_release_threshold
-                            if 0 < threshold <= 1:
-                                threshold = int(threshold * device.total_memory)
-                            if not self.core.wp_cuda_device_set_mempool_release_threshold(
-                                device.ordinal, int(threshold)
-                            ):
-                                log_warning(f"Failed to set the memory pool release threshold for device {device}")
+                # apply the configured memory pool release threshold; with none configured, a
+                # HIP device whose pool still has the driver default of zero gets the maximum,
+                # so the pool keeps freed blocks across synchronizations: rocPRIM's look-back
+                # kernels have hung on freshly mapped pool memory (KNOWN_ISSUES-AMD.md)
+                for device in self.cuda_primary_devices:
+                    if not device.is_mempool_supported:
+                        continue
+                    threshold = warp.config.mempool_release_threshold
+                    if threshold is None:
+                        if not device.is_hip:
+                            continue
+                        if self.core.wp_cuda_device_get_mempool_release_threshold(device.ordinal) != 0:
+                            continue  # another library raised it first; keep its value
+                        threshold = 2**64 - 1
+                    elif 0 < threshold <= 1:
+                        threshold = int(threshold * device.total_memory)
+                    if not self.core.wp_cuda_device_set_mempool_release_threshold(device.ordinal, int(threshold)):
+                        log_warning(f"Failed to set the memory pool release threshold for device {device}")
 
         # set default device
         if cuda_device_count > 0:

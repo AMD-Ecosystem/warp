@@ -654,6 +654,44 @@ def _cache_unregistered_capture_other_stream(test, device, allocator):
         del allocator.PENDING_MAX_COUNT
 
 
+def test_mempool_release_threshold_hip_default(test, device):
+    """With no threshold configured, a HIP device's pool gets the maximum threshold unless one was set first."""
+    device = wp.get_device(device)
+    if not device.is_hip:
+        test.skipTest("HIP default only")
+    source = (
+        "import os\n"
+        "os.environ.pop('WARP_MEMPOOL_RELEASE_THRESHOLD', None)\n"
+        "import warp as wp\n"
+        f"print(wp.get_mempool_release_threshold(wp.get_device('{device.alias}')))\n"
+    )
+    result = run_python_subprocess(source)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    test.assertEqual(int(result.stdout.strip().splitlines()[-1]), 2**64 - 1)
+
+    # an explicit zero restores the driver default
+    source = f"import warp as wp\nprint(wp.get_mempool_release_threshold(wp.get_device('{device.alias}')))\n"
+    result = run_python_subprocess(source, env_updates={"WARP_MEMPOOL_RELEASE_THRESHOLD": "0"})
+    test.assertEqual(result.returncode, 0, result.stderr)
+    test.assertEqual(int(result.stdout.strip().splitlines()[-1]), 0)
+
+    # a threshold that another library set on the pool before Warp initialized is kept
+    source = (
+        "import ctypes, os\n"
+        "os.environ.pop('WARP_MEMPOOL_RELEASE_THRESHOLD', None)\n"
+        "hip = ctypes.CDLL('libamdhip64.so.7')\n"
+        "pool = ctypes.c_void_p()\n"
+        f"assert hip.hipDeviceGetDefaultMemPool(ctypes.byref(pool), {device.ordinal}) == 0\n"
+        "value = ctypes.c_uint64(4096)\n"
+        "assert hip.hipMemPoolSetAttribute(pool, 4, ctypes.byref(value)) == 0  # hipMemPoolAttrReleaseThreshold\n"
+        "import warp as wp\n"
+        f"print(wp.get_mempool_release_threshold(wp.get_device('{device.alias}')))\n"
+    )
+    result = run_python_subprocess(source)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    test.assertEqual(int(result.stdout.strip().splitlines()[-1]), 4096)
+
+
 class TestMempool(unittest.TestCase):
     pass
 
@@ -671,6 +709,12 @@ add_function_test(
     TestMempool,
     "test_mempool_release_threshold_config",
     test_mempool_release_threshold_config,
+    devices=cuda_devices_with_mempools,
+)
+add_function_test(
+    TestMempool,
+    "test_mempool_release_threshold_hip_default",
+    test_mempool_release_threshold_hip_default,
     devices=cuda_devices_with_mempools,
 )
 add_function_test(

@@ -218,6 +218,43 @@ partly `test_heightfield` and `test_remesh`); the failing call is an ordinary
 `wp.array` in `builder.finalize()`. ROCm 7.2.x does not show it. Mechanism not
 established. Workaround: ROCm 7.2.x for affected workloads.
 
+### Look-back kernels hang on freshly mapped pool memory
+
+rocPRIM's decoupled look-back kernels behind `cub::DeviceScan` and
+`cub::DeviceRunLengthEncode` (`warp.utils.array_scan`,
+`warp.utils.runlength_encode`) can spin forever when their scratch buffer is
+memory the stream-ordered pool has just mapped: every workgroup polls the flag
+its predecessor stored and reads it as empty, and the next synchronous call
+(`hipFree`, a readback) then waits forever with the GPU at full load. Seen on
+kernel 7.0.0-42 (Ubuntu 24.04, ROCm 7.14) in Newton's MPM examples, whose first
+step frees temporaries between the sort, the encode and the scan. With the
+pipeline's runtime binding (no torch, system ROCm) a `mpm_granular` start hung
+in 14 of 38 attempts over three batches (6 of 10, 7 of 20, 1 of 8) and in 4 of
+12 in an independent interleaved repeat; the rate varied between batches under
+conditions that neither the frame rate nor the GPU load distinguished, and the
+cause of the variation is not established. Timeouts with the same log
+signature occurred three times before, all under kernel 7.0.0-31 and
+undiagnosed then: `mpm_multi_material` and `mpm_viscous` on 2026-09-09,
+`mpm_granular` on 2026-09-29. The 40 rows on kernel 7.0.0-34 (2026-09-30 to
+2026-11-06, 31 of them at night) did not show it.
+
+With the pool's default release threshold of zero, every synchronization
+returned all freed pool memory to the driver, so each of those scratch buffers
+was freshly mapped. Two measures, each of which removed the hang on its own
+(pool default alone 0 of 12 starts, plain scratch alone 0 of 20, both 0 of 28
+plus 0 of 12 in the independent repeat, interleaved with the control): the
+scratch of `array_scan` and
+`runlength_encode` comes from the plain allocator outside graph capture, as
+upstream's newer scan code does, and Warp on HIP sets the pool's release
+threshold to the maximum at initialization, unless
+`warp.config.mempool_release_threshold`, `WARP_MEMPOOL_RELEASE_THRESHOLD` or
+another library set one first, so the pool keeps freed blocks across
+synchronizations and serves small buffers from memory mapped earlier. The
+runtime still releases completed free blocks under rules of its own, and
+memory the pool maps for the first time is fresh, so the second
+measure reduces fresh mappings rather than removing them. The cause in the
+driver is not established.
+
 ### Graph-capture memory leak on ROCm 7.2.x
 
 ROCm 7.2.x does not reclaim memory allocated inside a captured graph; every

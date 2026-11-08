@@ -362,10 +362,10 @@ mempool_release_threshold: int | float | None = _mempool_release_threshold_from_
 
 The threshold is how much freed memory a device's memory pool holds before it
 returns memory to the driver at the next stream, event or device
-synchronization. ``None`` keeps the driver default of zero, which returns every
-freed block at the next synchronization; a workload that allocates and frees
-temporaries on every step and synchronizes in between then pays that release on
-every synchronization. Values between 0 and 1 are a fraction of the device's
+synchronization. ``None`` keeps the driver default of zero on CUDA, which
+returns every freed block at the next synchronization; a workload that allocates
+and frees temporaries on every step and synchronizes in between then pays that
+release on every synchronization. Values between 0 and 1 are a fraction of the device's
 memory, larger values are bytes, as for
 :func:`warp.set_mempool_release_threshold`, which changes one device at any
 time.
@@ -373,6 +373,12 @@ time.
 Read once from the ``WARP_MEMPOOL_RELEASE_THRESHOLD`` environment variable at
 import, for example ``0.5``; a value that is neither a fraction from 0 to 1 nor a
 whole number of bytes up to 2**64 - 1 is rejected at import. Applies to every device that supports memory pools.
+
+On HIP, ``None`` applies the maximum to a pool that still has the driver default,
+so the pool keeps freed blocks across synchronizations instead of returning each
+one, because kernels that communicate through freshly mapped pool memory have
+hung on it (see ``KNOWN_ISSUES-AMD.md``). A threshold another library set before
+Warp initialized is kept, and ``0`` restores the driver default.
 """
 
 track_memory: bool = False
