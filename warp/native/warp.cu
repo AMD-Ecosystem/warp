@@ -5478,6 +5478,10 @@ size_t wp_cuda_compile_program(
     (void)ltoirs;
     (void)ltoir_sizes;
     (void)ltoir_input_types;
+    // HIPRTC has no precompiled headers. The request is ignored without a message, as the CUDA
+    // path ignores it on toolkits before 12.8: a warning on every compile would reach every
+    // caller that checks stderr, for a default setting the user did not choose.
+    (void)precompiled_headers;
     (void)pch_dir;
 
     if (!cuda_src || !program_name || !output_path) {
@@ -5485,9 +5489,6 @@ size_t wp_cuda_compile_program(
         return size_t(-1);
     }
 
-    if (precompiled_headers) {
-        fprintf(stderr, "Warp warning: HIPRTC does not support precompiled headers, ignoring request\n");
-    }
     if (num_ltoirs > 0) {
         fprintf(stderr, "Warp warning: HIPRTC LTO inputs are not supported, ignoring %zu inputs\n", num_ltoirs);
     }
