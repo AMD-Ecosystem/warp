@@ -255,6 +255,17 @@ memory the pool maps for the first time is fresh, so the second
 measure reduces fresh mappings rather than removing them. The cause in the
 driver is not established.
 
+### Scratch allocation limit
+
+A kernel whose scratch need exceeds ROCm's `HSA_SCRATCH_SINGLE_LIMIT` gets a new
+scratch allocation on every dispatch, which delays each of its dispatches. Large
+kernels that spill registers on gfx1151 cross the default limit. When the
+variable is unset, Warp sets it to 1 GiB in the process environment before it
+initializes HIP; child processes that inherit that environment see the value. If
+PyTorch initialized ROCm first, the runtime has already read the limit and Warp
+logs a warning; set `HSA_SCRATCH_SINGLE_LIMIT=1073741824` in the environment
+before starting Python.
+
 ### Graph-capture memory leak on ROCm 7.2.x
 
 ROCm 7.2.x does not reclaim memory allocated inside a captured graph; every
