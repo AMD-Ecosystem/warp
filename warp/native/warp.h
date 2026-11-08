@@ -735,7 +735,7 @@ WP_API void* wp_cuda_context_get_stream(void* context);
 WP_API void wp_cuda_context_set_stream(void* context, void* stream, int sync);
 
 // ensures all device side operations have completed in the current context
-WP_API void wp_cuda_context_synchronize(void* context);
+WP_API bool wp_cuda_context_synchronize(void* context);
 
 // profiler control for the current CUDA context (equivalent to cuProfilerStart/cuProfilerStop)
 WP_API bool wp_cuda_profiler_start(void* context);

@@ -3460,21 +3460,27 @@ void wp_cuda_context_destroy(void* context)
     }
 }
 
-void wp_cuda_context_synchronize(void* context)
+bool wp_cuda_context_synchronize(void* context)
 {
     ContextGuard guard(context);
 
-    check_cu(cuCtxSynchronize_f());
+    // Report failures from earlier asynchronous work before running deferred actions,
+    // which would replace the error string. Pending actions run after the next
+    // successful synchronization or graph capture.
+    if (!check_cu(cuCtxSynchronize_f()))
+        return false;
 
     if (!context)
         context = get_current_context();
 
     if (run_deferred_actions(context) > 0) {
         // ensure deferred asynchronous operations complete
-        check_cu(cuCtxSynchronize_f());
+        return check_cu(cuCtxSynchronize_f());
     }
 
     // check_cuda(cudaDeviceGraphMemTrim(wp_cuda_context_get_device_ordinal(context)));
+
+    return true;
 }
 
 bool wp_cuda_profiler_start(void* context)

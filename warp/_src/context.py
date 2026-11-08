@@ -8305,7 +8305,7 @@ class Runtime:
             self.core.wp_cuda_context_destroy.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_context_destroy.restype = None
             self.core.wp_cuda_context_synchronize.argtypes = [ctypes.c_void_p]
-            self.core.wp_cuda_context_synchronize.restype = None
+            self.core.wp_cuda_context_synchronize.restype = ctypes.c_bool
             self.core.wp_cuda_context_check.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_context_check.restype = ctypes.c_uint64
 
