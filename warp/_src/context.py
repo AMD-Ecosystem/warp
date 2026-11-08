@@ -5589,7 +5589,9 @@ class CudaHipCaptureAwareAllocator:
     synchronize is skipped while a capture Warp knows of is active, but it
     invalidates a capture that another library runs at the same time in
     relaxed mode on another stream or in thread-local mode on another thread,
-    which a plain free would leave intact.
+    which a plain free would leave intact. Pending blocks whose synchronize is
+    skipped or fails are returned with plain frees instead, as they would be
+    without the cache, so the pending list never grows past one batch.
     """
 
     deallocate_requires_context_guard = True
@@ -5615,7 +5617,6 @@ class CudaHipCaptureAwareAllocator:
         # frees can come from several threads (and from finalizers), and the synchronize releases the GIL
         self._lock = threading.RLock()
         self._retiring = False
-        self._retry_count = 0  # after a failed synchronize, wait for this many pending frees before retrying
 
     def allocate(self, size_in_bytes):
         if self.device.is_capturing:
@@ -5645,9 +5646,7 @@ class CudaHipCaptureAwareAllocator:
             with self._lock:
                 self._pending.append((ptr, size_in_bytes))
                 self._pending_bytes += size_in_bytes
-                due = (
-                    len(self._pending) >= self.PENDING_MAX_COUNT or self._pending_bytes >= self.PENDING_MAX_BYTES
-                ) and len(self._pending) >= self._retry_count
+                due = len(self._pending) >= self.PENDING_MAX_COUNT or self._pending_bytes >= self.PENDING_MAX_BYTES
             if due:
                 self._retire_pending()
         else:
@@ -5660,49 +5659,49 @@ class CudaHipCaptureAwareAllocator:
     def _retire_pending(self):
         """Synchronize the device once, then make the blocks freed before it reusable.
 
-        Blocks stay pending when the synchronize cannot run or fails, so a block is
-        only ever reused after a successful synchronize that follows its free.
+        A block is only ever reused after a successful synchronize that follows its
+        free. When the synchronize cannot run, because a capture is in progress, or
+        fails, the pending blocks go back through a plain free instead, which the
+        native layer defers while a capture is active.
         """
         with self._lock:
             if self._retiring or not self._pending:
                 return
+            self._retiring = True
+            batch, self._pending = self._pending, []
+            self._pending_bytes = 0
             # a device synchronize would invalidate any capture in progress: one Warp knows of on any
             # stream, or one started by another library (e.g. torch.cuda.graph) on the current stream
-            if (
+            blocked = (
                 runtime.captures
                 or runtime.core.wp_cuda_any_capture_active()
                 or runtime.core.wp_cuda_stream_is_capturing(self.device.stream.cuda_stream)
-            ):
-                return
-            self._retiring = True
-            batch, self._pending = self._pending, []
-            batch_bytes, self._pending_bytes = self._pending_bytes, 0
+            )
         synchronized = False
-        excess = []
+        returned = []
         try:
-            synchronized = self._synchronize()
+            if not blocked:
+                synchronized = bool(self._synchronize())
         finally:
             with self._lock:
-                if not synchronized:
-                    # e.g. a capture on another stream that Warp does not know of: retry after another batch
-                    self._pending[:0] = batch
-                    self._pending_bytes += batch_bytes
-                    self._retry_count = len(self._pending) + self.PENDING_MAX_COUNT
-                else:
-                    self._retry_count = 0
+                if synchronized:
                     for ptr, size in batch:
                         self._ready.setdefault(size, []).append(ptr)
                         self._ready_bytes += size
                     if self._ready_bytes > self.READY_MAX_BYTES:
                         for size, blocks in sorted(self._ready.items(), reverse=True):
                             while blocks and self._ready_bytes > self.READY_MAX_BYTES:
-                                excess.append((blocks.pop(), size))
+                                returned.append((blocks.pop(), size))
                                 self._ready_bytes -= size
                         self._ready = {size: blocks for size, blocks in self._ready.items() if blocks}
+                else:
+                    # e.g. a capture on another stream that Warp does not know of: the plain frees these
+                    # blocks would have had without the cache, rather than a wait for a synchronize
+                    returned = batch
                 # cleared last, so a free from a finalizer above cannot start a nested retire
                 self._retiring = False
-        # the device was idle at the synchronize, so these frees do not stall
-        for ptr, size in excess:
+        # after a synchronize the device is idle, so the frees of excess blocks do not stall
+        for ptr, size in returned:
             self._default.deallocate(ptr, size)
 
     def _synchronize(self):
@@ -5711,7 +5710,7 @@ class CudaHipCaptureAwareAllocator:
     def release_cached(self):
         """Free every reusable block, after making pending blocks reusable where possible.
 
-        Must not be called during graph capture.
+        During a graph capture the pending blocks are freed rather than made reusable.
         """
         self._retire_pending()
         with self._lock:

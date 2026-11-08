@@ -1,0 +1,1 @@
+Fix the opt-in HIP allocation cache (`WARP_HIP_ALLOC_CACHE=1`) growing device memory without bound when the device synchronize that releases its pending blocks cannot run or fails. Those blocks are now returned with plain frees, as they would be without the cache, instead of waiting for a synchronize that never comes.
