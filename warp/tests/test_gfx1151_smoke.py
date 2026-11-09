@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import tempfile
 import unittest
 
 import warp as wp
+from warp.tests.unittest_utils import run_python_subprocess
 
 
 @wp.kernel
@@ -67,6 +69,29 @@ class TestGFX1151Smoke(unittest.TestCase):
         c_host = c.numpy()
         for v in c_host:
             self.assertAlmostEqual(v, 6.0)
+
+    def test_compile_writes_no_warning(self):
+        """Compiling this module's kernels on HIP from an empty kernel cache writes no warning to stderr."""
+        wp.init()
+
+        device = wp.get_preferred_device()
+        if not device.is_hip:
+            self.skipTest("HIP compile path only")
+
+        source = (
+            "import warp as wp\n"
+            "from warp.tests.test_gfx1151_smoke import vec_scale\n"
+            f"a = wp.ones(4, dtype=float, device='{device.alias}')\n"
+            f"wp.launch(vec_scale, dim=4, inputs=[a, 3.0], device='{device.alias}')\n"
+            "print(a.numpy().sum())\n"
+        )
+        with tempfile.TemporaryDirectory() as cache_dir:
+            result = run_python_subprocess(source, timeout=600, env_updates={"WARP_CACHE_PATH": cache_dir})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(float(result.stdout.strip().splitlines()[-1]), 12.0)
+        warnings = [line for line in result.stderr.splitlines() if "Warp warning" in line]
+        self.assertEqual(warnings, [], result.stderr)
 
 
 if __name__ == "__main__":

@@ -20,60 +20,10 @@ import types as _types
 from enum import IntEnum as _IntEnum
 
 from warp._src.logger import LOG_INFO as _LOG_INFO
-from warp._src.logger import log_warning as _log_warning
-
-_deprecated_verbose_warning_seen = False
-_deprecated_quiet_warning_seen = False
-_suppress_verbose_log_level_mapping = False
-
-
-def _is_internal_warp_config_access() -> bool:
-    try:
-        # Temporary verbose/quiet migration hook. Frame depth 3 assumes:
-        # _is_internal_warp_config_access -> _warn_deprecated_config_access
-        # -> module __getattribute__/__setattr__ -> caller. Remove this when
-        # verbose/quiet are removed.
-        module_name = _sys._getframe(3).f_globals.get("__name__", "")
-    except ValueError:
-        return False
-    return module_name == "warp" or module_name.startswith("warp.")
-
-
-def _warn_deprecated_config_access(name: str) -> None:
-    global _deprecated_verbose_warning_seen, _deprecated_quiet_warning_seen
-
-    if _is_internal_warp_config_access():
-        return
-
-    if name == "verbose":
-        if _deprecated_verbose_warning_seen:
-            return
-        message = "warp.config.verbose is deprecated; use warp.config.log_level = warp.LOG_DEBUG instead."
-    elif name == "quiet":
-        if _deprecated_quiet_warning_seen:
-            return
-        message = (
-            "warp.config.quiet is deprecated; use warp.config.log_level = warp.LOG_WARNING to suppress the init banner."
-        )
-    else:
-        return
-
-    _log_warning(message, category=DeprecationWarning, stacklevel=3)
-    if name == "verbose":
-        _deprecated_verbose_warning_seen = True
-    else:
-        _deprecated_quiet_warning_seen = True
 
 
 class _ConfigModule(_types.ModuleType):
-    def __getattribute__(self, name):
-        if name in ("verbose", "quiet"):
-            _warn_deprecated_config_access(name)
-        return super().__getattribute__(name)
-
     def __setattr__(self, name, value):
-        if name in ("verbose", "quiet"):
-            _warn_deprecated_config_access(name)
         if name == "launch_array_access_mode" and not isinstance(value, LaunchArrayAccessMode):
             raise ValueError(
                 f"warp.config.launch_array_access_mode must be a warp.config.LaunchArrayAccessMode value, got {value!r}"
@@ -133,7 +83,7 @@ Note: Strict and checked modes impact performance.
 """
 
 
-version: str = "1.17.0.dev4"
+version: str = "1.18.0"
 """Warp version string"""
 
 verify_fp: bool = False
@@ -187,24 +137,8 @@ Note: Higher optimization levels increase compilation time but may improve run-t
 This setting can be overridden at the module level by setting the ``"optimization_level"`` module option.
 """
 
-verbose: bool = False
-"""Enable detailed logging during code generation and compilation.
-
-.. deprecated::
-    Use ``warp.config.log_level = warp.LOG_DEBUG`` instead. Reading or setting
-    this flag emits a ``DeprecationWarning`` for external callers.
-"""
-
 verbose_warnings: bool = False
 """Enable extended warning messages with source location information."""
-
-quiet: bool = False
-"""Disable Warp module initialization messages.
-
-.. deprecated::
-    Use ``warp.config.log_level = warp.LOG_WARNING`` instead. Reading or setting
-    this flag emits a ``DeprecationWarning`` for external callers.
-"""
 
 log_level: int = _LOG_INFO
 """Log level threshold for Warp's logging infrastructure.
@@ -315,6 +249,14 @@ enable_backward: bool = True
 This setting can be overridden at the module level by setting the ``"enable_backward"`` module option.
 """
 
+enable_cpu_blocks: bool = False
+"""Enable experimental CPU kernel launches with more than one logical thread per block.
+
+When ``False``, CPU launch block dimensions greater than one resolve to one,
+preserving the historical CPU execution model. When ``True``, explicit CPU
+block dimensions from 2 through 1024 run with cooperative fibers.
+"""
+
 default_grid_stride: bool = True
 """Default ``grid_stride`` for kernels that make no explicit choice.
 
@@ -387,8 +329,57 @@ enable_graph_capture_module_load_by_default: bool = True
 Only affects systems with CUDA driver versions below 12.3.
 """
 
-enable_mempools_at_init: bool = True
-"""Enable CUDA memory pools during device initialization when supported."""
+enable_mempools_at_init: bool = _os.environ.get("WARP_ENABLE_MEMPOOLS_AT_INIT", "1").lower() not in ("0", "false", "no")
+"""Enable CUDA memory pools during device initialization when supported.
+
+Set ``WARP_ENABLE_MEMPOOLS_AT_INIT`` to ``0``, ``false``, or ``no`` before
+importing Warp to disable automatic memory pool initialization (e.g. when
+sharing the process with a framework that owns its own GPU allocator).
+"""
+
+
+def _mempool_release_threshold_from_env() -> int | float | None:
+    value = _os.environ.get("WARP_MEMPOOL_RELEASE_THRESHOLD", "").strip()
+    if not value:
+        return None
+    try:
+        threshold = int(value)  # integers stay exact up to 2**64 - 1, which a double cannot carry
+    except ValueError:
+        try:
+            threshold = float(value)
+        except ValueError:
+            threshold = -1.0
+    if not (0 <= threshold <= 2**64 - 1) or (threshold > 1 and threshold != int(threshold)):
+        raise ValueError(
+            "WARP_MEMPOOL_RELEASE_THRESHOLD must be a fraction from 0 to 1 or a whole number of bytes up to "
+            f"2**64 - 1, got {value!r}"
+        )
+    return threshold if 0.0 < threshold <= 1.0 else int(threshold)
+
+
+mempool_release_threshold: int | float | None = _mempool_release_threshold_from_env()
+"""Memory pool release threshold applied to every CUDA device at initialization.
+
+The threshold is how much freed memory a device's memory pool holds before it
+returns memory to the driver at the next stream, event or device
+synchronization. ``None`` keeps the driver default of zero on CUDA, which
+returns every freed block at the next synchronization; a workload that allocates
+and frees temporaries on every step and synchronizes in between then pays that
+release on every synchronization. Values between 0 and 1 are a fraction of the device's
+memory, larger values are bytes, as for
+:func:`warp.set_mempool_release_threshold`, which changes one device at any
+time.
+
+Read once from the ``WARP_MEMPOOL_RELEASE_THRESHOLD`` environment variable at
+import, for example ``0.5``; a value that is neither a fraction from 0 to 1 nor a
+whole number of bytes up to 2**64 - 1 is rejected at import. Applies to every device that supports memory pools.
+
+On HIP, ``None`` applies the maximum to a pool that still has the driver default,
+so the pool keeps freed blocks across synchronizations instead of returning each
+one, because kernels that communicate through freshly mapped pool memory have
+hung on it (see ``KNOWN_ISSUES-AMD.md``). A threshold another library set before
+Warp initialized is kept, and ``0`` restores the driver default.
+"""
 
 track_memory: bool = False
 """Enable tracking of memory allocations at initialization.

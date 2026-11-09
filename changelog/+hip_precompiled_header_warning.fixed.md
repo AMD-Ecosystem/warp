@@ -1,0 +1,1 @@
+Stop printing "HIPRTC does not support precompiled headers" on every module compile on HIP. The request is now ignored without a message, as it is on CUDA toolkits without precompiled-header support, so callers that treat stderr output as a failure no longer trip on the default `warp.config.use_precompiled_headers`.

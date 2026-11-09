@@ -3,6 +3,8 @@
 
 import ctypes
 import os
+import subprocess
+import sys
 import unittest
 from functools import cache
 
@@ -280,7 +282,7 @@ def test_dlpack_dtypes_and_shapes(test, device):
 
 
 def test_dlpack_stream_arg(test, device):
-    # test valid range for the stream argument to array.__dlpack__()
+    """Test valid stream arguments for ``array.__dlpack__()``."""
 
     data = np.arange(10)
 
@@ -357,7 +359,7 @@ def test_dlpack_warp_to_torch(test, device):
 
 
 def test_dlpack_warp_to_torch_v2(test, device):
-    # same as original test, but uses newer __dlpack__() method
+    """Convert Warp arrays to Torch with the DLPack protocol."""
     torch = _import_torch_with_dlpack()
 
     a = wp.array(data=np.arange(N, dtype=np.float32), device=device)
@@ -411,7 +413,7 @@ def test_dlpack_torch_to_warp(test, device):
 
 
 def test_dlpack_torch_to_warp_v2(test, device):
-    # same as original test, but uses newer __dlpack__() method
+    """Convert Torch tensors to Warp with the DLPack protocol."""
     torch = _import_torch_with_dlpack()
 
     torch_device = torch.device(wp.device_to_torch(device))
@@ -517,7 +519,7 @@ def test_dlpack_warp_to_jax(test, device):
 
 @unittest.skipUnless(_jax_version() >= (0, 4, 15), "Jax version too old")
 def test_dlpack_warp_to_jax_v2(test, device):
-    # same as original test, but uses newer __dlpack__() method
+    """Convert Warp arrays to JAX with the DLPack protocol."""
     jax = _import_jax_with_dlpack()
     jnp = _import_jax_numpy()
 
@@ -589,7 +591,7 @@ def test_dlpack_warp_to_paddle(test, device):
 
 
 def test_dlpack_warp_to_paddle_v2(test, device):
-    # same as original test, but uses newer __dlpack__() method
+    """Convert Warp arrays to Paddle with the DLPack protocol."""
 
     paddle = _import_paddle_with_dlpack()
 
@@ -652,7 +654,7 @@ def test_dlpack_jax_to_warp(test, device):
 
 @unittest.skipUnless(_jax_version() >= (0, 4, 15), "Jax version too old")
 def test_dlpack_jax_to_warp_v2(test, device):
-    # same as original test, but uses newer __dlpack__() method
+    """Convert JAX arrays to Warp with the DLPack protocol."""
 
     jax = _import_jax()
 
@@ -710,7 +712,16 @@ def test_dlpack_bf16_round_trip(test, device):
 
 
 class TestDLPack(unittest.TestCase):
-    pass
+    def test_invalid_capsule_error(self):
+        class InvalidDLPackSource:
+            def __dlpack_device__(self):
+                return (1, 0)
+
+            def __dlpack__(self, stream=None):
+                return object()
+
+        with self.assertRaisesRegex(TypeError, "Expected a valid DLPack capsule, got object"):
+            wp.from_dlpack(InvalidDLPackSource())
 
 
 devices = get_test_devices()
@@ -789,8 +800,7 @@ else:
 
 # jax interop via dlpack
 try:
-    import jax
-    import jax.dlpack
+    _import_jax_with_dlpack()
 except Exception as error:
     print(f"Skipping JAX DLPack tests due to exception: {error}")
 else:
@@ -798,15 +808,26 @@ else:
 
     @cache
     def _jax_device_error(device_alias):
-        device = wp.get_device(device_alias)
         try:
-            with jax.default_device(wp.device_to_jax(device)):
-                array = jax.numpy.arange(10, dtype=jax.numpy.float32)
-                array += 1
-            jax.block_until_ready(array)
-        except Exception as error:
-            return f"{type(error).__name__}: {error}"
-        return None
+            result = subprocess.run(
+                [sys.executable, os.path.join(os.path.dirname(__file__), "aux_test_jax_device.py"), device_alias],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return "JAX device probe timed out"
+
+        if result.returncode == 0:
+            return None
+
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        message = f"JAX device probe exited with code {result.returncode}"
+        if output:
+            message = f"{message}:\n{output}"
+
+        return message
 
     def _check_jax_device(test, device):
         device = wp.get_device(device)

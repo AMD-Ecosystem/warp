@@ -545,11 +545,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             print(f"Building Warp version {build_version}")
 
-        # Generate warp/native/export.h
-        generate_exports_header_file(base_path)
+        # Generate warp/native/exports.h
+        exports_path = os.path.join(base_path, "warp", "native", "exports.h")
+        exports_changed = generate_exports_header_file(base_path)
+        if args.verbose:
+            if exports_changed:
+                print(f"Generated {exports_path}")
+            else:
+                print(f"{exports_path} is up to date")
 
         # Generate warp/native/version.h
-        generate_version_header(base_path, build_version)
+        version_header_path = os.path.join(base_path, "warp", "native", "version.h")
+        version_header_changed = generate_version_header(base_path, build_version)
+        if args.verbose:
+            if version_header_changed:
+                print(f"Generated {version_header_path} with version {build_version}")
+            else:
+                print(f"{version_header_path} is up to date (version {build_version})")
 
         # build warp.dll
         cpp_sources = [
@@ -559,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
             "native/scan.cpp",
             "native/apic.cpp",
             "native/alloc_tracker.cpp",
+            "native/cpu_block_runtime.cpp",
+            "native/cpu_fiber.cpp",
             "native/crt.cpp",
             "native/error.cpp",
             "native/cuda_util.cpp",

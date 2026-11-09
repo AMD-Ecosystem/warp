@@ -7,6 +7,8 @@ import numpy as np
 
 import warp as wp
 import warp.fem as fem
+import warp.tests.fem.aux_test_function_cache_1 as function_cache_module_1
+import warp.tests.fem.aux_test_function_cache_2 as function_cache_module_2
 from warp._src.fem.geometry.element import LinearEdge, Polynomial, Triangle
 from warp._src.fem.operator import element_partition_index, node_partition_index
 from warp.fem import Coords, Domain, Field, Sample, div, integrand
@@ -28,6 +30,11 @@ def _rbf_kernel_func(squared_dist: float, point_index: int, radius: float):
 @wp.func
 def _rbf_kernel_grad_func(squared_dist: float, point_index: int, radius: float):
     return -wp.exp(-squared_dist / (2.0 * radius * radius)) * (squared_dist / (2.0 * radius * radius))
+
+
+@wp.func
+def _invalid_rbf_kernel_func(squared_dist: int, point_index: int):
+    return float(squared_dist + point_index)
 
 
 @fem.integrand
@@ -185,6 +192,86 @@ def test_point_basis(test, device):
     )
 
 
+def test_point_basis_gradient_identity(test, device):
+    """Verify that point bases with different gradient functions do not share evaluators."""
+    with wp.ScopedDevice(device):
+        geo = fem.Grid2D(res=wp.vec2i(1))
+        quadrature = fem.RegularQuadrature(fem.Cells(geo), order=0)
+        kernel_values = {"radius": 1.0}
+
+        # Prime the cache with a gradient-capable basis before constructing its gradientless sibling.
+        fem.PointBasisSpace(
+            quadrature,
+            kernel_func=_rbf_kernel_func,
+            kernel_grad_func=_rbf_kernel_grad_func,
+            kernel_values=kernel_values,
+        )
+        basis_without_gradient = fem.PointBasisSpace(
+            quadrature,
+            kernel_func=_rbf_kernel_func,
+            kernel_values=kernel_values,
+        )
+
+        point_field = fem.make_collocated_function_space(basis_without_gradient).make_field()
+        point_field.dof_values.fill_(1.0)
+        dest = fem.make_polynomial_space(geo, dtype=wp.vec2).make_field()
+        fem.interpolate(grad_field, fields={"p": point_field}, dest=dest)
+
+        np.testing.assert_array_equal(dest.dof_values.numpy(), np.zeros((4, 2)))
+
+
+def test_point_basis_kernel_module_identity(test, device):
+    """Verify that same-named kernels from different modules do not share evaluators."""
+    with wp.ScopedDevice(device):
+        geo = fem.Grid2D(res=wp.vec2i(1))
+        quadrature = fem.RegularQuadrature(fem.Cells(geo), order=0)
+
+        basis_one = fem.PointBasisSpace(quadrature, kernel_func=function_cache_module_1.point_kernel_func)
+        basis_two = fem.PointBasisSpace(quadrature, kernel_func=function_cache_module_2.point_kernel_func)
+        dest = fem.make_polynomial_space(geo).make_field()
+
+        # Unit dofs make each result depend only on the selected constant-valued kernel.
+        point_field_one = fem.make_collocated_function_space(basis_one).make_field()
+        point_field_one.dof_values.fill_(1.0)
+        fem.interpolate(point_field_one, dest=dest)
+        np.testing.assert_array_equal(dest.dof_values.numpy(), np.ones(4))
+
+        point_field_two = fem.make_collocated_function_space(basis_two).make_field()
+        point_field_two.dof_values.fill_(1.0)
+        fem.interpolate(point_field_two, dest=dest)
+        np.testing.assert_array_equal(dest.dof_values.numpy(), np.full(4, 2.0))
+
+
+def test_point_basis_gradient_module_identity(test, device):
+    """Verify that same-named gradient kernels from different modules do not share evaluators."""
+    with wp.ScopedDevice(device):
+        geo = fem.Grid2D(res=wp.vec2i(1))
+        quadrature = fem.RegularQuadrature(fem.Cells(geo), order=0)
+
+        basis_one = fem.PointBasisSpace(
+            quadrature,
+            kernel_func=function_cache_module_1.point_kernel_func,
+            kernel_grad_func=function_cache_module_1.point_kernel_grad_func,
+        )
+        basis_two = fem.PointBasisSpace(
+            quadrature,
+            kernel_func=function_cache_module_1.point_kernel_func,
+            kernel_grad_func=function_cache_module_2.point_kernel_grad_func,
+        )
+        dest = fem.make_polynomial_space(geo, dtype=wp.vec2).make_field()
+
+        # Unit dofs make the zero/nonzero result depend only on the selected gradient function.
+        point_field_one = fem.make_collocated_function_space(basis_one).make_field()
+        point_field_one.dof_values.fill_(1.0)
+        fem.interpolate(grad_field, fields={"p": point_field_one}, dest=dest)
+        np.testing.assert_array_equal(dest.dof_values.numpy(), np.zeros((4, 2)))
+
+        point_field_two = fem.make_collocated_function_space(basis_two).make_field()
+        point_field_two.dof_values.fill_(1.0)
+        fem.interpolate(grad_field, fields={"p": point_field_two}, dest=dest)
+        test.assertGreater(np.linalg.norm(dest.dof_values.numpy()), 0.0)
+
+
 def test_particle_quadratures(test, device):
     geo = fem.Grid2D(res=wp.vec2i(2))
 
@@ -255,7 +342,7 @@ def test_particle_quadratures(test, device):
 
 
 def test_gimp_quadrature(test, device):
-    # Test GIMP mode for PicQuadrature: particles spanning multiple cells
+    """Test GIMP quadrature for particles spanning multiple cells."""
 
     geo = fem.Grid2D(res=wp.vec2i(2))
     domain = fem.Cells(geo)
@@ -376,14 +463,42 @@ def test_nodal_quadrature(test, device):
 
 
 class TestFemQuadrature(unittest.TestCase):
-    pass
+    def test_point_basis_rejects_invalid_kernel_argument_types(self):
+        """Verify that invalid radial-kernel annotations report a type error."""
+        with wp.ScopedDevice("cpu"):
+            geo = fem.Grid2D(res=wp.vec2i(1))
+            quadrature = fem.RegularQuadrature(fem.Cells(geo), order=0)
 
+            with self.assertRaisesRegex(
+                TypeError,
+                r"Radial kernel '_invalid_rbf_kernel_func' argument types must be "
+                r"\(float32, int32\), got \(int32, int32\)",
+            ):
+                fem.PointBasisSpace(quadrature, kernel_func=_invalid_rbf_kernel_func)
+
+
+devices = get_test_devices()
 
 add_function_test(TestFemQuadrature, "test_regular_quadrature", test_regular_quadrature)
 add_function_test(TestFemQuadrature, "test_nodal_quadrature", test_nodal_quadrature)
 add_function_test(TestFemQuadrature, "test_particle_quadratures", test_particle_quadratures)
 add_function_test(TestFemQuadrature, "test_gimp_quadrature", test_gimp_quadrature)
 add_function_test(TestFemQuadrature, "test_point_basis", test_point_basis)
+add_function_test(
+    TestFemQuadrature, "test_point_basis_gradient_identity", test_point_basis_gradient_identity, devices=devices
+)
+add_function_test(
+    TestFemQuadrature,
+    "test_point_basis_kernel_module_identity",
+    test_point_basis_kernel_module_identity,
+    devices=devices,
+)
+add_function_test(
+    TestFemQuadrature,
+    "test_point_basis_gradient_module_identity",
+    test_point_basis_gradient_module_identity,
+    devices=devices,
+)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

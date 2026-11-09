@@ -51,6 +51,7 @@ benchmark = [
 examples = [
     "blosc>=1.11.1 ; sys_platform != 'win32' or (platform_machine != 'ARM64' and platform_machine != 'arm64' and platform_machine != 'aarch64')",
     "matplotlib>=3.7.5",
+    "nlopt ; python_version < '3.15' and (sys_platform != 'win32' or (platform_machine != 'ARM64' and platform_machine != 'arm64' and platform_machine != 'aarch64'))",
     "pillow>=10.4.0",
     "psutil>=7.1.0",
     "pyglet>=2.1.9",
@@ -108,6 +109,7 @@ select = [
     "F",   # pyflakes
     "W",   # pycodestyle warnings
     "B",   # flake8-bugbear
+    "S101", # flake8-bandit: assert
     "C4",  # flake8-comprehensions
     "NPY", # NumPy-specific rules
     "PLC", # pylint convention
@@ -115,6 +117,11 @@ select = [
     "PLW", # pylint warning
     "UP",  # pyupgrade
     "RUF",
+    "D200", # One-line docstrings should fit on one line
+    "D205", # Separate summaries from descriptions with a blank line
+    "D400", # End summary lines with a period
+    "D401", # Write summary lines in the imperative mood
+    "D403", # Capitalize the first word of each docstring
 ]
 ignore = [
     "E501",    # Many lines are over 120 characters already
@@ -130,14 +137,17 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# Enforce the selected pydocstyle rules only in the Warp test suite for now.
+"!warp/tests/**.py" = ["D200", "D205", "D400", "D401", "D403"]
 "__init__.py" = ["F401", "PLC0414"]
-"__init__.pyi" = ["E402", "I001"]
+"__init__.pyi" = ["B008", "E402", "I001"]
 # `warp/__init__.py` registers all Warp module source declarations before
 # importing implementation symbols, so the statement-before-import ordering is
 # intentional.
 "warp/__init__.py" = ["E402"]
 "warp/*.py" = ["PLC0414"]
 "warp/tests/*.py" = ["F841"]
+"warp/tests/**/*.py" = ["S101"]
 # Skill evaluation fixtures intentionally contain the defects agents must
 # find (e.g. a computed-but-never-consumed adjoint), so unused-variable
 # lints are expected there.
@@ -148,7 +158,13 @@ ignore = [
 convention = "google"
 
 [tool.ruff.format]
-exclude = ["warp/__init__.pyi"]
+# These skill trees contain signed artifacts and must remain byte-for-byte
+# aligned with the skill-signing pipeline until formatting is coordinated there.
+exclude = [
+    "skills/warp-compile-time-optimizer/**",
+    "skills/warp-debug-gradients/**",
+    "warp/__init__.pyi",
+]
 quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false

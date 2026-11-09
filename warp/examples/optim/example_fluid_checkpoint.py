@@ -1,20 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""A differentiable 2-D fluid solver with manual gradient checkpointing.
 
-###########################################################################
-# Example Fluid Checkpoint
-#
-# Shows how to implement a differentiable 2D stable-fluids solver and
-# optimize the initial velocity field to form the NVIDIA logo at the end
-# of the simulation. Gradient checkpointing to reduce memory usage
-# is manually implemented.
-#
-# References:
-# https://github.com/HIPS/autograd/blob/master/examples/fluidsim/fluidsim.py
-#
-###########################################################################
+The example optimizes the solver's initial velocity field so the final density
+forms the NVIDIA logo. Warp does not currently provide automatic gradient
+checkpointing, so this example shows how to implement it manually to reduce
+memory use.
 
-import math
+``example_fluid_checkpoint_custom_backward.py`` uses the same simulation and
+checkpointing scheme, but adds a custom backward pass for the pressure solve.
+By avoiding storage of the intermediate Jacobi states, it can use
+substantially less memory than checkpointing alone.
+
+Projection uses a backward finite-difference stencil for divergence and a
+forward finite-difference stencil for the pressure gradient, so the projected
+velocity's divergence equals the pressure-solve residual. Both spatial
+discretizations are first order on the collocated grid, and the solver runs a
+fixed number of damped Jacobi iterations without a convergence check.
+
+Usage:
+    python example_fluid_checkpoint.py --headless
+
+Run ``python example_fluid_checkpoint.py --help`` for available options.
+
+References:
+    https://github.com/HIPS/autograd/blob/master/examples/fluidsim/fluidsim.py
+"""
+
 import os
 import sys
 
@@ -40,7 +52,35 @@ except ImportError:
 
 N_GRID = wp.constant(512)
 DH = 1.0 / N_GRID  # Grid spacing
+# Damping makes the periodic checkerboard mode decay.
+JACOBI_RELAXATION = wp.constant(2.0 / 3.0)
 FLUID_COLUMN_WIDTH = N_GRID / 10.0
+
+
+def estimate_segment_size(sim_steps: int, pressure_iterations: int) -> int:
+    """Estimate a checkpoint segment size from the number of stored grids.
+
+    A segment of ``S`` steps stores ``6 * S`` grids for velocity and density
+    values and gradients, ``6 * S`` for advection and projection
+    intermediates, and ``2 * pressure_iterations * S`` for the unrolled
+    pressure values and gradients. Saving four start-state grids per segment
+    adds ``4 * ceil(sim_steps / S)``. The estimate is
+
+        ``(12 + 2 * pressure_iterations) * S + 4 * ceil(sim_steps / S)``.
+
+    The function checks every valid segment size and returns the one with the
+    smallest estimate. The count covers simulation arrays only; it excludes
+    runtime and allocator overhead. Other checkpoint schedules may use less
+    memory.
+    """
+
+    def estimate_storage(segment_size: int) -> int:
+        num_segments = (sim_steps + segment_size - 1) // segment_size
+        return (12 + 2 * pressure_iterations) * segment_size + 4 * num_segments
+
+    # When storage ties, prefer fewer segments to reduce checkpoint transfers
+    # and the number of Tape objects.
+    return min(range(1, sim_steps + 1), key=lambda size: (estimate_storage(size), -size))
 
 
 @wp.func
@@ -104,29 +144,20 @@ def advect(
 
 @wp.kernel
 def divergence(wx: wp.array2d[float], wy: wp.array2d[float], div: wp.array2d[float]):
-    """Compute div(w)."""
+    """Compute backward-difference divergence, paired with the forward pressure gradient."""
 
     i, j = wp.tid()
 
-    div[i, j] = (
-        0.5
-        * (
-            wx[cyclic_index(i + 1), j]
-            - wx[cyclic_index(i - 1), j]
-            + wy[i, cyclic_index(j + 1)]
-            - wy[i, cyclic_index(j - 1)]
-        )
-        / DH
-    )
+    div[i, j] = (wx[i, j] - wx[cyclic_index(i - 1), j] + wy[i, j] - wy[i, cyclic_index(j - 1)]) / DH
 
 
 @wp.kernel
 def jacobi_iter(div: wp.array2d[float], p0: wp.array2d[float], p1: wp.array2d[float]):
-    """Calculate a single Jacobi iteration for solving the pressure Poisson equation."""
+    """Calculate a single damped Jacobi iteration for the pressure Poisson equation."""
 
     i, j = wp.tid()
 
-    p1[i, j] = 0.25 * (
+    p1[i, j] = (1.0 - JACOBI_RELAXATION) * p0[i, j] + 0.25 * JACOBI_RELAXATION * (
         -DH * DH * div[i, j]
         + p0[cyclic_index(i - 1), j]
         + p0[cyclic_index(i + 1), j]
@@ -143,12 +174,12 @@ def update_velocities(
     vx: wp.array2d[float],
     vy: wp.array2d[float],
 ):
-    """Given p and (wx, wy), compute an 'incompressible' velocity field (vx, vy)."""
+    """Subtract the forward pressure gradient, paired with backward divergence."""
 
     i, j = wp.tid()
 
-    vx[i, j] = wx[i, j] - 0.5 * (p[cyclic_index(i + 1), j] - p[cyclic_index(i - 1), j]) / DH
-    vy[i, j] = wy[i, j] - 0.5 * (p[i, cyclic_index(j + 1)] - p[i, cyclic_index(j - 1)]) / DH
+    vx[i, j] = wx[i, j] - (p[cyclic_index(i + 1), j] - p[i, j]) / DH
+    vy[i, j] = wy[i, j] - (p[i, cyclic_index(j + 1)] - p[i, j]) / DH
 
 
 @wp.kernel
@@ -163,7 +194,14 @@ def compute_loss(actual_state: wp.array2d[float], target_state: wp.array2d[float
 
 
 class Example:
-    def __init__(self, sim_steps=1000):
+    def __init__(self, sim_steps=1000, pressure_iterations=50, segment_size=None):
+        if sim_steps < 1:
+            raise ValueError("The number of simulation steps must be positive.")
+        if pressure_iterations < 1:
+            raise ValueError("The number of Jacobi iterations must be positive.")
+        if segment_size is not None and not 1 <= segment_size <= sim_steps:
+            raise ValueError("The segment size must be between one and the number of simulation steps.")
+
         self.pressure_arrays = []
         self.wx_arrays = []
         self.wy_arrays = []
@@ -172,14 +210,16 @@ class Example:
         self.density_arrays = []
         self.div_arrays = []
 
-        # Memory usage is minimized when the segment size is approx. sqrt(sim_steps)
-        self.segment_size = math.ceil(math.sqrt(sim_steps))
+        # To keep the example compact, the pressure solve always runs the configured
+        # number of iterations instead of testing for convergence.
+        self.pressure_iterations = pressure_iterations
 
-        # TODO: For now, let's just round up sim_steps so each segment is the same size
-        self.num_segments = math.ceil(sim_steps / self.segment_size)
-        self.sim_steps = self.segment_size * self.num_segments
-
-        self.pressure_iterations = 50
+        if segment_size is None:
+            segment_size = estimate_segment_size(sim_steps, pressure_iterations)
+        self.segment_size = segment_size
+        self.segment_lengths = [min(segment_size, sim_steps - start) for start in range(0, sim_steps, segment_size)]
+        self.num_segments = len(self.segment_lengths)
+        self.sim_steps = sim_steps
         self.dt = 1.0
 
         # Store enough arrays to step through a segment without overwriting arrays
@@ -282,7 +322,7 @@ class Example:
             outputs=[self.wy_arrays[step_index - 1]],
         )
 
-        # Pressure projection using a few Jacobi iterations
+        # Compute the pressure projection with the configured number of Jacobi iterations.
         wp.launch(
             divergence,
             (N_GRID, N_GRID),
@@ -323,48 +363,50 @@ class Example:
         )
 
     def forward(self) -> None:
-        """Advance the simulation forward in segments, storing the fluid state at the start of each segment.
+        """Advance the simulation in segments and compute the loss.
 
-        The loss function is also evaluated at the end of the function.
+        The method saves the fluid state at the start of each segment and evaluates
+        the loss after the final segment.
         """
         self.loss.zero_()
 
-        for segment_index in range(self.num_segments):
+        for segment_index, segment_steps in enumerate(self.segment_lengths):
             # Save start-of-segment values
             wp.copy(self.segment_start_vx_arrays[segment_index], self.vx_arrays[0])
             wp.copy(self.segment_start_vy_arrays[segment_index], self.vy_arrays[0])
             wp.copy(self.segment_start_density_arrays[segment_index], self.density_arrays[0])
             wp.copy(self.segment_start_pressure_arrays[segment_index], self.pressure_arrays[0])
 
-            for t in range(1, self.segment_size + 1):
-                # sim_t = (segment_index - 1) * self.segment_size + t
+            for t in range(1, segment_steps + 1):
                 self.step(t)
 
             # Set the initial conditions for the next segment
             if segment_index < self.num_segments - 1:
-                wp.copy(self.vx_arrays[0], self.vx_arrays[-1])
-                wp.copy(self.vy_arrays[0], self.vy_arrays[-1])
-                wp.copy(self.density_arrays[0], self.density_arrays[-1])
-                wp.copy(self.pressure_arrays[0], self.pressure_arrays[-1])
+                wp.copy(self.vx_arrays[0], self.vx_arrays[segment_steps])
+                wp.copy(self.vy_arrays[0], self.vy_arrays[segment_steps])
+                wp.copy(self.density_arrays[0], self.density_arrays[segment_steps])
+                wp.copy(self.pressure_arrays[0], self.pressure_arrays[self.pressure_iterations * segment_steps])
 
+        final_step_index = self.segment_lengths[-1]
         wp.launch(
             compute_loss,
             (N_GRID, N_GRID),
-            inputs=[self.density_arrays[self.segment_size], self.target_wp],
+            inputs=[self.density_arrays[final_step_index], self.target_wp],
             outputs=[self.loss],
         )
 
     def backward(self) -> None:
-        """Compute the adjoints using a checkpointing approach.
+        """Compute adjoints by replaying checkpointed segments in reverse order.
 
-        Starting from the final segment, the forward pass for the segment is
-        repeated, this time recording the kernel launches onto a tape. Any
-        previously computed adjoints are restored prior to evaluating the
-        backward pass for the segment. This process is repeated until the
-        adjoints of the initial state have been calculated.
+        For each segment, restore its saved starting state and record the forward pass
+        on a Tape. Run the Tape backward, then carry the start-state adjoints into the
+        preceding segment. Continue through the first segment to compute the initial
+        state's adjoints.
         """
 
         for segment_index in range(self.num_segments - 1, -1, -1):
+            segment_steps = self.segment_lengths[segment_index]
+
             # Restore state at the start of the segment
             wp.copy(self.vx_arrays[0], self.segment_start_vx_arrays[segment_index])
             wp.copy(self.vy_arrays[0], self.segment_start_vy_arrays[segment_index])
@@ -373,7 +415,7 @@ class Example:
 
             # Record operations on tape
             with wp.Tape() as self.tape:
-                for t in range(1, self.segment_size + 1):
+                for t in range(1, segment_steps + 1):
                     self.step(t)
 
             if segment_index == self.num_segments - 1:
@@ -382,18 +424,19 @@ class Example:
                 wp.launch(
                     compute_loss,
                     (N_GRID, N_GRID),
-                    inputs=[self.density_arrays[self.segment_size], self.target_wp],
+                    inputs=[self.density_arrays[segment_steps], self.target_wp],
                     outputs=[self.loss],
-                    adj_inputs=[self.density_arrays[self.segment_size].grad, None],
+                    adj_inputs=[self.density_arrays[segment_steps].grad, None],
                     adj_outputs=[self.loss.grad],
                     adjoint=True,
                 )
             else:
                 # Fill in previously computed gradients from the last segment
-                wp.copy(self.vx_arrays[-1].grad, self.vx_array_grad_saved)
-                wp.copy(self.vy_arrays[-1].grad, self.vy_array_grad_saved)
-                wp.copy(self.density_arrays[-1].grad, self.density_array_grad_saved)
-                wp.copy(self.pressure_arrays[-1].grad, self.pressure_array_grad_saved)
+                wp.copy(self.vx_arrays[segment_steps].grad, self.vx_array_grad_saved)
+                wp.copy(self.vy_arrays[segment_steps].grad, self.vy_array_grad_saved)
+                wp.copy(self.density_arrays[segment_steps].grad, self.density_array_grad_saved)
+                pressure_index = self.pressure_iterations * segment_steps
+                wp.copy(self.pressure_arrays[pressure_index].grad, self.pressure_array_grad_saved)
 
             self.tape.backward()
 
@@ -412,12 +455,27 @@ class Example:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
         "--num-frames", type=int, default=1000, help="Number of frames to simulate before computing loss."
     )
     parser.add_argument("--train-iters", type=int, default=50, help="Total number of training iterations.")
+    parser.add_argument(
+        "--pressure-iterations",
+        type=int,
+        default=50,
+        help="Fixed number of damped Jacobi iterations per pressure solve.",
+    )
+    parser.add_argument(
+        "--segment-size",
+        type=int,
+        default=None,
+        help="Maximum steps per checkpoint segment. If omitted, estimate the size from the number of stored grids.",
+    )
     parser.add_argument(
         "--headless",
         action="store_true",
@@ -425,6 +483,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_known_args()[0]
+    if args.num_frames < 1 or args.pressure_iterations < 1:
+        parser.error("--num-frames and --pressure-iterations must be positive")
+    if args.segment_size is not None and not 1 <= args.segment_size <= args.num_frames:
+        parser.error("--segment-size must be between one and --num-frames")
 
     # Check visualization availability early (before training) so user can cancel if needed
     can_visualize = False
@@ -446,12 +508,17 @@ if __name__ == "__main__":
             can_visualize = True
 
     with wp.ScopedDevice(args.device):
-        example = Example(sim_steps=args.num_frames)
+        example = Example(
+            sim_steps=args.num_frames,
+            pressure_iterations=args.pressure_iterations,
+            segment_size=args.segment_size,
+        )
 
-        wp.synchronize_device()
-
-        if (device := wp.get_device()).is_cuda:
-            print(f"Current memory usage: {wp.get_mempool_used_mem_current(device) / (1024 * 1024 * 1024):.4f} GiB")
+        print(
+            f"Checkpoint schedule: {example.sim_steps} steps in {example.num_segments} segments "
+            f"of at most {example.segment_size} steps."
+        )
+        device = wp.get_device()
 
         # Main training loop
         for train_iter in range(args.train_iters):
@@ -473,7 +540,20 @@ if __name__ == "__main__":
             else:
                 example.tape.zero()
 
+            # CUDA graph executables are created lazily on their first launch,
+            # so report memory after the first complete optimization iteration.
+            report_memory = train_iter == 0 and device.is_cuda and device.is_mempool_enabled
+            if report_memory:
+                wp.synchronize_device()
+
             print(f"Iteration {train_iter:05d} loss: {example.loss.numpy()[0]:.6f}")
+
+            if report_memory:
+                print(
+                    "CUDA mempool after first optimization iteration:\n"
+                    f"  Current usage: {wp.get_mempool_used_mem_current(device) / 2**20:.1f} MiB\n"
+                    f"  Peak usage: {wp.get_mempool_used_mem_high(device) / 2**20:.1f} MiB"
+                )
 
         # Visualization
         if can_visualize:

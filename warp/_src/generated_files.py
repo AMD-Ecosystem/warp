@@ -15,7 +15,9 @@ Re-exports ``export_builtins`` and ``export_stubs`` from
 from __future__ import annotations
 
 import datetime
+import io
 import os
+from collections.abc import Callable
 
 from warp._src.context import export_builtins, export_stubs
 
@@ -23,6 +25,7 @@ __all__ = [
     "export_builtins",
     "export_stubs",
     "generate_exports_header_file",
+    "generate_stubs_file",
     "generate_version_header",
 ]
 
@@ -35,7 +38,29 @@ def _c_copyright_header(year: int | str) -> str:
 """
 
 
-def generate_version_header(base_path: str, version: str) -> None:
+def _write_generated_file(path: str, render: Callable[[io.TextIOBase], None]) -> bool:
+    """Render a generated text file and write it only when its content changed.
+
+    Returns:
+        True if the file was updated, or False if it was already current.
+    """
+    output = io.StringIO()
+    render(output)
+    new_content = output.getvalue()
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            if f.read() == new_content:
+                return False
+    except FileNotFoundError:
+        pass
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    return True
+
+
+def generate_version_header(base_path: str, version: str) -> bool:
     """Generate version.h with WP_VERSION_STRING macro.
 
     Only writes the file when the content has actually changed, so that file
@@ -45,35 +70,42 @@ def generate_version_header(base_path: str, version: str) -> None:
     NOTE: The pre-commit hook ``check_version_consistency.py`` has an inlined
     copy of this function (``_regenerate_version_header``) so it can run
     without importing ``warp``.  Keep the two in sync.
+
+    Returns:
+        True if the file was updated, or False if it was already current.
     """
     version_header_path = os.path.join(base_path, "warp", "native", "version.h")
 
-    new_content = _c_copyright_header(datetime.date.today().year)
-    new_content += "#ifndef WP_VERSION_H\n"
-    new_content += "#define WP_VERSION_H\n\n"
-    new_content += f'#define WP_VERSION_STRING "{version}"\n\n'
-    new_content += "#endif  // WP_VERSION_H\n"
+    def render(file: io.TextIOBase) -> None:
+        file.write(_c_copyright_header(datetime.date.today().year))
+        file.write("#ifndef WP_VERSION_H\n")
+        file.write("#define WP_VERSION_H\n\n")
+        file.write(f'#define WP_VERSION_STRING "{version}"\n\n')
+        file.write("#endif  // WP_VERSION_H\n")
 
-    try:
-        with open(version_header_path) as f:
-            if f.read() == new_content:
-                print(f"{version_header_path} is up to date (version {version})")
-                return
-    except FileNotFoundError:
-        pass
-
-    with open(version_header_path, "w") as f:
-        f.write(new_content)
-
-    print(f"Generated {version_header_path} with version {version}")
+    return _write_generated_file(version_header_path, render)
 
 
-def generate_exports_header_file(base_path: str) -> None:
-    """Generate warp/native/exports.h with host-side wrappers for built-in functions."""
+def generate_exports_header_file(base_path: str) -> bool:
+    """Generate warp/native/exports.h with host-side wrappers for built-in functions.
+
+    Returns:
+        True if the file was updated, or False if it was already current.
+    """
     export_path = os.path.join(base_path, "warp", "native", "exports.h")
 
-    with open(export_path, "w") as f:
-        f.write(_c_copyright_header(2022))
-        export_builtins(f)
+    def render(file: io.TextIOBase) -> None:
+        file.write(_c_copyright_header(2022))
+        export_builtins(file)
 
-    print(f"Finished writing {export_path}")
+    return _write_generated_file(export_path, render)
+
+
+def generate_stubs_file(base_path: str) -> bool:
+    """Generate ``warp/__init__.pyi`` with type stubs for the public API.
+
+    Returns:
+        True if the file was updated, or False if it was already current.
+    """
+    stub_path = os.path.join(base_path, "warp", "__init__.pyi")
+    return _write_generated_file(stub_path, export_stubs)

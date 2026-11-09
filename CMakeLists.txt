@@ -21,6 +21,13 @@ option(WARP_ENABLE_CUDA "Build Warp with CUDA support" ${_warp_enable_cuda_defau
 if(APPLE AND WARP_ENABLE_CUDA)
     message(FATAL_ERROR "CUDA builds are not supported on macOS")
 endif()
+if(WIN32
+   AND WARP_ENABLE_CUDA
+   AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$"
+   AND CMAKE_VERSION VERSION_LESS "4.4"
+)
+    message(FATAL_ERROR "Windows ARM64 CUDA builds require CMake 4.4 or newer")
+endif()
 
 option(WARP_BUILD_CLANG "Build warp-clang" ON)
 option(WARP_VERIFY_FP "Enable floating point verification" OFF)
@@ -205,6 +212,8 @@ set(WARP_CPP_SOURCES
     warp/native/scan.cpp
     warp/native/apic.cpp
     warp/native/alloc_tracker.cpp
+    warp/native/cpu_block_runtime.cpp
+    warp/native/cpu_fiber.cpp
     warp/native/crt.cpp
     warp/native/error.cpp
     warp/native/cuda_util.cpp
@@ -274,6 +283,7 @@ endif()
 # builds that need the full CUDA compatibility policy.
 set(WARP_ENABLE_CUDA_COMPATIBILITY_VALUE 0)
 
+target_compile_definitions(warp PRIVATE WP_BUILD_DLL)
 target_compile_definitions(
     warp
     PRIVATE
@@ -292,6 +302,7 @@ if(WARP_ENABLE_CUDA)
     target_compile_options(
         warp
         PRIVATE
+            "$<$<AND:$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>,$<PLATFORM_ID:Windows>>:-Xcompiler=/Zc:preprocessor>"
             "$<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>"
             "$<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>"
             # Intentional: -t0 lets nvcc use all CPUs; use -t1 to constrain threading.
@@ -332,6 +343,9 @@ if(WARP_ENABLE_CUDA)
         warp_require_cuda_target(CUDA::cudart_static)
         warp_require_cuda_target(CUDA::nvrtc_static)
         target_link_libraries(warp PRIVATE CUDA::cudart_static CUDA::nvrtc_static)
+        if(WIN32)
+            target_link_libraries(warp PRIVATE ntdll)
+        endif()
         warp_link_nvptxcompiler(warp)
         if(TARGET CUDA::nvrtc_builtins_static)
             target_link_libraries(warp PRIVATE CUDA::nvrtc_builtins_static)
@@ -392,6 +406,7 @@ if(WARP_BUILD_CLANG)
         warp-clang
         PRIVATE "$<$<AND:$<PLATFORM_ID:Linux>,$<COMPILE_LANG_AND_ID:CXX,GNU>>:-fabi-version=13>"
     )
+    target_compile_definitions(warp-clang PRIVATE WP_BUILD_DLL)
     target_compile_definitions(
         warp-clang
         PRIVATE

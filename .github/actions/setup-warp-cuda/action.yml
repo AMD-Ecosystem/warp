@@ -13,13 +13,14 @@ inputs:
   version:
     description: >-
       CUDA Toolkit release defined in
-      tools/ci/cuda_toolkit_requirements.json; currently 12.9.2 or 13.0.3.
+      tools/ci/cuda_toolkit_requirements.json; currently 12.9.2 or 13.4.2.
     required: true
   platform:
     description: >-
       NVIDIA redistributable platform key for the selected release.
       12.9.2 supports windows-x86_64, linux-x86_64, and linux-aarch64;
-      13.0.3 supports windows-x86_64, linux-x86_64, and linux-sbsa.
+      13.4.2 supports windows-x86_64, windows-arm64, linux-x86_64, and
+      linux-sbsa.
     required: true
   cache-read:
     description: >-
@@ -29,6 +30,11 @@ inputs:
     description: >-
       Set to "true" to save an assembled Toolkit to GitHub cache.
     default: "false"
+
+outputs:
+  cuda-path:
+    description: Path to the assembled CUDA Toolkit
+    value: ${{ steps.resolve.outputs.cuda-path }}
 
 runs:
   using: composite
@@ -77,11 +83,13 @@ runs:
     - name: Activate assembled CUDA Toolkit
       shell: bash
       env:
+        WARP_CUDA_VERSION: ${{ inputs.version }}
         WARP_CUDA_PLATFORM: ${{ inputs.platform }}
         WARP_CUDA_INSTALL_PATH: ${{ steps.resolve.outputs.cuda-path }}
       run: |
         uv run --no-project python \
           "$GITHUB_WORKSPACE/tools/ci/cuda_toolkit.py" activate \
+          --version "$WARP_CUDA_VERSION" \
           --platform "$WARP_CUDA_PLATFORM" \
           --cuda-path "$WARP_CUDA_INSTALL_PATH" \
           --github-env "$GITHUB_ENV" \

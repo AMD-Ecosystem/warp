@@ -28,7 +28,7 @@ def test_pow(e: float, expected: float):
 
 
 def test_fast_math_disabled(test, device):
-    # on all systems pow() should handle negative base correctly with fast math off
+    """Handle negative power bases with fast math disabled."""
     wp.set_module_options({"fast_math": False})
     wp.launch(test_pow, dim=1, inputs=[2.0, 4.0], device=device)
 
@@ -36,10 +36,13 @@ def test_fast_math_disabled(test, device):
 def test_fast_math_cuda(test, device):
     # on CUDA with --fast-math enabled taking the pow()
     # of a negative number will result in a NaN
+    # HIP fast math keeps IEEE infinities and NaNs and does not replace pow with exp2(b * log2(a)),
+    # so a negative base with an integral exponent gives the exact power
+    expected = 4.0 if wp.get_device(device).is_hip else wp.NAN
 
     wp.set_module_options({"fast_math": True})
     try:
-        wp.launch(test_pow, dim=1, inputs=[2.0, wp.NAN], device=device)
+        wp.launch(test_pow, dim=1, inputs=[2.0, expected], device=device)
     finally:
         wp.set_module_options({"fast_math": False})
 
@@ -206,7 +209,7 @@ def test_approx_div_compound(test, device):
 
 
 def test_approx_div_backward(test, device):
-    """Verify that backward pass through approx division works correctly."""
+    """Verify that the backward pass through approximate division works."""
     n = 8
     rng = np.random.default_rng(42)
     # div_approx uses rcp.approx (float32 precision) even for float64, so use looser tolerance for f64
@@ -241,7 +244,7 @@ def test_approx_div_backward(test, device):
 
 
 def test_approx_inverse_backward(test, device):
-    """Verify that backward pass through inverse_approx works correctly."""
+    """Verify that the backward pass through ``inverse_approx`` works."""
     n = 4
     rng = np.random.default_rng(42)
     backward_kernels = {
@@ -272,9 +275,84 @@ def test_approx_inverse_backward(test, device):
         np.testing.assert_allclose(grad_m, expected_grad, rtol=1e-4)
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def tiny_vector_kernel(a: wp.array[float], scaled: wp.array[float], unit: wp.array[float]):
+    i = wp.tid()
+    scaled[i] = a[i] * 1.5
+    n = wp.normalize(wp.vec3(a[i], 0.0, 0.0))
+    unit[i] = n[0]
+
+
+wp.set_module_options({"fast_math": True}, module=tiny_vector_kernel.module)
+
+
+def test_fast_math_denormals(test, device):
+    # --use_fast_math flushes fp32 denormals to zero, and normalizing a vector whose squared length
+    # is denormal must give zero or a unit vector, never Inf/NaN.
+    a = wp.array([1.0e-40, 1.0e-21, 1.0e-20, 1.0e-19, 1.0], dtype=float, device=device)
+    scaled = wp.zeros(5, dtype=float, device=device)
+    unit = wp.zeros(5, dtype=float, device=device)
+    wp.launch(tiny_vector_kernel, dim=5, inputs=[a, scaled, unit], device=device)
+
+    test.assertEqual(scaled.numpy()[0], 0.0)
+    u = unit.numpy()
+    test.assertTrue(np.all(np.isfinite(u)), u)
+    for x in u:
+        test.assertTrue(x == 0.0 or abs(x - 1.0) < 1.0e-3, u)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def cancel_kernel(a: wp.array[float], b: wp.array[float], out: wp.array[float]):
+    i = wp.tid()
+    out[i] = (a[i] + b[i]) - b[i]
+
+
+wp.set_module_options({"fast_math": True}, module=cancel_kernel.module)
+
+
+def test_fast_math_no_reassociation(test, device):
+    # --use_fast_math does not reassociate, so (a + b) - b rounds a + b first rather than folding to a.
+    a = wp.array([1.0, 1.0], dtype=float, device=device)
+    b = wp.array([1.0e8, 0.0], dtype=float, device=device)
+    out = wp.zeros(2, dtype=float, device=device)
+    wp.launch(cancel_kernel, dim=2, inputs=[a, b, out], device=device)
+
+    np.testing.assert_array_equal(out.numpy(), np.array([0.0, 1.0], dtype=np.float32))
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def nonfinite_kernel(x: wp.array[float], out: wp.array[wp.int32]):
+    inf = x[0]
+    finite = x[1]
+    nan = x[2]
+    out[0] = wp.int32(wp.isinf(inf))
+    out[1] = wp.int32(wp.isfinite(inf))
+    out[2] = wp.int32(wp.isnan(nan))
+    out[3] = wp.int32(wp.isinf(finite))
+    out[4] = wp.int32(wp.isnan(finite))
+    out[5] = wp.int32(inf == wp.inf)
+    out[6] = wp.int32(wp.isinf(-inf))
+    out[7] = wp.int32(nan != nan)
+
+
+wp.set_module_options({"fast_math": True}, module=nonfinite_kernel.module)
+
+
+def test_fast_math_nonfinite(test, device):
+    # --use_fast_math keeps IEEE infinities and NaNs (it does not assume finite math), so a fast-math
+    # module must still classify them: a kernel that treats an infinite stiffness as a hard constraint
+    # relies on wp.isinf.
+    x = wp.array([wp.inf, 1.0e4, wp.nan], dtype=float, device=device)
+    out = wp.zeros(8, dtype=wp.int32, device=device)
+    wp.launch(nonfinite_kernel, dim=1, inputs=[x, out], device=device)
+
+    np.testing.assert_array_equal(out.numpy(), np.array([1, 0, 1, 0, 0, 1, 1, 1], dtype=np.int32))
+
+
 class TestFastMath(unittest.TestCase):
     def test_fast_math_cpu(self):
-        # on all systems pow() should handle negative base correctly
+        """Handle negative power bases with fast math enabled."""
+
         wp.set_module_options({"fast_math": True})
         try:
             wp.launch(test_pow, dim=1, inputs=[2.0, 4.0], device="cpu")
@@ -315,6 +393,11 @@ devices = get_test_devices()
 
 add_function_test(TestFastMath, "test_fast_math_cuda", test_fast_math_cuda, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_fast_math_disabled", test_fast_math_disabled, devices=devices)
+add_function_test(TestFastMath, "test_fast_math_denormals", test_fast_math_denormals, devices=get_cuda_test_devices())
+add_function_test(
+    TestFastMath, "test_fast_math_no_reassociation", test_fast_math_no_reassociation, devices=get_cuda_test_devices()
+)
+add_function_test(TestFastMath, "test_fast_math_nonfinite", test_fast_math_nonfinite, devices=devices)
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
 add_function_test(

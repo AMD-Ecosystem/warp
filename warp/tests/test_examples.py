@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Test Warp examples with unittest.
+"""Tests for Warp examples using unittest.
 
 This module tests the Warp examples registered in it using the unittest
 framework. When registering tests with add_example_test(), three optional
@@ -44,7 +44,7 @@ from warp.tests.unittest_utils import (
 
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
-    """Helper function to build command-line options from the test options dictionary."""
+    """Build command-line options from the test options dictionary."""
     additional_options = []
 
     for key, value in test_options.items():
@@ -65,7 +65,7 @@ def add_example_test(
     test_options_cpu: dict[str, Any] | None = None,
     test_options_cuda: dict[str, Any] | None = None,
 ):
-    """Registers a Warp example to run on ``devices`` as a TestCase."""
+    """Register a Warp example on ``devices`` as a test case."""
 
     if test_options is None:
         test_options = {}
@@ -211,7 +211,6 @@ add_example_test(
     test_options={"headless": True},
     test_options_cpu={"num_frames": 100},
 )
-add_example_test(TestCoreExamples, name="core.example_marching_cubes", devices=cuda_test_devices)
 add_example_test(TestCoreExamples, name="core.example_mesh", devices=test_devices, test_options={"usd_required": True})
 add_example_test(
     TestCoreExamples, name="core.example_mesh_intersect", devices=test_devices, test_options={"usd_required": True}
@@ -273,6 +272,25 @@ add_example_test(
 )
 
 
+class TestGeometryExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(TestGeometryExamples, name="geometry.example_isosurface", devices=cuda_test_devices)
+add_example_test(
+    TestGeometryExamples,
+    name="geometry.example_sparse_marching_cubes",
+    devices=cuda_test_devices,
+    test_options={"num_frames": 3, "usd_required": True},
+)
+add_example_test(
+    TestGeometryExamples,
+    name="geometry.example_swept_volume",
+    devices=test_devices,
+    test_options={"usd_required": True},
+)
+
+
 class TestOptimExamples(unittest.TestCase):
     pass
 
@@ -288,7 +306,21 @@ add_example_test(
     TestOptimExamples,
     name="optim.example_fluid_checkpoint",
     devices=cuda_test_devices_with_mempool,
-    test_options={"headless": True, "train_iters": 5, "num_frames": 300, "pillow_required": True},
+    test_options={"headless": True, "train_iters": 5, "num_frames": 301, "pillow_required": True},
+)
+add_example_test(
+    TestOptimExamples,
+    name="optim.example_fluid_checkpoint_custom_backward",
+    devices=test_devices,
+    test_options={
+        # Exercise a shorter final segment, both scratch buffers, and repeated execution.
+        "headless": True,
+        "train_iters": 2,
+        "num_frames": 5,
+        "pressure_iterations": 3,
+        "segment_size": 3,
+        "pillow_required": True,
+    },
 )
 add_example_test(
     TestOptimExamples,

@@ -5,7 +5,7 @@
 # Pre-configured environment for testing Warp C++ examples and integrations
 # Uses parse_redist.py to install only required CUDA components
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.4.2
 ARG UBUNTU_VERSION=24.04
 FROM ubuntu:${UBUNTU_VERSION} AS base
 
@@ -51,9 +51,10 @@ RUN wget --max-redirect=0 https://raw.githubusercontent.com/NVIDIA/build-system-
 # Architecture: x86_64 only (ARM64/sbsa support can be added later if needed)
 #
 # Minimal component list for C++ testing (pre-built Warp):
-#   - cuda_cccl: CUDA headers (cuda.h, cuda_runtime.h, thrust, cub)
+#   - cuda_cccl/cccl: CUDA headers (cuda.h, cuda_runtime.h, thrust, cub)
 #   - cuda_cudart: CUDA runtime library (libcudart.so)
 #   - cuda_nvcc: CUDA compiler for compiling C++ examples
+#   - libnvvm: CUDA 13 compiler backend (contains cicc)
 #
 # Components NOT needed for testing (only for building Warp):
 #   - cuda_nvrtc: Runtime compilation (used by Warp library internally)
@@ -62,10 +63,13 @@ RUN wget --max-redirect=0 https://raw.githubusercontent.com/NVIDIA/build-system-
 # CUDA 13.x differences:
 #   - cuda_crt: C runtime (new standalone in CUDA 13, was bundled in 12)
 RUN CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
+    CUDA_MINOR=$(echo ${CUDA_VERSION} | cut -d. -f2) && \
     if [ "$CUDA_MAJOR" = "12" ]; then \
         COMPONENTS="cuda_cccl cuda_cudart cuda_nvcc"; \
+    elif [ "$CUDA_MAJOR" = "13" ] && [ "$CUDA_MINOR" -lt 3 ]; then \
+        COMPONENTS="cuda_cccl cuda_crt cuda_cudart cuda_nvcc libnvvm"; \
     else \
-        COMPONENTS="cuda_cccl cuda_crt cuda_cudart cuda_nvcc"; \
+        COMPONENTS="cccl cuda_crt cuda_cudart cuda_nvcc libnvvm"; \
     fi && \
     for component in $COMPONENTS; do \
         echo "Installing $component for x86_64..."; \
@@ -78,8 +82,8 @@ RUN CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
             --component $component || exit 1; \
     done
 
-# Get uv from official distroless image
-FROM ghcr.io/astral-sh/uv:latest AS uv
+# Get uv from the digest-pinned official distroless image
+FROM ghcr.io/astral-sh/uv:0.12.13@sha256:b485bd65cc2cf1c9a93b3554012c9c3778cf7b1b5fd3d3096ce9e1226c97e1e6 AS uv
 
 # Final stage
 FROM base AS final

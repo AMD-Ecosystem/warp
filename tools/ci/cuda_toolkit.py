@@ -37,7 +37,8 @@ To exchange an assembled Toolkit through a generic package registry::
         --archive PACKAGE.tar.xz --cuda-path CUDA_PATH
 
 Registry upload, download, and environment export remain the CI workflow's
-responsibility.
+responsibility. ``unpack`` checks the package layout without running its tools;
+``activate`` publishes paths for a restored Toolkit without running its tools.
 
 Fork workflows cannot read or write these caches. The action's ``cache-read``
 and ``cache-write`` inputs carry repository workflow authorization; this
@@ -53,7 +54,6 @@ import json
 import lzma
 import os
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -69,7 +69,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 LOCK_SCHEMA_VERSION = 1
-INSTALL_SCHEMA_VERSION = 1
+BUNDLE_DIGEST_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 PACKAGE_SCHEMA_VERSION = 1
 PACKAGE_ROOT = "cuda-toolkit"
 PACKAGE_METADATA_NAME = ".warp-cuda-toolkit.json"
@@ -79,7 +80,6 @@ REDIST_BASE_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 60
-NVCC_TIMEOUT_SECONDS = 60
 
 
 class ToolkitConfigError(ValueError):
@@ -124,7 +124,7 @@ class Bundle:
     def digest(self) -> str:
         payload = {
             "archives": [archive.digest_value() for archive in self.archives],
-            "installation_schema": INSTALL_SCHEMA_VERSION,
+            "installation_schema": BUNDLE_DIGEST_SCHEMA_VERSION,
             "platform": self.platform,
             "version": self.version,
         }
@@ -137,7 +137,7 @@ class Bundle:
 
     @property
     def cache_key(self) -> str:
-        return f"warp-cuda-toolkit-v{INSTALL_SCHEMA_VERSION}-{self.version}-{self.platform}-{self.digest}"
+        return f"warp-cuda-toolkit-v{CACHE_SCHEMA_VERSION}-{self.version}-{self.platform}-{self.digest}"
 
 
 @dataclass(frozen=True)
@@ -568,7 +568,6 @@ def download_archive(
                     f"Could not download CUDA Toolkit archive {record.relative_path!r}: {error}"
                 ) from error
             sleep(2**attempt)
-    raise AssertionError("unreachable download retry state")
 
 
 def extract_archive(archive: Path, destination: Path) -> Path:
@@ -663,10 +662,27 @@ def install_bundle(
             merge_component(library, toolkit / "lib64")
             shutil.rmtree(library)
 
+        (toolkit / PACKAGE_METADATA_NAME).write_text(
+            json.dumps(_package_metadata(bundle), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
         if installed.exists() or installed.is_symlink():
             _remove_path(installed)
         os.replace(toolkit, installed)
     return installed
+
+
+def _validate_toolkit_layout(cuda_path: Path, platform: str) -> Path:
+    """Check the Toolkit layout without running packaged executables."""
+    installed = Path(os.path.abspath(cuda_path))
+    if not (installed / "include").is_dir():
+        raise ToolkitConfigError("Installed CUDA Toolkit is missing include/")
+    executable = "nvcc.exe" if platform.startswith("windows-") else "nvcc"
+    nvcc = installed / "bin" / executable
+    if not nvcc.is_file():
+        raise ToolkitConfigError(f"Installed CUDA Toolkit is missing bin/{executable}")
+    return nvcc
 
 
 def activate_toolkit(
@@ -675,34 +691,11 @@ def activate_toolkit(
     github_env: Path | None = None,
     github_path: Path | None = None,
 ) -> Path:
-    """Validate and publish one assembled Toolkit."""
+    """Check the layout and publish one assembled Toolkit."""
     if (github_env is None) != (github_path is None):
         raise ToolkitConfigError("--github-env and --github-path must be provided together")
     installed = Path(os.path.abspath(cuda_path))
-    if not (installed / "include").is_dir():
-        raise ToolkitConfigError("Installed CUDA Toolkit is missing include/")
-    executable = "nvcc.exe" if platform.startswith("windows-") else "nvcc"
-    nvcc = installed / "bin" / executable
-    if not nvcc.is_file():
-        raise ToolkitConfigError(f"Installed CUDA Toolkit is missing bin/{executable}")
-    try:
-        result = subprocess.run(
-            [nvcc, "--version"],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=NVCC_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise ToolkitConfigError(
-            f"CUDA compiler {nvcc} --version timed out after {NVCC_TIMEOUT_SECONDS} seconds"
-        ) from error
-    except OSError as error:
-        raise ToolkitConfigError(f"Could not run CUDA compiler {nvcc}: {error}") from error
-    if result.returncode:
-        output = (result.stderr or result.stdout).strip()
-        detail = f": {output}" if output else ""
-        raise ToolkitConfigError(f"CUDA compiler {nvcc} --version exited with status {result.returncode}{detail}")
+    _validate_toolkit_layout(installed, platform)
 
     if github_env is not None and github_path is not None:
         environment = f"WARP_CUDA_PATH={installed}\nCUDA_HOME={installed}\nCUDA_PATH={installed}\n"
@@ -754,7 +747,7 @@ def pack_toolkit(
         raise ToolkitConfigError("CUDA Toolkit package must end in .tar.xz")
     if archive.is_relative_to(installed):
         raise ToolkitConfigError("CUDA Toolkit package cannot be inside the Toolkit directory")
-    installed = activate_toolkit(installed, bundle.platform)
+    _validate_toolkit_layout(installed, bundle.platform)
     archive.parent.mkdir(parents=True, exist_ok=True)
     metadata_path = f"{PACKAGE_ROOT}/{PACKAGE_METADATA_NAME}"
     metadata = (json.dumps(_package_metadata(bundle), indent=2, sort_keys=True) + "\n").encode()
@@ -789,7 +782,7 @@ def unpack_toolkit(
     archive_path: Path,
     cuda_path: Path,
 ) -> Path:
-    """Restore one packaged Toolkit."""
+    """Restore one packaged Toolkit without running its executables."""
     archive = Path(os.path.abspath(archive_path))
     if not archive.name.endswith(".tar.xz"):
         raise ToolkitConfigError("CUDA Toolkit package must end in .tar.xz")
@@ -813,7 +806,7 @@ def unpack_toolkit(
             toolkit / PACKAGE_METADATA_NAME,
             bundle,
         )
-        activate_toolkit(toolkit, bundle.platform)
+        _validate_toolkit_layout(toolkit, bundle.platform)
         if installed.exists() or installed.is_symlink():
             _remove_path(installed)
         os.replace(toolkit, installed)
@@ -852,6 +845,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             command.add_argument("--archive", required=True, type=Path)
 
     activate = commands.add_parser("activate")
+    activate.add_argument("--version", required=True)
     activate.add_argument("--platform", required=True)
     activate.add_argument("--cuda-path", required=True, type=Path)
     activate.add_argument("--github-env", type=Path)
@@ -922,9 +916,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Unpacked CUDA {bundle.version} for {bundle.platform} at {installed}")
         else:
+            bundle = _configured_bundle(args.version, args.platform)
+            _validate_package_metadata(
+                args.cuda_path / PACKAGE_METADATA_NAME,
+                bundle,
+            )
             installed = activate_toolkit(
                 args.cuda_path,
-                args.platform,
+                bundle.platform,
                 args.github_env,
                 args.github_path,
             )

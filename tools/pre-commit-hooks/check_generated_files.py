@@ -28,17 +28,25 @@ base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, base_path)
 
 import warp  # noqa: E402 — populates builtin_functions via builtins.py
-from warp._src.generated_files import export_stubs, generate_exports_header_file  # noqa: E402
+from warp._src.generated_files import generate_exports_header_file, generate_stubs_file  # noqa: E402
+
+
+def _print_generation_status(path: str, changed: bool) -> None:
+    """Print whether a generated file was updated."""
+    if changed:
+        print(f"Generated {path}")
+    else:
+        print(f"{path} is up to date")
 
 
 def main() -> int:
     # Regenerate warp/native/exports.h
-    generate_exports_header_file(base_path)
+    exports_path = os.path.join(base_path, "warp", "native", "exports.h")
+    _print_generation_status(exports_path, generate_exports_header_file(base_path))
 
     # Regenerate warp/__init__.pyi
-    stub_path = os.path.join(base_path, "warp", "__init__.pyi")
-    with open(stub_path, "w", encoding="utf-8") as f:
-        export_stubs(f)
+    stubs_path = os.path.join(base_path, "warp", "__init__.pyi")
+    _print_generation_status(stubs_path, generate_stubs_file(base_path))
 
     return 0
 

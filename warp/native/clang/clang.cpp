@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#include "../native/cpu_block_runtime.h"
 #include "../native/crt.h"
-#include "../version.h"
+#include "../warp_clang.h"
 #include <clang/Basic/DiagnosticOptions.h>
 #include <clang/Frontend/CompilerInstance.h>
 #include <clang/Frontend/TextDiagnosticPrinter.h>
@@ -180,6 +181,8 @@ static int get_effective_optimization_level(bool debug, int optimization_level)
 static std::unique_ptr<clang::CompilerInstance> create_compiler(
     const std::string& input_file,
     const char* include_dir,
+    int num_extra_include_dirs,
+    const char** extra_include_dirs,
     bool is_cuda,
     bool debug,
     bool verify_fp,
@@ -195,6 +198,10 @@ static std::unique_ptr<clang::CompilerInstance> create_compiler(
 
     args.push_back("-I");
     args.push_back(include_dir);
+    for (int i = 0; i < num_extra_include_dirs; ++i) {
+        args.push_back("-I");
+        args.push_back(extra_include_dirs[i]);
+    }
     args.push_back("-std=c++17");
 
     switch (get_effective_optimization_level(debug, optimization_level)) {
@@ -371,7 +378,8 @@ static bool generate_pch(
     // modules build at -O2 (see build_cpu in build.py), so every module failed
     // the PCH check and paid a full no-PCH recompile.
     auto compiler = create_compiler(
-        input_file, include_dir, false, debug, verify_fp, tiles_in_stack_memory, extra_flags, optimization_level
+        input_file, include_dir, 0, nullptr, false, debug, verify_fp, tiles_in_stack_memory, extra_flags,
+        optimization_level
     );
 
     // Create a source buffer that includes the main header.
@@ -404,6 +412,8 @@ static std::unique_ptr<llvm::Module> source_to_llvm(
     const std::string& input_file,
     const char* cpp_src,
     const char* include_dir,
+    int num_extra_include_dirs,
+    const char** extra_include_dirs,
     bool debug,
     bool verify_fp,
     llvm::LLVMContext& context,
@@ -414,7 +424,8 @@ static std::unique_ptr<llvm::Module> source_to_llvm(
 )
 {
     auto compiler = create_compiler(
-        input_file, include_dir, is_cuda, debug, verify_fp, tiles_in_stack_memory, extra_flags, optimization_level
+        input_file, include_dir, num_extra_include_dirs, extra_include_dirs, is_cuda, debug, verify_fp,
+        tiles_in_stack_memory, extra_flags, optimization_level
     );
 
     // Map code to a MemoryBuffer
@@ -547,8 +558,8 @@ WP_API int wp_compile_cpp(
     // The LLVMContext must outlive the module through codegen.
     auto llvm_context = std::make_unique<llvm::LLVMContext>();
     std::unique_ptr<llvm::Module> module = source_to_llvm(
-        false, input_file, cpp_src, include_dir, debug, verify_fp, *llvm_context, tiles_in_stack_memory, extra_flags,
-        effective_optimization_level, pch_path
+        false, input_file, cpp_src, include_dir, 0, nullptr, debug, verify_fp, *llvm_context, tiles_in_stack_memory,
+        extra_flags, effective_optimization_level, pch_path
     );
 
     // Fallback: if compilation failed with PCH, retry without it
@@ -562,7 +573,7 @@ WP_API int wp_compile_cpp(
         // Need a fresh LLVMContext for the retry
         llvm_context = std::make_unique<llvm::LLVMContext>();
         module = source_to_llvm(
-            false, input_file, cpp_src, include_dir, debug, verify_fp, *llvm_context, tiles_in_stack_memory,
+            false, input_file, cpp_src, include_dir, 0, nullptr, debug, verify_fp, *llvm_context, tiles_in_stack_memory,
             extra_flags, effective_optimization_level, nullptr
         );
     }
@@ -664,14 +675,21 @@ WP_API int wp_compile_cpp(
 }
 
 WP_API int wp_compile_cuda(
-    const char* cpp_src, const char* input_file, const char* include_dir, const char* output_file, bool debug
+    const char* cpp_src,
+    const char* input_file,
+    const char* include_dir,
+    int num_cuda_include_dirs,
+    const char** cuda_include_dirs,
+    const char* output_file,
+    bool debug
 )
 {
     initialize_llvm();
 
     llvm::LLVMContext context;
-    std::unique_ptr<llvm::Module> module
-        = source_to_llvm(true, input_file, cpp_src, include_dir, debug, false, context, false);
+    std::unique_ptr<llvm::Module> module = source_to_llvm(
+        true, input_file, cpp_src, include_dir, num_cuda_include_dirs, cuda_include_dirs, debug, false, context, false
+    );
 
     if (!module) {
         return -1;
@@ -743,6 +761,22 @@ static llvm::orc::LLJIT* jit_legacy = nullptr;
 // native registry operations keeps module compilation parallel while ensuring
 // every successfully loaded module remains reachable for lookup and unloading.
 static std::mutex jit_mutex;
+
+// JIT-compiled cooperative kernels execute against the CPU block runtime in
+// the core Warp library. Python installs this table after loading both shared
+// libraries and before loading any CPU object files.
+static wp_cpu_block_runtime_api cpu_block_runtime = {};
+
+WP_API int wp_llvm_set_cpu_block_runtime(const wp_cpu_block_runtime_api* api)
+{
+    if (!api || !api->get_thread_idx || !api->get_active_count || !api->get_first_active_lane || !api->tile_sync
+        || !api->run_block)
+        return 0;
+
+    std::lock_guard<std::mutex> lock(jit_mutex);
+    cpu_block_runtime = *api;
+    return 1;
+}
 
 // Return the JIT instance for the given linker mode, creating it if needed.
 // The caller must hold jit_mutex.
@@ -910,6 +944,11 @@ WP_API int wp_load_obj(const char* object_file, const char* module_name, bool us
 
     std::lock_guard<std::mutex> lock(jit_mutex);
 
+    if (!cpu_block_runtime.run_block) {
+        std::cerr << "The Warp CPU block runtime has not been bound" << std::endl;
+        return -1;
+    }
+
     auto* jit = get_or_create_jit(use_legacy_linker);
     if (!jit)
         return -1;
@@ -933,11 +972,13 @@ WP_API int wp_load_obj(const char* object_file, const char* module_name, bool us
 #if LLVM_VERSION_MAJOR >= 18
 #define SYMBOL(sym) { jit->getExecutionSession().intern(MANGLING_PREFIX #sym), { llvm::orc::ExecutorAddr::fromPtr(&::sym), flags} }
 #define SYMBOL_T(sym, T) { jit->getExecutionSession().intern(MANGLING_PREFIX #sym), { llvm::orc::ExecutorAddr::fromPtr(static_cast<T>(&::sym)), flags} }
+#define SYMBOL_PTR(sym, ptr) { jit->getExecutionSession().intern(MANGLING_PREFIX #sym), { llvm::orc::ExecutorAddr::fromPtr(ptr), flags} }
 
         auto error = dll->define(llvm::orc::absoluteSymbols(llvm::orc::SymbolMap({
 #else
 #define SYMBOL(sym) { jit->getExecutionSession().intern(MANGLING_PREFIX #sym), { llvm::pointerToJITTargetAddress(&::sym), flags} }
 #define SYMBOL_T(sym, T) { jit->getExecutionSession().intern(MANGLING_PREFIX #sym), { llvm::pointerToJITTargetAddress(static_cast<T>(&::sym)), flags} }
+#define SYMBOL_PTR(sym, ptr) { jit->getExecutionSession().intern(MANGLING_PREFIX #sym), { llvm::pointerToJITTargetAddress(ptr), flags} }
 
         auto error = dll->define(llvm::orc::absoluteSymbols({
 #endif
@@ -965,8 +1006,13 @@ WP_API int wp_load_obj(const char* object_file, const char* module_name, bool us
                 SYMBOL(fmaf), SYMBOL_T(fma, double (*)(double, double, double)), SYMBOL(erff),
                 SYMBOL_T(erf, double (*)(double)), SYMBOL(erfcf), SYMBOL_T(erfc, double (*)(double)), SYMBOL(erfinvf),
                 SYMBOL_T(erfinv, double (*)(double)), SYMBOL(erfcinvf), SYMBOL_T(erfcinv, double (*)(double)),
-                SYMBOL(memcpy), SYMBOL(memset), SYMBOL(memmove), SYMBOL(_wp_assert), SYMBOL(_wp_isfinite),
-                SYMBOL(_wp_isnan), SYMBOL(_wp_isinf),
+                SYMBOL(memcpy), SYMBOL(memset), SYMBOL(memmove), SYMBOL(malloc), SYMBOL(calloc), SYMBOL(free),
+                SYMBOL(_wp_assert), SYMBOL(_wp_isfinite), SYMBOL(_wp_isnan), SYMBOL(_wp_isinf),
+                SYMBOL_PTR(wp_cpu_get_thread_idx, cpu_block_runtime.get_thread_idx),
+                SYMBOL_PTR(wp_cpu_get_active_count, cpu_block_runtime.get_active_count),
+                SYMBOL_PTR(wp_cpu_get_first_active_lane, cpu_block_runtime.get_first_active_lane),
+                SYMBOL_PTR(wp_cpu_tile_sync, cpu_block_runtime.tile_sync),
+                SYMBOL_PTR(wp_cpu_run_block, cpu_block_runtime.run_block),
 #if defined(_WIN64)
                 // For functions with large stack frames the compiler will emit a call to
                 // __chkstk() to linearly touch each memory page. This grows the stack without

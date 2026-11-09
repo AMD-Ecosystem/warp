@@ -228,7 +228,17 @@ def from_torch(
         sync = t.is_cuda and warp.device_from_torch(t.device).is_hip
     if sync and t.is_cuda:
         import torch  # noqa: PLC0415
-        torch.cuda.current_stream(t.device).synchronize()
+
+        # A blocking host sync is illegal while a CUDA/HIP graph capture is active:
+        # hipStreamSynchronize returns hipErrorStreamCaptureUnsupported, which
+        # invalidates the capture, so hipStreamEndCapture then fails with
+        # hipErrorStreamCaptureInvalidated. It is also unnecessary there -- nothing
+        # has executed yet at capture time, the recorded work is ordered by the
+        # graph, and a caller capturing a Warp launch must already be launching it
+        # on the capture stream (any other stream forks the capture and fails as
+        # hipErrorStreamCaptureUnjoined).
+        if not torch.cuda.is_current_stream_capturing():
+            torch.cuda.current_stream(t.device).synchronize()
 
     if dtype is None:
         dtype = dtype_from_torch(t.dtype)
@@ -318,11 +328,22 @@ def from_torch(
         return array_ctype
 
     else:
+        ptr = t.data_ptr()
+        capacity = 0
+        if ptr:
+            # A view's data pointer includes its storage offset. Warp capacity
+            # is measured from ptr, so exclude the preceding storage bytes.
+            storage = t.untyped_storage()
+            storage_base_ptr = storage.data_ptr()
+            storage_nbytes = storage.nbytes()
+            capacity = storage_nbytes - (ptr - storage_base_ptr)
+
         a = warp.array(
-            ptr=t.data_ptr(),
+            ptr=ptr,
             dtype=dtype,
             shape=shape,
             strides=strides,
+            capacity=capacity,
             device=device_from_torch(t.device),
             copy=False,
             grad=grad,
@@ -332,6 +353,11 @@ def from_torch(
 
         # save a reference to the source tensor, otherwise it may get deallocated
         a._tensor = t
+        if ptr:
+            # APIC uses allocation-wide bounds to recognize independently
+            # converted views of the same PyTorch storage as one memory region.
+            a._storage_base_ptr = storage_base_ptr
+            a._storage_nbytes = storage_nbytes
 
         return a
 

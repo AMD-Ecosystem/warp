@@ -30,14 +30,9 @@ def _bfloat16_numpy_to_float32(values):
     return _np_bfloat16_bits_to_float32(bits)
 
 
-# Deterministic (RUN_TO_RUN / GPU_TO_GPU) atomic reductions are not yet
-# validated on HIP/ROCm: the binned-accumulator reduction path in
-# deterministic.cu does not currently reproduce bit-identical results across
-# runs on gfx1151. Scope the deterministic GPU tests to non-HIP CUDA devices
-# until that is resolved (tracked in KNOWN_ISSUES-AMD.md).
-cuda_devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
+cuda_devices = get_selected_cuda_test_devices()
 bfloat16_cuda_devices = [device for device in cuda_devices if device.arch >= 80]
-all_devices = [device for device in get_test_devices() if not device.is_hip]
+all_devices = get_test_devices()
 cpu_device = wp.get_device("cpu")
 REPEAT_COUNT = 3
 

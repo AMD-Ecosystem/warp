@@ -1,0 +1,1 @@
+Fix an allocation made on the capture's main stream while a forked stream still has unjoined work on HIP: pausing the capture for a stable allocation failed and left the stream in capture state. The live forks are now joined for the pause and forked again after the resume, so the allocation stays a stable one.

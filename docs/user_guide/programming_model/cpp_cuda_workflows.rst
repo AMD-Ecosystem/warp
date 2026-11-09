@@ -420,6 +420,194 @@ Native Function Limitations
 - Users are responsible for native-code correctness, synchronization, memory
   safety, and portability.
 
+External Build Inputs
+---------------------
+
+.. admonition:: Experimental
+
+    The external-compilation APIs described in this section are experimental
+    and may change without deprecation in future releases.
+
+Extra build inputs for a module can be grouped in
+:class:`wp.ModuleBuildOptions <warp.ModuleBuildOptions>`:
+
+.. code:: python
+
+    build_options = wp.ModuleBuildOptions(
+        extra_cuda_include_dirs=[my_cuda_include_dir],
+        extra_cpu_include_dirs=[my_cpu_include_dir],
+        extra_cuda_preamble='#include "my_cuda_addon.h"',
+        extra_cpu_preamble='#include "my_cpu_addon.h"',
+        extra_build_dependencies=[my_cuda_addon_header, my_cpu_addon_header],
+    )
+    wp.set_module_options({"extra_build_options": build_options})
+
+The preambles are inserted after Warp's own headers, but before codegen-only
+cast macros and the generated code. An external header may therefore use public
+Warp macros such as ``CUDA_CALLABLE`` and ordinary C++ function-style casts,
+and the generated kernels see everything the preamble declares. A preamble
+cannot define macros that Warp's headers consume, because those are already
+included.
+
+Warp hashes the configured include-directory paths, but not the contents of
+headers resolved through them. List external headers and other build inputs in
+``extra_build_dependencies`` so Warp also hashes their contents. Dependency
+contents are re-read whenever the module hash is recomputed — after
+``wp.set_module_options()`` or in a new process — not on every launch.
+
+Changes to a :class:`wp.ModuleBuildOptions <warp.ModuleBuildOptions>` instance
+take effect when it is passed to :func:`wp.set_module_options()
+<warp.set_module_options>`. After modifying an instance, call
+``wp.set_module_options()`` again so Warp invalidates the module's cached
+compilation state.
+
+If more than one addon contributes build inputs, combine them without
+discarding earlier settings:
+
+.. code:: python
+
+    current = wp.get_module_options(kernel.module)["extra_build_options"]
+    if current is None:
+        current = wp.ModuleBuildOptions()
+    wp.set_module_options(
+        {"extra_build_options": current.merged(addon_build_options)},
+        module=kernel.module,
+    )
+
+External Native Value Types
+---------------------------
+
+External C++ value types can be used directly as kernel annotations, built-in
+arguments and return values, Warp struct fields, and array dtypes. Define the
+host ABI with :class:`ctypes.Structure` and register the same class:
+
+.. code:: python
+
+    import ctypes
+    import warp as wp
+
+    class Color(ctypes.Structure):
+        _fields_ = [
+            ("r", ctypes.c_float),
+            ("g", ctypes.c_float),
+            ("b", ctypes.c_float),
+        ]
+
+    wp.build_experimental.add_native_type(
+        Color,
+        native_name="render::Color",
+        fields={"r": wp.float32, "g": wp.float32, "b": wp.float32},
+        initializer="aggregate",
+    )
+
+The exact C++ definition must be made visible using the module preamble and
+include-directory options above. Warp emits compile-time checks for standard
+layout, trivial copyability, size, and alignment. CPU and CUDA compilation
+also check each exposed member's C++ type. CPU compilation checks every exposed
+field offset, while CUDA compilation checks each field size. Setting
+``initializer="aggregate"`` opts into ordered field construction such as
+``Color(r, g, b)`` inside kernels. In this mode, ``fields`` must contain every
+ctypes field in declaration order. Without it, only default construction is
+available.
+
+Pass ``fields=None`` (the default) for an opaque type. Opaque values can cross
+kernel and registered built-in boundaries and can be stored in arrays, but
+their members and captured constants are not exposed. Warp does not manage
+resources referenced by opaque values; the external package remains
+responsible for their ownership and lifetime.
+
+Native value types do not automatically gain arithmetic or differentiation.
+Register operations explicitly with :func:`warp.build_experimental.add_builtin`, and use
+arrays without ``requires_grad``.
+
+Complete Addon Example
+----------------------
+
+An addon should register its types and built-ins when imported, then expose a
+small helper that applies its build inputs to the module containing the user's
+kernels. For example, ``my_addon.py`` can contain:
+
+.. code:: python
+
+    import ctypes
+    from pathlib import Path
+
+    import warp as wp
+
+    include_dir = Path(__file__).parent / "include"
+    header = include_dir / "my_addon.h"
+
+
+    class Color(ctypes.Structure):
+        _fields_ = [
+            ("r", ctypes.c_float),
+            ("g", ctypes.c_float),
+            ("b", ctypes.c_float),
+        ]
+
+
+    wp.build_experimental.add_native_type(
+        Color,
+        native_name="my_addon::Color",
+        fields={"r": wp.float32, "g": wp.float32, "b": wp.float32},
+        initializer="aggregate",
+    )
+    wp.build_experimental.add_builtin(
+        "my_addon_scale_color",
+        {"value": Color, "factor": wp.float32},
+        Color,
+        native_name="my_addon::scale_color",
+    )
+
+    _build_options = wp.ModuleBuildOptions(
+        extra_cuda_include_dirs=[include_dir],
+        extra_cpu_include_dirs=[include_dir],
+        extra_cuda_preamble='#include "my_addon.h"',
+        extra_cpu_preamble='#include "my_addon.h"',
+        extra_build_dependencies=[header],
+    )
+
+
+    def configure_module(module):
+        current = wp.get_module_options(module)["extra_build_options"]
+        if current is None:
+            current = wp.ModuleBuildOptions()
+        wp.set_module_options(
+            {"extra_build_options": current.merged(_build_options)},
+            module=module,
+        )
+
+Users import the addon before compiling kernels that call its built-ins, and
+configure each kernel module before its first launch or AOT compilation:
+
+.. code:: python
+
+    import warp as wp
+
+    import my_addon
+
+
+    @wp.kernel
+    def scale_colors(colors: wp.array[my_addon.Color], factor: float):
+        tid = wp.tid()
+        colors[tid] = wp.my_addon_scale_color(colors[tid], factor)
+
+
+    my_addon.configure_module(scale_colors.module)
+
+    # A normal wp.launch() now JIT-compiles with the addon's build inputs.
+    # For external runtimes, AOT compilation returns the generated artifact.
+    artifacts = wp.compile_aot_module(
+        scale_colors.module,
+        device="cuda",
+        use_ptx=True,
+    )
+
+Registered built-in names share Warp's global kernel namespace. Addons should
+use a package-specific prefix unless they intentionally add an overload to an
+existing Warp operation. Registrations are process-global and equivalent
+registrations are idempotent, which makes normal module reloads safe.
+
 Ahead-of-Time C++/CUDA Workflows
 --------------------------------
 
@@ -471,12 +659,98 @@ The C++ integration examples intentionally use a small native surface:
   Warp's generated type support.
 - ``warp/native/warp.h`` declares the core Warp C API exported by the native
   library.
+- ``warp/native/warp_clang.h`` declares the experimental CPU block runtime
+  binding, module loading, and symbol lookup API exported by ``warp-clang``.
 - ``warp/native/apic.h`` declares the APIC graph loading and replay API used by
   ``.wrp`` graph consumers.
 
 Other files in ``warp/native/`` implement Warp's runtime and kernel support
 library. They are useful when inspecting generated code, but the examples above
 are the recommended starting points for native host integration.
+
+.. _native_library_linking:
+
+Native Library Linking and Version Checks
+-----------------------------------------
+
+Windows wheels include ``warp.lib`` beside ``warp.dll`` and
+``warp-clang.lib`` beside ``warp-clang.dll``. At build time, link against the
+``.lib`` import libraries and deploy the corresponding DLLs. This records
+load-time dependencies on the DLLs. On Linux and macOS, link the application
+against the Warp and warp-clang shared libraries at build time.
+
+Warp does not currently provide an official ``find_package()`` configuration.
+A consuming CMake project that knows the wheel's package location can define
+ordinary imported targets. For example, the Windows targets can be defined as:
+
+.. code:: cmake
+
+    set(WARP_PACKAGE_ROOT ".../site-packages/warp")
+
+    add_library(Warp::runtime SHARED IMPORTED)
+    set_target_properties(Warp::runtime PROPERTIES
+        IMPORTED_LOCATION "${WARP_PACKAGE_ROOT}/bin/warp.dll"
+        IMPORTED_IMPLIB "${WARP_PACKAGE_ROOT}/bin/warp.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${WARP_PACKAGE_ROOT}/native"
+    )
+
+    add_library(Warp::clang SHARED IMPORTED)
+    set_target_properties(Warp::clang PROPERTIES
+        IMPORTED_LOCATION "${WARP_PACKAGE_ROOT}/bin/warp-clang.dll"
+        IMPORTED_IMPLIB "${WARP_PACKAGE_ROOT}/bin/warp-clang.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${WARP_PACKAGE_ROOT}/native"
+    )
+
+    target_link_libraries(my_app PRIVATE Warp::runtime Warp::clang)
+
+On Linux and macOS, set ``IMPORTED_LOCATION`` to the corresponding ``.so`` or
+``.dylib`` file and omit ``IMPORTED_IMPLIB``.
+
+The native C APIs and ``.wrp`` format do not currently guarantee backward or
+forward compatibility across Warp releases. Build and deploy a native
+application with the headers, DLLs or other shared libraries, Windows import
+libraries, ``.wrp`` files, and companion module artifacts from the same Warp
+release. Mixing these artifacts across releases is unsupported, even when a
+particular combination happens to work. Check both linked libraries during
+startup before loading a graph or CPU module:
+
+.. code:: cpp
+
+    #include "warp.h"
+    #include "warp_clang.h"
+
+    #include <cstring>
+
+    if (wp_init(WP_VERSION_STRING) != 0)
+        return 1;
+    if (std::strcmp(wp_warp_clang_version(), WP_VERSION_STRING) != 0)
+        return 2;
+
+Applications that load CPU object modules through ``wp_load_obj()`` must also
+bind the core Warp CPU block runtime after initialization and before loading
+the first object:
+
+.. code:: cpp
+
+    if (!wp_llvm_set_cpu_block_runtime(wp_cpu_block_runtime_get_api()))
+        return 3;
+
+These checks detect a library that reports a different Warp release, but they
+do not establish a stable ABI:
+
+- The Windows loader may reject a missing DLL or symbol before ``main()``, so
+  runtime version checks cannot recover from that failure.
+- An unchanged C symbol with a changed signature remains unsafe despite the
+  version checks.
+- Put the matching DLLs beside the executable or configure the DLL search path
+  deliberately.
+- Linking ``warp-clang.lib`` makes ``warp-clang.dll`` a startup dependency,
+  even for a process that later replays only CUDA graphs.
+- Both DLLs are included in the same Warp Windows distribution package, such
+  as a wheel or conda package, but remain separate libraries.
+- CPU APIC callers should include ``warp_clang.h`` for the runtime binding,
+  module loading, and symbol lookup declarations instead of copying
+  declarations from ``clang.cpp``.
 
 Related Topics
 --------------

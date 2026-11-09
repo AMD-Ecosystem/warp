@@ -41,6 +41,7 @@ from types import ModuleType
 from typing import TypeVar, get_origin
 
 import warp as wp
+from docs._ext.warp_function_reference import validate_public_functions
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,12 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 # Module containing Warp's built-ins functions and requiring special handling.
 BUILTINS_MODULE = "warp._src.lang"
+
+# Public cross-reference labels for selected built-in categories.
+BUILTINS_CATEGORY_LABELS = {
+    "Textures": "builtins-textures",
+    "Volumes": "builtins-volumes",
+}
 
 # Fallback category for items not explicitly categorized.
 DEFAULT_CATEGORY = "Misc"
@@ -81,7 +88,6 @@ BUILTINS_REF_DIR = "language_reference"
 SKIP = (
     "warp._src",
     "warp.examples",
-    "warp.jax_experimental",
     "warp.tests",
 )
 
@@ -501,6 +507,10 @@ def render_category_to_rst(
         lines: List to append RST lines to
         module_name: Name of the module being documented (for special handling)
     """
+    if module_name == BUILTINS_MODULE and (label := BUILTINS_CATEGORY_LABELS.get(cat.display_name)):
+        lines.append(f".. _{label}:")
+        lines.append("")
+
     # Render section header
     underline = "^" * len(cat.display_name) if cat.is_subcategory else "-" * len(cat.display_name)
     lines.append(cat.display_name)
@@ -514,7 +524,7 @@ def render_category_to_rst(
         lines.append("   :nosignatures:")
         lines.append(f"   :toctree: {TOCTREE_DIR}")
         if module_name == BUILTINS_MODULE:
-            lines.append("   :template: builtins.rst")
+            lines.append("   :template: warp_function.rst")
         lines.append("")
         lines.extend(f"   {s}" for s in non_aliased)
         lines.append("")
@@ -728,11 +738,11 @@ def run():
             if "." not in submodule_rel_name:
                 submodules.append(other_module_name)
 
+        validate_public_functions(module_name, module, symbols, aliased_symbols)
         write_module_page(module_name, symbols, aliased_symbols, submodules, output_api_dir)
 
     # Third pass: handle the built-ins symbols.
     # Include a builtin if ANY of its overloads are visible (not hidden).
-    # This matches the behavior of the old export_functions_rst system.
     def has_visible_overload(func):
         """Check if a builtin function has at least one non-hidden overload."""
         if hasattr(func, "overloads"):

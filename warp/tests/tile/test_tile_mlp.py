@@ -29,6 +29,7 @@ def create_array(rng, dim_in, dim_hid, dtype=float):
 
 
 def test_multi_layer_nn(test, device):
+    """Match a tiled multilayer network's forward and backward results against NumPy and PyTorch."""
     import torch as tc  # noqa: PLC0415
 
     if device.is_cuda and not wp._src.context.runtime.core.wp_is_mathdx_enabled():
@@ -158,7 +159,7 @@ def test_multi_layer_nn(test, device):
         )
         reference = wp.array(reference_np, dtype=float)
 
-        assert reference.shape[1] == IMG_WIDTH * IMG_HEIGHT
+        test.assertEqual(reference.shape[1], IMG_WIDTH * IMG_HEIGHT)
 
         loss = wp.zeros(1, dtype=float, requires_grad=True)
 

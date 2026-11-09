@@ -744,6 +744,24 @@ size_t counter_workspace_size(int count, cudaStream_t stream)
     return offset;
 }
 
+// Whether a scalar RUN_TO_RUN reduction may go through the library's ReduceByKey.
+// CUB repeats its reduction order for identical input on one device. rocPRIM's
+// reduce_by_key does not for large inputs (observed on gfx1151 from 2^19 records),
+// so a floating-point sum through it is not bit-reproducible on HIP. Min/max and
+// integer sums do not depend on the order; floating-point sums take the ordered
+// generic path there instead.
+template <typename T> inline bool raw_scalar_reduce_is_reproducible(int op)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    constexpr bool is_float_value = std::is_same<T, wp::half>::value || std::is_same<T, wp::bfloat16>::value
+        || std::is_same<T, float>::value || std::is_same<T, double>::value;
+    return !(is_float_value && op == REDUCE_OP_ADD);
+#else
+    (void)op;
+    return true;
+#endif
+}
+
 template <typename T>
 size_t deterministic_workspace_size(int count, int op, int components, int determinism_level, cudaStream_t stream)
 {
@@ -759,7 +777,7 @@ size_t deterministic_workspace_size(int count, int op, int components, int deter
                 return binned_float_component_workspace_size(count, stream);
             }
         }
-        if (components == 1) {
+        if (components == 1 && raw_scalar_reduce_is_reproducible<T>(op)) {
             return raw_scalar_workspace_size<T>(count, op, stream);
         }
     }
@@ -1106,7 +1124,7 @@ void deterministic_sort_reduce_device(
                 return;
             }
         }
-        if (components == 1) {
+        if (components == 1 && raw_scalar_reduce_is_reproducible<T>(op)) {
             reduce_raw_scalar_run_to_run(keys, values, count, dest_array, dest_size, op, workspace, workspace_size);
             return;
         }
