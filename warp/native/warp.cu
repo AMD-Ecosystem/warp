@@ -5592,8 +5592,14 @@ size_t wp_cuda_compile_program(
         // -ffast-math leaves fp32 denormals on, unlike --use_fast_math on CUDA, so a guard such as
         // `if (l > 0)` passes for a denormal `l` that the approximate rcp/rsq then treat as zero.
         // It also lets the compiler reassociate, which --use_fast_math does not, so sums that must
-        // cancel, such as equal and opposite forces, no longer do.
+        // cancel, such as equal and opposite forces, no longer do. And it implies -ffinite-math-only,
+        // which --use_fast_math does not: isinf/isnan fold to false and comparisons with infinity
+        // are dropped, so a kernel that treats an infinite stiffness as a hard constraint takes the
+        // finite branch. The -fno-finite-math-only pushed above is overridden by order, so it is
+        // repeated after -ffast-math.
         stored_options.push_back("-ffast-math");
+        opts.push_back(stored_options.back().c_str());
+        stored_options.push_back("-fno-finite-math-only");
         opts.push_back(stored_options.back().c_str());
         stored_options.push_back("-fno-associative-math");
         opts.push_back(stored_options.back().c_str());

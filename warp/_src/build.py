@@ -88,7 +88,10 @@ def _hipcc_genco_cmd(hipcc, cu_path, output_path, arch_suffix, inc_dirs, config,
     if not config == "debug" and ndebug:
         cmd += ["-DNDEBUG"]
     if fast_math:
-        cmd += ["-ffast-math"]
+        # The same corrections as the HIPRTC path: -ffast-math implies -ffinite-math-only, which
+        # --use_fast_math on CUDA does not, and it reassociates and keeps fp32 denormals on, which
+        # --use_fast_math does not either.
+        cmd += ["-ffast-math", "-fno-finite-math-only", "-fno-associative-math", "-fgpu-flush-denormals-to-zero"]
     # clang's HIP default already contracts, so fuse_fp=False must be explicit (--fmad=false on CUDA).
     cmd += ["-ffp-contract=fast" if fuse_fp else "-ffp-contract=off"]
     if lineinfo:

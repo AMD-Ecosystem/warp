@@ -36,10 +36,13 @@ def test_fast_math_disabled(test, device):
 def test_fast_math_cuda(test, device):
     # on CUDA with --fast-math enabled taking the pow()
     # of a negative number will result in a NaN
+    # HIP fast math keeps IEEE infinities and NaNs and does not replace pow with exp2(b * log2(a)),
+    # so a negative base with an integral exponent gives the exact power
+    expected = 4.0 if wp.get_device(device).is_hip else wp.NAN
 
     wp.set_module_options({"fast_math": True})
     try:
-        wp.launch(test_pow, dim=1, inputs=[2.0, wp.NAN], device=device)
+        wp.launch(test_pow, dim=1, inputs=[2.0, expected], device=device)
     finally:
         wp.set_module_options({"fast_math": False})
 
@@ -317,6 +320,35 @@ def test_fast_math_no_reassociation(test, device):
     np.testing.assert_array_equal(out.numpy(), np.array([0.0, 1.0], dtype=np.float32))
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def nonfinite_kernel(x: wp.array[float], out: wp.array[wp.int32]):
+    inf = x[0]
+    finite = x[1]
+    nan = x[2]
+    out[0] = wp.int32(wp.isinf(inf))
+    out[1] = wp.int32(wp.isfinite(inf))
+    out[2] = wp.int32(wp.isnan(nan))
+    out[3] = wp.int32(wp.isinf(finite))
+    out[4] = wp.int32(wp.isnan(finite))
+    out[5] = wp.int32(inf == wp.inf)
+    out[6] = wp.int32(wp.isinf(-inf))
+    out[7] = wp.int32(nan != nan)
+
+
+wp.set_module_options({"fast_math": True}, module=nonfinite_kernel.module)
+
+
+def test_fast_math_nonfinite(test, device):
+    # --use_fast_math keeps IEEE infinities and NaNs (it does not assume finite math), so a fast-math
+    # module must still classify them: a kernel that treats an infinite stiffness as a hard constraint
+    # relies on wp.isinf.
+    x = wp.array([wp.inf, 1.0e4, wp.nan], dtype=float, device=device)
+    out = wp.zeros(8, dtype=wp.int32, device=device)
+    wp.launch(nonfinite_kernel, dim=1, inputs=[x, out], device=device)
+
+    np.testing.assert_array_equal(out.numpy(), np.array([1, 0, 1, 0, 0, 1, 1, 1], dtype=np.int32))
+
+
 class TestFastMath(unittest.TestCase):
     def test_fast_math_cpu(self):
         """Handle negative power bases with fast math enabled."""
@@ -365,6 +397,7 @@ add_function_test(TestFastMath, "test_fast_math_denormals", test_fast_math_denor
 add_function_test(
     TestFastMath, "test_fast_math_no_reassociation", test_fast_math_no_reassociation, devices=get_cuda_test_devices()
 )
+add_function_test(TestFastMath, "test_fast_math_nonfinite", test_fast_math_nonfinite, devices=devices)
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
 add_function_test(
