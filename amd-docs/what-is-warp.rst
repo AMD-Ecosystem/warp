@@ -95,7 +95,7 @@ Warp on ROCm doesn't include support for the following features:
 
 - **OpenGL interop:** ``wp.RegisteredGLBuffer`` and ``wp.GLTextureResource``
   cannot register an OpenGL buffer or texture for zero-copy access. HIP does
-  not support registering OpenGL resources, and Instinct GPUs have no display
+  not support registering OpenGL resources, and AMD Instinct GPUs have no display
   output for OpenGL rendering.
 
 Supported GPUs
