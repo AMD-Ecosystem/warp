@@ -77,6 +77,27 @@ Warp is commonly used in the following scenarios:
 - **Differentiable simulation research:** Optimize physical parameters and
   controllers by back-propagating through simulations.
 
+Unsupported features
+--------------------------------------------------------------------
+
+Warp on ROCm doesn't include support for the following features:
+
+- **Conditional CUDA graphs:** ``wp.capture_if()`` and ``wp.capture_while()``
+  are unavailable. HIP does not provide conditional graph nodes, so
+  ``wp.is_conditional_graph_supported()`` returns ``False``. In-memory graph
+  capture and replay with ``wp.capture_begin()``, ``wp.capture_end()``, and
+  ``wp.capture_launch()`` remain available.
+
+- **GPU textures:** ``wp.Texture1D``, ``wp.Texture2D``, ``wp.Texture3D``, and
+  ``wp.texture_sample()`` are unavailable. AMD Instinct GPUs do not expose
+  texture image hardware to HIP, so device-side texture sampling is not
+  implemented.
+
+- **OpenGL interop:** ``wp.RegisteredGLBuffer`` and ``wp.GLTextureResource``
+  cannot register an OpenGL buffer or texture for zero-copy access. HIP does
+  not support registering OpenGL resources, and Instinct GPUs have no display
+  output for OpenGL rendering.
+
 Supported GPUs
 ====================================================================
 
