@@ -15,7 +15,13 @@
 #include "hip_util.h"
 
 #include <hipcub/hipcub.hpp>
-namespace cub = hipcub;
+// cuBQL's builder headers (builder/cuda/builder_common.h) alias cub onto hipcub
+// with `namespace cub { using namespace hipcub; }`. A namespace *alias*
+// (`namespace cub = hipcub;`) cannot coexist with that namespace *definition* in
+// the same translation unit, so use the reopen-namespace form here too. Both
+// forms make Warp's own `cub::` uses (BlockReduce, DeviceRadixSort) resolve to
+// hipcub, and reopening the namespace with duplicate using-directives is legal.
+namespace cub { using namespace hipcub; }
 #else
 #include <cub/cub.cuh>
 #include <cuda.h>

@@ -20,15 +20,6 @@
 
 // cuBQL is CUDA-only; on HIP fall back to the WP_DISABLE_CUBQL stubs below,
 // which report an error for the experimental "cubql" device constructor.
-#if defined(__HIP_PLATFORM_AMD__) && !defined(WP_DISABLE_CUBQL)
-#define WP_DISABLE_CUBQL 1
-#endif
-
-#ifndef WP_DISABLE_CUBQL
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#endif
-
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 
 // CUB must be included before cuBQL. cuBQL's math/common.h includes <stdexcept>,
@@ -36,7 +27,15 @@
 // pulled in by CUB. This makes __throw_out_of_range non-constexpr, breaking a
 // static_assert in typeid.h on GCC < 12 (which lacks P2448R2 relaxed constexpr).
 #ifndef WP_DISABLE_CUBQL
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub { using namespace hipcub; }
+#else
 #include <cub/cub.cuh>
+#include <cuda.h>
+#include <cuda_runtime_api.h>
+#endif
 #include "cuBQL/bvh.h"
 #endif
 

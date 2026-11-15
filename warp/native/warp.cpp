@@ -158,10 +158,6 @@ int wp_is_mathdx_enabled() { return int(WP_ENABLE_MATHDX); }
 // cuBQL is CUDA-only; the HIP build stubs it out (see bvh_cubql.cu). Mirror
 // that here so wp_is_cubql_enabled() — and thus wp.is_cubql_available() — report
 // it as unavailable on HIP, letting tests/users gate the "cubql" constructor.
-#if defined(__HIP_PLATFORM_AMD__) && !defined(WP_DISABLE_CUBQL)
-#define WP_DISABLE_CUBQL 1
-#endif
-
 #ifdef WP_DISABLE_CUBQL
 int wp_is_cubql_enabled() { return 0; }
 #else
