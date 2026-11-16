@@ -1,0 +1,25 @@
+defaults:
+  numbered: False
+  maxdepth: 6
+root: index
+subtrees:
+- entries:
+  - file: what-is-warp.rst
+    title: What is Warp?
+
+- caption: Install
+  entries:
+  - file: install/warp-install.rst
+    title: Install Warp
+
+- caption: Examples
+  entries:
+  - file: examples/warp-examples.rst
+    title: Run a Warp example
+
+- caption: About
+  entries:
+  - url: https://github.com/AMD-Ecosystem/warp/blob/amd-integration/CONTRIBUTING.md
+    title: Contribute to Warp
+  - file: about/license.rst
+    title: License
