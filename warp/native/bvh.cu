@@ -934,7 +934,11 @@ bool cubql_bvh_refit_device(CuBQLBVH& bvh)
     cubql_update_device_boxes(bvh);
     cuBQL::bvh3f native = cubql_native_view(bvh);
     try {
-        cuBQL::cuda::refit(native, reinterpret_cast<cuBQL::box3f*>(bvh.boxes), 0, cubql_get_mem_resource());
+        // refit on Warp's current stream, after the box update above and inside any ongoing graph capture
+        cuBQL::cuda::refit(
+            native, reinterpret_cast<cuBQL::box3f*>(bvh.boxes), static_cast<cudaStream_t>(wp_cuda_stream_get_current()),
+            cubql_get_mem_resource()
+        );
         return true;
     } catch (const std::exception& e) {
         wp::set_error_string("Warp error: cuBQL BVH refit failed: %s", e.what());
