@@ -119,7 +119,7 @@ Note: Strict and checked modes impact performance.
 """
 
 
-version: str = "1.14.0"
+version: str = "1.14.0+rocm.0"
 """Warp version string"""
 
 verify_fp: bool = False
