@@ -341,6 +341,16 @@ CUresult cuOccupancyMaxPotentialBlockSize_f(
     // HIP has no variant taking a block-size-to-shared-memory callback
     if (blockSizeToDynamicSMemSize)
         return hipErrorNotSupported;
+
+    // hipModuleOccupancyMaxPotentialBlockSize does not honour the kernel's own maximum block size
+    // (__launch_bounds__), so pass it as the limit
+    int max_threads = 0;
+    hipError_t result = hipFuncGetAttribute(&max_threads, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, func);
+    if (result != hipSuccess)
+        return result;
+    if (blockSizeLimit <= 0 || blockSizeLimit > max_threads)
+        blockSizeLimit = max_threads;
+
     return hipModuleOccupancyMaxPotentialBlockSize(minGridSize, blockSize, func, dynamicSMemSize, blockSizeLimit);
 }
 
