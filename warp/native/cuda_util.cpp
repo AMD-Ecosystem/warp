@@ -63,7 +63,8 @@ bool init_cuda_driver()
     hipError_t result = hipInit(0);
     if (result != hipSuccess) {
         fprintf(
-            stderr, "Warp CUDA warning: Could not initialize the HIP runtime (%s). GPU execution will not be available.\n",
+            stderr,
+            "Warp CUDA warning: Could not initialize the HIP runtime (%s). GPU execution will not be available.\n",
             hipGetErrorString(result)
         );
         return false;
@@ -389,10 +390,7 @@ CUresult cuGraphicsSubResourceGetMappedArray_f(
     return hipGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel);
 }
 
-CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource)
-{
-    return hipGraphicsUnregisterResource(resource);
-}
+CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource) { return hipGraphicsUnregisterResource(resource); }
 
 CUresult cuModuleGetGlobal_f(CUdeviceptr* dptr, size_t* bytes, CUmodule hmod, const char* name)
 {
@@ -419,7 +417,10 @@ CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int
     return hipErrorNotSupported;
 }
 
-CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event) { return hipIpcGetEventHandle(pHandle, event); }
+CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event)
+{
+    return hipIpcGetEventHandle(pHandle, event);
+}
 
 CUresult cuIpcOpenEventHandle_f(CUevent* phEvent, CUipcEventHandle handle)
 {
@@ -455,7 +456,10 @@ CUresult cuArray3DGetDescriptor_f(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUa
 
 CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy) { return hipMemcpyParam2D(pCopy); }
 
-CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream) { return hipMemcpyParam2DAsync(pCopy, hStream); }
+CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
+{
+    return hipMemcpyParam2DAsync(pCopy, hStream);
+}
 
 CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy) { return hipDrvMemcpy3D(pCopy); }
 

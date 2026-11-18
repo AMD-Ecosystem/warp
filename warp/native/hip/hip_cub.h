@@ -5,7 +5,6 @@
 #pragma once
 
 #include "../hip_compat.h"
-
 #include <hipcub/hipcub.hpp>
 
 namespace cub = hipcub;

@@ -5,5 +5,4 @@
 #pragma once
 
 #include "../hip_compat.h"
-
 #include <hip/hip_fp16.h>
