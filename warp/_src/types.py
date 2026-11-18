@@ -3732,7 +3732,8 @@ class array(Array[DType, NDim]):
             if self.device.is_cuda:
                 # validate stream argument
                 if stream is None:
-                    stream = 1  # legacy default stream
+                    # legacy default stream; DLPack numbers it 1 for CUDA and 0 for ROCm
+                    stream = 0 if self.device.is_hip else 1
                 elif not isinstance(stream, int) or stream < -1:
                     raise TypeError("DLPack stream must None or an integer >= -1")
 
@@ -3758,8 +3759,12 @@ class array(Array[DType, NDim]):
             raise RuntimeError("Array has no device assigned")
 
         if self.device.is_cuda:
+            if self.device.is_hip:
+                return (warp._src.dlpack.DLDeviceType.kDLROCM, self.device.ordinal)
             return (warp._src.dlpack.DLDeviceType.kDLCUDA, self.device.ordinal)
         elif self.pinned:
+            if warp._src.context.runtime.is_hip:
+                return (warp._src.dlpack.DLDeviceType.kDLROCMHost, 0)
             return (warp._src.dlpack.DLDeviceType.kDLCUDAHost, 0)
         else:
             return (warp._src.dlpack.DLDeviceType.kDLCPU, 0)

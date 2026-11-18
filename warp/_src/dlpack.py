@@ -106,7 +106,7 @@ def _device_to_dlpack(wp_device: warp._src.context.Device) -> DLDevice:
         dl_device.device_type = DLDeviceType.kDLCPU
         dl_device.device_id = 0
     elif wp_device.is_cuda:
-        dl_device.device_type = DLDeviceType.kDLCUDA
+        dl_device.device_type = DLDeviceType.kDLROCM if wp_device.is_hip else DLDeviceType.kDLCUDA
         dl_device.device_id = wp_device.ordinal
     else:
         raise RuntimeError(f"Invalid device type converting to DLPack: {wp_device}")
@@ -190,12 +190,9 @@ def dtype_from_dlpack(dl_dtype):
 def device_from_dlpack(dl_device):
     assert warp._src.context.runtime is not None, "Warp not initialized, call wp.init() before use"
 
-    if dl_device.device_type.value == DLDeviceType.kDLCPU or dl_device.device_type.value == DLDeviceType.kDLCUDAHost:
+    if dl_device.device_type.value in (DLDeviceType.kDLCPU, DLDeviceType.kDLCUDAHost, DLDeviceType.kDLROCMHost):
         return warp._src.context.runtime.cpu_device
-    elif (
-        dl_device.device_type.value == DLDeviceType.kDLCUDA
-        or dl_device.device_type.value == DLDeviceType.kDLCUDAManaged
-    ):
+    elif dl_device.device_type.value in (DLDeviceType.kDLCUDA, DLDeviceType.kDLCUDAManaged, DLDeviceType.kDLROCM):
         return warp._src.context.runtime.cuda_devices[dl_device.device_id]
     else:
         raise RuntimeError(f"Unknown device type from DLPack: {dl_device.device_type.value}")
@@ -248,7 +245,9 @@ def to_dlpack(wp_array: warp.array):
 
     if wp_array.pinned:
         dl_device = DLDevice()
-        dl_device.device_type = DLDeviceType.kDLCUDAHost
+        dl_device.device_type = (
+            DLDeviceType.kDLROCMHost if warp._src.context.runtime.is_hip else DLDeviceType.kDLCUDAHost
+        )
         dl_device.device_id = 0
     else:
         dl_device = _device_to_dlpack(wp_array.device)
@@ -340,7 +339,7 @@ def dtype_is_compatible(dl_dtype, wp_dtype):
 
 def _unpack_array(dlt: DLTensor, dtype=None):
     device = device_from_dlpack(dlt.device)
-    pinned = dlt.device.device_type.value == DLDeviceType.kDLCUDAHost
+    pinned = dlt.device.device_type.value in (DLDeviceType.kDLCUDAHost, DLDeviceType.kDLROCMHost)
     shape = tuple(dlt.shape[dim] for dim in range(dlt.ndim))
 
     # strides, if not contiguous
@@ -470,10 +469,15 @@ def from_dlpack(source, dtype=None, hint=None) -> warp.array | warp.Texture:
         elif device_type == DLDeviceType.kDLCPU:
             # No stream sync for CPU arrays.
             cuda_stream = None
+        elif device_type == DLDeviceType.kDLROCM:
+            # As above; DLPack numbers the null stream 0 for ROCm.
+            cuda_stream = warp.get_cuda_device(device_id).stream.cuda_stream or 0
         elif device_type == DLDeviceType.kDLCUDAHost:
             # For pinned memory, we sync with the current CUDA device's stream.
             # Note that we pass 1 for the null stream, per DLPack spec.
             cuda_stream = warp.get_cuda_device().stream.cuda_stream or 1
+        elif device_type == DLDeviceType.kDLROCMHost:
+            cuda_stream = warp.get_cuda_device().stream.cuda_stream or 0
         else:
             raise TypeError("Unsupported source device")
 
