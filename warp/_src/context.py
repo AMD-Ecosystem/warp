@@ -3875,6 +3875,8 @@ class Device:
             # CPU device
             self.name = platform.processor() or "CPU"
             self.arch = 0
+            self.arch_name = None
+            self.is_hip = False
             self.sm_count = 0
             self.max_shared_memory_per_block = 0
             self.is_uva = False
@@ -3899,6 +3901,10 @@ class Device:
             # CUDA device
             self.name = runtime.core.wp_cuda_device_get_name(ordinal).decode()
             self.arch = runtime.core.wp_cuda_device_get_arch(ordinal)
+            # AMD GPUs: the arch number is major * 10 + minor of the HIP compute capability, which can coincide
+            # with NVIDIA architecture numbers, so use the target name (e.g. "gfx942:sramecc+:xnack-") instead
+            self.is_hip = runtime.is_hip
+            self.arch_name = runtime.core.wp_cuda_device_get_arch_name(ordinal).decode() if self.is_hip else None
             self.sm_count = runtime.core.wp_cuda_device_get_sm_count(ordinal)
             self.max_shared_memory_per_block = runtime.core.wp_cuda_device_get_max_shared_memory(ordinal)
             self.is_uva = runtime.core.wp_cuda_device_is_uva(ordinal) > 0
@@ -5456,6 +5462,8 @@ class Runtime:
 
             self.core.wp_is_cuda_enabled.argtypes = None
             self.core.wp_is_cuda_enabled.restype = ctypes.c_int
+            self.core.wp_is_hip_enabled.argtypes = None
+            self.core.wp_is_hip_enabled.restype = ctypes.c_int
             self.core.wp_is_cuda_compatibility_enabled.argtypes = None
             self.core.wp_is_cuda_compatibility_enabled.restype = ctypes.c_int
             self.core.wp_is_mathdx_enabled.argtypes = None
@@ -5467,6 +5475,8 @@ class Runtime:
             self.core.wp_cuda_driver_version.restype = ctypes.c_int
             self.core.wp_cuda_toolkit_version.argtypes = None
             self.core.wp_cuda_toolkit_version.restype = ctypes.c_int
+            self.core.wp_hip_runtime_version.argtypes = None
+            self.core.wp_hip_runtime_version.restype = ctypes.c_int
             self.core.wp_cuda_driver_is_initialized.argtypes = None
             self.core.wp_cuda_driver_is_initialized.restype = ctypes.c_bool
 
@@ -5485,6 +5495,8 @@ class Runtime:
             self.core.wp_cuda_device_get_arch.restype = ctypes.c_int
             self.core.wp_cuda_device_get_sm_count.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_sm_count.restype = ctypes.c_int
+            self.core.wp_cuda_device_get_arch_name.argtypes = [ctypes.c_int]
+            self.core.wp_cuda_device_get_arch_name.restype = ctypes.c_char_p
             self.core.wp_cuda_device_get_max_shared_memory.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_max_shared_memory.restype = ctypes.c_int
             self.core.wp_cuda_device_is_uva.argtypes = [ctypes.c_int]
@@ -5998,10 +6010,13 @@ class Runtime:
 
         self.is_cuda_enabled = bool(self.core.wp_is_cuda_enabled())
         self.is_cuda_compatibility_enabled = bool(self.core.wp_is_cuda_compatibility_enabled())
+        # GPU support is HIP (AMD GPUs, which Warp exposes as CUDA devices) rather than CUDA
+        self.is_hip = self.is_cuda_enabled and bool(self.core.wp_is_hip_enabled())
 
         self.toolkit_version = None  # CTK version used to build the core lib
         self.driver_version = None  # installed driver version
         self.min_driver_version = None  # minimum required driver version
+        self.hip_version = None  # HIP version used to build the core lib (HIP builds only)
 
         self._pch_dirs: dict[int, tempfile.TemporaryDirectory] = {}
         self._pch_dirs_lock = threading.Lock()
@@ -6015,27 +6030,32 @@ class Runtime:
         cuda_device_count = 0
 
         if self.is_cuda_enabled:
-            # get CUDA Toolkit and driver versions
-            toolkit_version = self.core.wp_cuda_toolkit_version()
-            self.toolkit_version = (toolkit_version // 1000, (toolkit_version % 1000) // 10)
-
-            if self.core.wp_cuda_driver_is_initialized():
-                # save versions as tuples, e.g., (12, 4)
-                driver_version = self.core.wp_cuda_driver_version()
-                self.driver_version = (driver_version // 1000, (driver_version % 1000) // 10)
+            if self.is_hip:
+                # HIP builds have no CUDA Toolkit or CUDA driver version
+                hip_version = self.core.wp_hip_runtime_version()
+                self.hip_version = (hip_version // 10000000, (hip_version // 100000) % 100)
             else:
-                self.driver_version = None
+                # get CUDA Toolkit and driver versions
+                toolkit_version = self.core.wp_cuda_toolkit_version()
+                self.toolkit_version = (toolkit_version // 1000, (toolkit_version % 1000) // 10)
 
-            # determine minimum required driver version
-            if self.is_cuda_compatibility_enabled:
-                # we can rely on minor version compatibility, but 11.4 is the absolute minimum required from the driver
-                if self.toolkit_version[0] > 11:
-                    self.min_driver_version = (self.toolkit_version[0], 0)
+                if self.core.wp_cuda_driver_is_initialized():
+                    # save versions as tuples, e.g., (12, 4)
+                    driver_version = self.core.wp_cuda_driver_version()
+                    self.driver_version = (driver_version // 1000, (driver_version % 1000) // 10)
                 else:
-                    self.min_driver_version = (11, 4)
-            else:
-                # we can't rely on minor version compatibility, so the driver can't be older than the toolkit
-                self.min_driver_version = self.toolkit_version
+                    self.driver_version = None
+
+                # determine minimum required driver version
+                if self.is_cuda_compatibility_enabled:
+                    # we can rely on minor version compatibility, but 11.4 is the absolute minimum required from the driver
+                    if self.toolkit_version[0] > 11:
+                        self.min_driver_version = (self.toolkit_version[0], 0)
+                    else:
+                        self.min_driver_version = (11, 4)
+                else:
+                    # we can't rely on minor version compatibility, so the driver can't be older than the toolkit
+                    self.min_driver_version = self.toolkit_version
 
             # NVRTC is statically linked — arch query works without a driver
             num_archs = self.core.wp_nvrtc_supported_arch_count()
@@ -6044,8 +6064,12 @@ class Runtime:
                 self.core.wp_nvrtc_supported_archs(archs)
                 self.nvrtc_supported_archs = set(archs)
 
-            # device enumeration requires the CUDA driver
-            if self.driver_version is not None and self.driver_version >= self.min_driver_version:
+            # device enumeration requires the CUDA driver (or the HIP runtime)
+            if self.is_hip:
+                devices_available = self.core.wp_cuda_driver_is_initialized()
+            else:
+                devices_available = self.driver_version is not None and self.driver_version >= self.min_driver_version
+            if devices_available:
                 # get CUDA device count
                 cuda_device_count = self.core.wp_cuda_device_get_count()
 
@@ -6110,7 +6134,10 @@ class Runtime:
             if warp.config._git_commit_hash is not None:
                 greeting.append(f"   Git commit: {warp.config._git_commit_hash}")
 
-            if cuda_device_count > 0:
+            if cuda_device_count > 0 and self.is_hip:
+                # print HIP version info
+                greeting.append(f"   HIP {self.hip_version[0]}.{self.hip_version[1]}")
+            elif cuda_device_count > 0:
                 # print CUDA version info
                 greeting.append(
                     f"   CUDA Toolkit {self.toolkit_version[0]}.{self.toolkit_version[1]}, Driver {self.driver_version[0]}.{self.driver_version[1]}"
@@ -6120,6 +6147,10 @@ class Runtime:
                 if not self.is_cuda_enabled:
                     # Warp was compiled without CUDA support
                     greeting.append("   CUDA not enabled in this build")
+                elif self.is_hip:
+                    greeting.append(
+                        f"   HIP {self.hip_version[0]}.{self.hip_version[1]}, HIP runtime or AMD GPU devices not available"
+                    )
                 elif self.driver_version is None:
                     if self.nvrtc_supported_archs:
                         greeting.append(
@@ -6145,7 +6176,7 @@ class Runtime:
                 alias_str = f'"{cuda_device.alias}"'
                 if cuda_device.is_primary:
                     name_str = f'"{cuda_device.name}"'
-                    arch_str = f"sm_{cuda_device.arch}"
+                    arch_str = cuda_device.arch_name if cuda_device.is_hip else f"sm_{cuda_device.arch}"
                     mem_str = f"{cuda_device.total_memory / 1024 / 1024 / 1024:.0f} GiB"
                     if cuda_device.is_mempool_supported:
                         if cuda_device.is_mempool_enabled:
@@ -12194,6 +12225,8 @@ def print_diagnostics() -> dict:
 
     # CUDA & library info
     info["cuda_enabled"] = runtime.is_cuda_enabled
+    info["hip_enabled"] = runtime.is_hip
+    info["hip"] = _version_str(runtime.hip_version)
     info["cuda_toolkit"] = _version_str(runtime.toolkit_version)
     info["cuda_driver"] = _version_str(runtime.driver_version)
     info["nvrtc"] = _version_str(runtime.get_nvrtc_version())
@@ -12226,7 +12259,7 @@ def print_diagnostics() -> dict:
             {
                 "alias": cuda_device.alias,
                 "name": cuda_device.name,
-                "arch": f"sm_{cuda_device.arch}",
+                "arch": cuda_device.arch_name if cuda_device.is_hip else f"sm_{cuda_device.arch}",
                 "sm_count": cuda_device.sm_count,
                 "memory_gb": round(cuda_device.total_memory / (1024**3), 1),
                 "mempool_enabled": cuda_device.is_mempool_enabled if cuda_device.is_mempool_supported else False,
@@ -12266,15 +12299,22 @@ def print_diagnostics() -> dict:
     if "git_commit" in info:
         _field("Git commit:", info["git_commit"])
 
-    _section("CUDA")
-    _field("Enabled:", info["cuda_enabled"])
-    if info["cuda_toolkit"] is not None:
-        _field("Toolkit:", info["cuda_toolkit"])
-    if info["cuda_driver"] is not None:
-        _field("Driver:", info["cuda_driver"])
-    if info["nvrtc"] is not None:
-        _field("NVRTC:", info["nvrtc"])
-    _field("Forward compat:", info["cuda_compatibility"])
+    if info["hip_enabled"]:
+        _section("HIP")
+        _field("Enabled:", info["cuda_enabled"])
+        _field("HIP:", info["hip"])
+        if info["nvrtc"] is not None:
+            _field("hipRTC:", info["nvrtc"])
+    else:
+        _section("CUDA")
+        _field("Enabled:", info["cuda_enabled"])
+        if info["cuda_toolkit"] is not None:
+            _field("Toolkit:", info["cuda_toolkit"])
+        if info["cuda_driver"] is not None:
+            _field("Driver:", info["cuda_driver"])
+        if info["nvrtc"] is not None:
+            _field("NVRTC:", info["nvrtc"])
+        _field("Forward compat:", info["cuda_compatibility"])
 
     _section("Libraries")
     _field("MathDx:", info["libmathdx"] if info["mathdx_enabled"] and info["libmathdx"] else "not available")

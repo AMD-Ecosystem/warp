@@ -153,7 +153,10 @@ class TestDevices(unittest.TestCase):
         archs = wp.get_cuda_supported_archs()
         self.assertIsInstance(archs, list)
 
-        if wp.is_cuda_available():
+        if wp.is_cuda_available() and wp.get_cuda_device(0).is_hip:
+            # AMD GPUs are compiled for by target name, not by CUDA architecture number
+            self.assertEqual(archs, [])
+        elif wp.is_cuda_available():
             # With CUDA devices present, NVRTC must report architectures
             self.assertTrue(len(archs) > 0, "No CUDA supported architectures found")
 

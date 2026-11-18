@@ -107,7 +107,11 @@ class TestDiagnostics(unittest.TestCase):
             self.assertGreaterEqual(len(devices), 2, "CUDA available but no CUDA device in list")
             cuda_dev = devices[1]
             warp_dev = wp.get_device(cuda_dev["alias"])
-            self.assertRegex(cuda_dev["arch"], r"^sm_\d+$")
+            if warp_dev.is_hip:
+                # AMD target name with its feature flags, e.g. gfx942:sramecc+:xnack-
+                self.assertRegex(cuda_dev["arch"], r"^gfx[0-9a-f]+(:[a-z]+[+-])*$")
+            else:
+                self.assertRegex(cuda_dev["arch"], r"^sm_\d+$")
             self.assertIsInstance(cuda_dev["sm_count"], int)
             self.assertGreater(cuda_dev["sm_count"], 0)
             self.assertIsInstance(cuda_dev["memory_gb"], float)
