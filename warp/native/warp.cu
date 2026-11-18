@@ -3096,7 +3096,8 @@ void wp_cuda_ipc_get_event_handle(void* context, void* event, char* out_buffer)
 {
     ContextGuard guard(context);
 
-    CUipcEventHandle eventHandle;
+    // zeroed so that a failed query reads as an invalid (all-zero) handle
+    CUipcEventHandle eventHandle = {};
     check_cu(cuIpcGetEventHandle_f(&eventHandle, static_cast<CUevent>(event)));
     memcpy(out_buffer, eventHandle.reserved, CU_IPC_HANDLE_SIZE);
 }
