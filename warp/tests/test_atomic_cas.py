@@ -269,7 +269,8 @@ def test_atomic_cas_4d(test, device, dtype, register_kernels=False):
     assert_np_equal(counter_np, expected)
 
 
-devices = get_test_devices()
+# every thread of the launch takes the same spin lock
+devices = get_test_devices_with_independent_thread_scheduling()
 
 
 class TestAtomicCAS(unittest.TestCase):

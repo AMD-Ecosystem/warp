@@ -138,7 +138,8 @@ class TestClangCUDA(unittest.TestCase):
         wp.config.llvm_cuda = cls._saved_llvm_cuda
 
 
-devices = get_selected_cuda_test_devices()
+# the bundled Clang/LLVM compiles for NVIDIA GPUs (NVPTX) only
+devices = [d for d in get_selected_cuda_test_devices() if not d.is_hip]
 add_function_test(TestClangCUDA, "test_trivial_kernel", test_trivial_kernel, devices=devices)
 add_function_test(TestClangCUDA, "test_math_kernel", test_math_kernel, devices=devices)
 add_function_test(TestClangCUDA, "test_vec_kernel", test_vec_kernel, devices=devices)
@@ -146,6 +147,34 @@ add_function_test(TestClangCUDA, "test_conditional_kernel", test_conditional_ker
 bf16_devices = [d for d in devices if d.arch >= 80]
 add_function_test(TestClangCUDA, "test_bf16_round_trip", test_bf16_round_trip, devices=bf16_devices)
 add_function_test(TestClangCUDA, "test_bf16_arithmetic", test_bf16_arithmetic, devices=bf16_devices)
+
+
+def test_llvm_cuda_unsupported(test, device):
+    saved_llvm_cuda = wp.config.llvm_cuda
+    wp.config.llvm_cuda = True
+    try:
+
+        @wp.kernel(module="unique")
+        def llvm_cuda_unsupported_kernel(out: wp.array(dtype=float)):
+            out[wp.tid()] = 1.0
+
+        out = wp.zeros(1, dtype=float, device=device)
+        with test.assertRaisesRegex(RuntimeError, "not supported on AMD GPUs"):
+            wp.launch(llvm_cuda_unsupported_kernel, dim=1, inputs=[out], device=device)
+    finally:
+        wp.config.llvm_cuda = saved_llvm_cuda
+
+
+class TestClangCUDAUnsupported(unittest.TestCase):
+    pass
+
+
+add_function_test(
+    TestClangCUDAUnsupported,
+    "test_llvm_cuda_unsupported",
+    test_llvm_cuda_unsupported,
+    devices=[d for d in get_selected_cuda_test_devices() if d.is_hip],
+)
 
 
 if __name__ == "__main__":

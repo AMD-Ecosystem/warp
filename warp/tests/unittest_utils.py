@@ -166,6 +166,26 @@ def get_test_devices_with_mempool(mode: str | None = None):
     return [d for d in get_test_devices(mode) if not d.is_cuda or d.is_mempool_supported]
 
 
+def is_independent_thread_scheduling_supported(device) -> bool:
+    """Return whether threads of one warp make independent forward progress on the device.
+
+    NVIDIA GPUs supported by Warp schedule the threads of a warp independently, so a thread
+    can spin on a lock held by another thread of its own warp. AMD GPUs give no such
+    guarantee within a wavefront: such a spin loop can hang. CPU devices run one thread at
+    a time and pass.
+    """
+    return not device.is_cuda or not device.is_hip
+
+
+def get_test_devices_with_independent_thread_scheduling(mode: str | None = None):
+    """Like :func:`get_test_devices`, but drops GPUs without independent thread scheduling within a warp.
+
+    Use this getter for tests whose kernels let threads of the same warp wait on each other,
+    such as a spin lock taken by every thread of a launch.
+    """
+    return [d for d in get_test_devices(mode) if is_independent_thread_scheduling_supported(d)]
+
+
 def is_cuda_graph_module_load_supported(device) -> bool:
     """Return whether modules can be loaded during CUDA graph capture."""
     driver_version = wp.get_cuda_driver_version()

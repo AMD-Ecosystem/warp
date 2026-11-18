@@ -437,6 +437,30 @@ def test_return_struct_unsupported(test, device):
         wp.launch(kernel, dim=1, inputs=[x, y], device=device)
 
 
+def test_cuda_arch_device_branch(test, device):
+    # snippets commonly select device-only intrinsics with `#if defined(__CUDA_ARCH__)`
+    snippet = """
+#if defined(__CUDA_ARCH__)
+    out[tid] = nextafterf(1.0f, 2.0f);
+#else
+    out[tid] = -1.0f;
+#endif
+    """
+
+    @wp.func_native(snippet)
+    def next_after_one(out: wp.array(dtype=wp.float32), tid: int): ...
+
+    @wp.kernel(module="unique")
+    def next_after_one_kernel(out: wp.array(dtype=wp.float32)):
+        tid = wp.tid()
+        next_after_one(out, tid)
+
+    out = wp.zeros(8, dtype=wp.float32, device=device)
+    wp.launch(next_after_one_kernel, dim=8, inputs=[out], device=device)
+    expected = np.full(8, np.nextafter(np.float32(1.0), np.float32(2.0)), dtype=np.float32)
+    assert_np_equal(out.numpy(), expected)
+
+
 class TestSnippets(unittest.TestCase):
     pass
 
@@ -444,6 +468,9 @@ class TestSnippets(unittest.TestCase):
 add_function_test(TestSnippets, "test_basic", test_basic, devices=get_selected_cuda_test_devices())
 add_function_test(TestSnippets, "test_shared_memory", test_shared_memory, devices=get_selected_cuda_test_devices())
 add_function_test(TestSnippets, "test_cpu_snippet", test_cpu_snippet, devices=["cpu"])
+add_function_test(
+    TestSnippets, "test_cuda_arch_device_branch", test_cuda_arch_device_branch, devices=get_selected_cuda_test_devices()
+)
 add_function_test(
     TestSnippets, "test_custom_replay_grad", test_custom_replay_grad, devices=get_selected_cuda_test_devices()
 )

@@ -790,7 +790,10 @@ def test_gradient_slice_3d_1d(test, device):
                 [0, 0, 0],
             ],
         ]
-        assert_np_equal(a.grad.numpy(), np.array(expected_grad))
+        # the adjoint of x**2.0 is 2.0 * pow(x, 1.0); the ROCm device powf is accurate to 1 ulp but not exact
+        # for these integers (pow(19, 1) = 18.999998), where CUDA's happens to be
+        tol = 1.0e-5 if device.is_hip else 0.0
+        assert_np_equal(a.grad.numpy(), np.array(expected_grad), tol=tol)
 
 
 def test_gradient_slice_3d_2d(test, device):
