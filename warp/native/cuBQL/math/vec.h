@@ -7,7 +7,7 @@
 #include <type_traits>
 #include <limits>
 #include "constants.h"
-#ifdef __CUDACC__
+#if defined(__CUDACC__) && !defined(CUDART_INF)
 # include <cuda.h>
 #endif
 
@@ -19,10 +19,10 @@
 
 namespace cuBQL {
 
-#ifndef __CUDACC__
-  using std::min;
-  using std::max;
-#endif
+// #ifndef __CUDA_ARCH__
+//   using std::min;
+//   using std::max;
+// #endif
 
 #ifndef CUBQL_SUPPORT_CUDA_VECTOR_TYPES
 #define CUBQL_SUPPORT_CUDA_VECTOR_TYPES 0
@@ -46,7 +46,8 @@ namespace cuBQL {
     equivalent, let's also create a 'invalid_t' to be used by
     default */
 
-#ifndef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#else
   struct float2 { float x, y; };
   struct float3 { float x, y, z; };
   struct CUBQL_ALIGN(16) float4 { float x, y, z, w; };
@@ -492,18 +493,21 @@ namespace cuBQL {
   { return vec_t<uint64_t,4>( v.x >> b, v.y >> b, v.z >> b, v.w >> b ); }
   
   inline __cubql_both double abs(double d) {
-#ifdef __CUDA_ARCH__
+// #ifdef __CUDA_ARCH__
     return ::abs(d);
-#else
-    return std::abs(d);
-#endif
+// #else
+//     return std::abs(d);
+// #endif
   }
   inline __cubql_both float abs(float d) {
-#ifdef __CUDA_ARCH__
-    return ::abs(d);
+#if defined(__CUDA_ARCH__) || defined(__CUDACC__)
+    return abs(d);
 #else
     return std::abs(d);
 #endif
+// #else
+//     return std::abs(d);
+// #endif
   }
   // inline __cubql_both double abs(double d) { return absf(d); }
   
@@ -711,7 +715,8 @@ namespace cuBQL {
 
   template<typename T, int N>
   inline __cubql_both
-  vec_t<T,N> normalize(vec_t<T,N> v) { return v * (T(1)/sqrt(dot(v,v))); }
+  vec_t<T,N> normalize(vec_t<T,N> v) { return v * (T(1)/::sqrt(dot(v,v))); }
+  // vec_t<T,N> normalize(vec_t<T,N> v) { return v * (T(1)/sqrt(dot(v,v))); }
 
 
   // ------------------------------------------------------------------

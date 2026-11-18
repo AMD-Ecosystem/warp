@@ -46,6 +46,7 @@ namespace cuBQL {
     DeviceMemoryResource()
     {}
     void malloc(void** ptr, size_t size, cudaStream_t s) override {
+      CUBQL_CUDA_CALL(StreamSynchronize(s));
       CUBQL_CUDA_CALL(Malloc(ptr, size));
     }
     void free(void* ptr, cudaStream_t s) override
