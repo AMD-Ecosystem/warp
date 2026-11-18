@@ -10,8 +10,6 @@ on:
         required: false
   workflow_dispatch:
   push:
-    tags:
-      - v*
     branches:
       - main
       - release-*
