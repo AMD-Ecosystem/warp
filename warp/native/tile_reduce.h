@@ -168,7 +168,7 @@ block_combine_thread_results(T thread_sum, bool thread_has_data, Op f, T* partia
     bool warp_is_active = mask != 0;
 
     // warp reduction
-    T warp_sum;
+    T warp_sum {};
     if (thread_has_data)
         warp_sum = warp_reduce(thread_sum, f, mask);
 
@@ -182,7 +182,7 @@ block_combine_thread_results(T thread_sum, bool thread_has_data, Op f, T* partia
     WP_TILE_SYNC();
 
     // thread 0 performs final reduction across active warps
-    T block_sum;
+    T block_sum {};
     if (threadIdx.x == 0) {
         block_sum = partials[0];
 
@@ -221,7 +221,7 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
     }
 
     // step 2: combine thread results across block
-    T block_sum;
+    T block_sum {};
     if constexpr (warp_count == 1) {
         // fast path: single warp, just do warp reduction
         unsigned int mask = __ballot_sync(0xFFFFFFFF, thread_has_data);
@@ -372,7 +372,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
             }
 
             // step 2: combine thread results across block
-            T block_sum;
+            T block_sum {};
             if constexpr (warp_count == 1) {
                 // fast path: single warp, just do warp reduction
                 unsigned int mask = __ballot_sync(0xFFFFFFFF, thread_has_data);
@@ -451,7 +451,7 @@ CUDA_CALLABLE_DEVICE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
 
     // warp reduction (only threads with valid data may participate,
     // because __shfl_down_sync requires all executing threads to be in the mask)
-    ValueAndIndex<T> warp_sum;
+    ValueAndIndex<T> warp_sum {};
     if (thread_has_data)
         warp_sum = warp_reduce_tracked(thread_sum, champion_index, f, track, mask);
 
