@@ -151,8 +151,8 @@ inline CUDA_CALLABLE void bitonic_sort_single_stage_full_thread_block(
 template <typename K, typename V>
 inline CUDA_CALLABLE void bitonic_sort_single_stage_full_warp(int k, unsigned int thread_id, int stride, K& key, V& val)
 {
-    auto s_key = __shfl_xor_sync(0xFFFFFFFFu, key, stride);
-    auto s_val = __shfl_xor_sync(0xFFFFFFFFu, val, stride);
+    auto s_key = __shfl_xor_sync(WP_TILE_FULL_MASK, key, stride);
+    auto s_val = __shfl_xor_sync(WP_TILE_FULL_MASK, val, stride);
     auto swap = (((thread_id & stride) != 0 ? key > s_key : key < s_key)) ^ ((thread_id & k) == 0);
     key = swap ? s_key : key;
     val = swap ? s_val : val;
@@ -297,10 +297,10 @@ bitonic_sort_thread_block_shared_mem(int thread_id, K* keys_input, V* values_inp
 
         constexpr int shared_mem_count = next_higher_pow2(max_num_elements);
 
-        __shared__ K keys_shared_mem[shared_mem_count];  // TODO: This shared memory can be avoided if keys_input is
-                                                         // already shared memory
-        __shared__ V values_shared_mem[shared_mem_count];  // TODO: This shared memory can be avoided if values_input is
-                                                           // already shared memory
+        WP_TILE_SHARED_ARRAY(K, keys_shared_mem, shared_mem_count);  // TODO: This shared memory can be avoided if
+                                                                     // keys_input is already shared memory
+        WP_TILE_SHARED_ARRAY(V, values_shared_mem, shared_mem_count);  // TODO: This shared memory can be avoided if
+                                                                       // values_input is already shared memory
 
         for (int i = thread_id; i < shared_mem_count; i += WP_TILE_BLOCK_DIM) {
             if (i < num_elements_to_sort) {
@@ -454,10 +454,19 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 
 // End bitonic sort
 
+// The radix sort works on groups of 32 threads, also on 64-wide AMD wavefronts, which hold two groups.
+#define WP_TILE_RADIX_SORT_GROUP_SIZE 32
+
 inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t ballot_mask)
 {
+#if defined(__HIP_DEVICE_COMPILE__)
+    // this thread's 32-lane group of the wavefront-wide ballot
+    unsigned int group_mask = static_cast<unsigned int>(ballot_mask >> (__lane_id() & 32));
+    return __popc(group_mask & (0xFFFFFFFFu >> (31 - lane)));
+#else
     uint32_t mask = ((1u << (lane + 1)) - 1);
     return __popc(ballot_mask & mask);
+#endif
 }
 
 inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t mask, bool thread_contributes_element)
@@ -470,7 +479,7 @@ template <typename T> inline CUDA_CALLABLE T warp_scan_inclusive(int lane, T val
 // Computes an inclusive cumulative sum
 #pragma unroll
     for (int i = 1; i <= 32; i *= 2) {
-        auto n = __shfl_up_sync(0xffffffffu, value, i, 32);
+        auto n = __shfl_up_sync(WP_TILE_FULL_MASK, value, i, 32);
 
         if (lane >= i)
             value = value + n;
@@ -528,7 +537,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, WP_TILE_FULL_MASK, contributes);
 
                 if (lane_id == 31)
                     shared_mem[warp_id][b] = sum_per_warp;
@@ -609,7 +618,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, WP_TILE_FULL_MASK, contributes);
                 if (lane_id == 31)
                     shared_mem[warp_id][b] = sum_per_warp;
 
@@ -630,7 +639,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
                 }
 
                 int warp_offset = __shfl_sync(
-                    0xFFFFFFFF, inclusive_scan - f, warp_id
+                    WP_TILE_FULL_MASK, inclusive_scan - f, warp_id, WP_TILE_RADIX_SORT_GROUP_SIZE
                 );  //-f because warp_offset needs to be an exclusive scan
 
                 bool contributes = digit == b;
@@ -753,10 +762,11 @@ template <typename TileK, typename TileV> CUDA_CALLABLE_DEVICE void tile_sort(Ti
                 WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort
             );
     } else {
-        __shared__ T keys_tmp[num_elements_to_sort];
-        __shared__ V values_tmp[num_elements_to_sort];
+        WP_TILE_SHARED_ARRAY(T, keys_tmp, num_elements_to_sort);
+        WP_TILE_SHARED_ARRAY(V, values_tmp, num_elements_to_sort);
 
-        constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
+        constexpr int warp_count
+            = (WP_TILE_BLOCK_DIM + WP_TILE_RADIX_SORT_GROUP_SIZE - 1) / WP_TILE_RADIX_SORT_GROUP_SIZE;
 
         radix_sort_thread_block<warp_count, WP_TILE_BLOCK_DIM, V>(
             WP_TILE_THREAD_IDX, keys, keys_tmp, values, values_tmp, num_elements_to_sort
@@ -788,10 +798,11 @@ CUDA_CALLABLE_DEVICE void tile_sort(TileK& t, TileV& t2, int start, int length)
             );
     } else {
         if constexpr (max_elements_to_sort > BITONIC_SORT_THRESHOLD) {
-            __shared__ T keys_tmp[max_elements_to_sort];
-            __shared__ V values_tmp[max_elements_to_sort];
+            WP_TILE_SHARED_ARRAY(T, keys_tmp, max_elements_to_sort);
+            WP_TILE_SHARED_ARRAY(V, values_tmp, max_elements_to_sort);
 
-            constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
+            constexpr int warp_count
+                = (WP_TILE_BLOCK_DIM + WP_TILE_RADIX_SORT_GROUP_SIZE - 1) / WP_TILE_RADIX_SORT_GROUP_SIZE;
 
             radix_sort_thread_block<warp_count, WP_TILE_BLOCK_DIM, V>(
                 WP_TILE_THREAD_IDX, keys, keys_tmp, values, values_tmp, num_elements_to_sort

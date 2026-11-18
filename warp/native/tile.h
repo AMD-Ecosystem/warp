@@ -31,6 +31,20 @@ struct alignas(16) float4 {
 };
 #endif
 
+// __shared__ variables and arrays of a possibly non-trivial type: nvcc leaves them unconstructed, while Clang
+// rejects their implicit initialization in HIP device code, so there they are declared as raw storage
+#if defined(__HIP_DEVICE_COMPILE__)
+#define WP_TILE_SHARED_ARRAY(T, name, count) \
+    __shared__ alignas(T) unsigned char name##_storage_[sizeof(T) * (count)]; \
+    T* const name = reinterpret_cast<T*>(name##_storage_)
+#define WP_TILE_SHARED_VAR(T, name) \
+    __shared__ alignas(T) unsigned char name##_storage_[sizeof(T)]; \
+    T& name = *reinterpret_cast<T*>(name##_storage_)
+#else
+#define WP_TILE_SHARED_ARRAY(T, name, count) __shared__ T name[count]
+#define WP_TILE_SHARED_VAR(T, name) __shared__ T name
+#endif
+
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define WP_TILE_SYNC __syncthreads
 #else
@@ -929,7 +943,7 @@ template <typename T, typename L> struct tile_register_t {
         const int reg = Layout::register_from_linear(linear);
 
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-        __shared__ Type scratch;
+        WP_TILE_SHARED_VAR(Type, scratch);
 #else
         Type scratch;
 #endif
@@ -2184,7 +2198,7 @@ template <typename T, typename L> CUDA_CALLABLE void tile_register_t<T, L>::prin
     // create a temporary shared tile so that
     // we can print it deterministically
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    __shared__ T smem[L::Size];
+    WP_TILE_SHARED_ARRAY(T, smem, L::Size);
 #else
     T smem[L::Size];
 #endif
@@ -2538,7 +2552,7 @@ template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_from_thr
     assert(thread_idx >= 0 && thread_idx < blockDim.x);
 
     // Use a single shared memory element for the broadcast
-    __shared__ T scratch;
+    WP_TILE_SHARED_VAR(T, scratch);
 
     // Sync before writing to scratch (in case it was used by a previous operation)
     WP_TILE_SYNC();

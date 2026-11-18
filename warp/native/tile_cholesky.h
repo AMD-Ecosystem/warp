@@ -161,8 +161,8 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut&
     auto idx = [](int row, int col) { return Upper ? tile_coord(col, row) : tile_coord(row, col); };
 
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    __shared__ T W1[n * n];
-    __shared__ T W2[n * n];
+    WP_TILE_SHARED_ARRAY(T, W1, n * n);
+    WP_TILE_SHARED_ARRAY(T, W2, n * n);
 #else
     T W1[n * n];
     T W2[n * n];
@@ -340,8 +340,8 @@ adj_tile_cholesky_impl(BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileOut& 
         WP_TILE_SYNC();
         partitioned_gemm::cooperative_scalar_cholesky_adj<Upper>(adj_A, adj_Out, Out);
     } else {
-        __shared__ T W1[n * n];
-        __shared__ T W2[n * n];
+        WP_TILE_SHARED_ARRAY(T, W1, n * n);
+        WP_TILE_SHARED_ARRAY(T, W2, n * n);
 
         T alpha_one = T(1);
         T beta_zero = T(0);
