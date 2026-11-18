@@ -135,7 +135,8 @@ def test_compile_kernel_with_suffix_f(test, device):
     np.testing.assert_allclose(b.numpy(), np.ones(n))
 
 
-devices = get_selected_cuda_test_devices("basic")
+# architecture suffixes select NVIDIA feature sets; AMD GPUs compile for their target name instead
+devices = [d for d in get_selected_cuda_test_devices("basic") if not d.is_hip]
 
 
 class TestCudaArchSuffix(unittest.TestCase):
