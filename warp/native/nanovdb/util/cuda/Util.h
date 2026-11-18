@@ -236,7 +236,7 @@ inline cudaError_t memPrefetchAsync(const void* devPtr, size_t count, int dstDev
 }
 #endif
 
-#if defined(__CUDACC__)// the following functions only run on the GPU!
+#if defined(__CUDACC__) || defined(__HIP__)// the following functions only run on the GPU!
 
 /// @brief Cuda kernel that launches device lambda functions
 /// @param numItems Problem size
@@ -316,7 +316,7 @@ void dynamicSharedMemoryLauncher(const size_t numItems, const size_t smem_size, 
 
 }// namespace nanovdb ===============================================================
 
-#if defined(__CUDACC__)// the following functions only run on the GPU!
+#if defined(__CUDACC__) || defined(__HIP__)// the following functions only run on the GPU!
 template<typename Func, typename... Args>
 [[deprecated("Use nanovdb::cuda::lambdaKernel instead")]]
 __global__ void cudaLambdaKernel(const size_t numItems, Func func, Args... args)

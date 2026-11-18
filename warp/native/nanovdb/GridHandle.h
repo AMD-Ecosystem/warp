@@ -526,7 +526,7 @@ mergeGrids(const VectorT<GridHandle<BufferT>> &handles, const BufferT* pool = nu
 
 } // namespace nanovdb
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIP__)
 #include <nanovdb/cuda/GridHandle.cuh>
 #endif// defined(__CUDACC__)
 
