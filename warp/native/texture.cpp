@@ -210,7 +210,7 @@ bool wp_texture_copy_device(
     if (dst_memory_type == CU_MEMORYTYPE_HOST) {
         copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
     } else if (dst_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.dstDevice = static_cast<CUdeviceptr>(dst_handle);
+        copy_params.dstDevice = (CUdeviceptr)dst_handle;
     } else if (dst_memory_type == CU_MEMORYTYPE_ARRAY) {
         copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
     } else {
@@ -224,7 +224,7 @@ bool wp_texture_copy_device(
     if (src_memory_type == CU_MEMORYTYPE_HOST) {
         copy_params.srcHost = reinterpret_cast<void*>(src_handle);
     } else if (src_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.srcDevice = static_cast<CUdeviceptr>(src_handle);
+        copy_params.srcDevice = (CUdeviceptr)src_handle;
     } else if (src_memory_type == CU_MEMORYTYPE_ARRAY) {
         copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
     } else {
@@ -353,7 +353,7 @@ uint64_t wp_texture_object_create_device(
     CUtexObject tex_object = 0;
     check_cu(cuTexObjectCreate_f(&tex_object, &res_desc, &tex_desc, nullptr));
 
-    return tex_object;
+    return (uint64_t)tex_object;
 }
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
@@ -376,7 +376,7 @@ uint64_t wp_surface_object_create_device(void* context, uint64_t array_handle)
     cudaSurfaceObject_t surface = 0;
     check_cuda(cudaCreateSurfaceObject(&surface, &desc));
 
-    return static_cast<uint64_t>(surface);
+    return (uint64_t)surface;
 }
 
 void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
@@ -385,7 +385,7 @@ void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
         return;
 
     ContextGuard guard(context);
-    check_cuda(cudaDestroySurfaceObject(static_cast<cudaSurfaceObject_t>(surface_handle)));
+    check_cuda(cudaDestroySurfaceObject((cudaSurfaceObject_t)surface_handle));
 }
 
 #else  // WP_ENABLE_CUDA

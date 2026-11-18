@@ -120,6 +120,40 @@ def find_cuda_sdk() -> str | None:
     return None
 
 
+def find_rocm_sdk() -> str | None:
+    # check environment variables
+    env_names = ["WARP_ROCM_PATH", "ROCM_PATH"]
+    if platform.system() == "Windows":
+        env_names.append("HIP_PATH")
+    for env in env_names:
+        rocm_sdk = os.environ.get(env)
+        if rocm_sdk is not None:
+            print(f"Using ROCm path '{rocm_sdk}' provided through the '{env}' environment variable")
+            return rocm_sdk
+
+    # ROCm Python packages (rocm[devel]) installed in the current environment
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "rocm_sdk", "path", "--root"], capture_output=True, text=True, check=False
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            rocm_sdk = result.stdout.strip()
+            if os.path.exists(os.path.join(rocm_sdk, "include", "hip", "hip_runtime.h")):
+                print(f"Using ROCm path '{rocm_sdk}' found through 'rocm-sdk path --root'")
+                return rocm_sdk
+    except OSError:
+        pass
+
+    # check default paths
+    if platform.system() != "Windows":
+        opt_rocm = "/opt/rocm"
+        if os.path.exists(os.path.join(opt_rocm, "include", "hip", "hip_runtime.h")):
+            print(f"Using ROCm path '{opt_rocm}' found at default path")
+            return opt_rocm
+
+    return None
+
+
 def validate_libmathdx_path(libmathdx_path: str) -> bool:
     """Validate that libmathdx path exists and has required directory structure.
 
@@ -287,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to CUDA Toolkit installation (auto-detected via WARP_CUDA_PATH, CUDA_HOME, CUDA_PATH, or nvcc)",
     )
     group_toolchain.add_argument(
+        "--rocm-path",
+        type=str,
+        help="Path to ROCm installation for an AMD GPU build (auto-detected via WARP_ROCM_PATH, ROCM_PATH, rocm-sdk, or /opt/rocm)",
+    )
+    group_toolchain.add_argument(
         "--libmathdx-path",
         type=str,
         help="Path to NVIDIA libmathdx installation (optional if LIBMATHDX_HOME is set)",
@@ -299,6 +338,12 @@ def main(argv: list[str] | None = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Build with CUDA support (auto-detects CUDA Toolkit). Use --no-cuda for a CPU-only build",
+    )
+    group_build.add_argument(
+        "--hip-arch",
+        type=str,
+        default=None,
+        help="Comma-separated AMD GPU targets for an AMD GPU build (e.g. gfx942,gfx1100). Defaults to every target supported by the ROCm installation",
     )
     group_build.add_argument(
         "--clang-build-toolchain",
@@ -395,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.cuda_path:
             print("Error: --no-cuda and --cuda-path are mutually exclusive.")
             return 1
+        if args.rocm_path:
+            print("Error: --no-cuda and --rocm-path are mutually exclusive.")
+            return 1
         if args.clang_build_toolchain:
             print("Error: --clang-build-toolchain requires CUDA (incompatible with --no-cuda).")
             return 1
@@ -433,23 +481,65 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Warp build error: {e}")
             return 1
 
-    # setup CUDA Toolkit path
+    if args.cuda_path and args.rocm_path:
+        print("Error: --cuda-path and --rocm-path are mutually exclusive.")
+        print("  Use --cuda-path for an NVIDIA GPU build or --rocm-path for an AMD GPU build")
+        return 1
+
+    # setup CUDA Toolkit or ROCm path
     if platform.system() == "Darwin" or not args.cuda:
         if not args.cuda:
             print("CUDA support disabled (--no-cuda)")
         args.cuda_path = None
+        args.rocm_path = None
         args.libmathdx_path = None
     else:
-        if not args.cuda_path:
-            args.cuda_path = find_cuda_sdk()
+        if not args.cuda_path and not args.rocm_path:
+            cuda_path = find_cuda_sdk()
+            rocm_path = find_rocm_sdk()
+            if cuda_path and rocm_path:
+                print("Error: Found both a CUDA Toolkit and a ROCm installation:")
+                print(f"  CUDA Toolkit: {cuda_path}")
+                print(f"  ROCm: {rocm_path}")
+                print("  Select one with --cuda-path for an NVIDIA GPU build or --rocm-path for an AMD GPU build")
+                return 1
+            args.cuda_path = cuda_path
+            args.rocm_path = rocm_path
 
-        # libmathdx needs to be used with a build of Warp that supports CUDA
-        if args.use_libmathdx:
+        if args.rocm_path:
+            # AMD GPU build: the ROCm path takes the place of the CUDA Toolkit path in the
+            # native build, and the NVIDIA-only options do not apply.
+            if args.clang_build_toolchain:
+                print("Error: --clang-build-toolchain is not supported with ROCm (--rocm-path).")
+                return 1
+            if args.use_dynamic_cuda:
+                print("Error: --use-dynamic-cuda is not supported with ROCm (--rocm-path).")
+                return 1
+            if not os.path.exists(os.path.join(args.rocm_path, "include", "hip", "hip_runtime.h")):
+                print(f"Error: ROCm installation not found at '{args.rocm_path}' (missing include/hip/hip_runtime.h)")
+                return 1
+            if args.libmathdx_path:
+                print("Error: --libmathdx-path is not supported with ROCm (--rocm-path); libmathdx is NVIDIA-only.")
+                return 1
+            if args.use_libmathdx:
+                print("libmathdx is NVIDIA-only; building tile operations with Warp's built-in GPU implementations")
+            args.use_libmathdx = False
+            args.hip_arch = build_dll.get_hip_architectures(args.rocm_path, args.hip_arch)
+            if not args.hip_arch:
+                print("Error: Could not determine the AMD GPU targets to build for; pass them with --hip-arch")
+                return 1
+            print(f"Building for AMD GPU targets: {','.join(args.hip_arch)}")
+        elif args.use_libmathdx:
+            # libmathdx needs to be used with a build of Warp that supports CUDA
             if not args.libmathdx_path and args.cuda_path:
                 major, _ = build_dll.get_cuda_toolkit_version(args.cuda_path)
                 args.libmathdx_path = find_libmathdx(major, base_path)
         else:
             args.libmathdx_path = None
+
+    if args.hip_arch and not args.rocm_path:
+        print("Error: --hip-arch requires a ROCm build (--rocm-path or an auto-detected ROCm installation).")
+        return 1
 
     # Validate libmathdx path (from any source: CLI, environment, or Packman)
     if args.libmathdx_path:
@@ -518,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 
-        if args.cuda_path is None:
+        if args.cuda_path is None and args.rocm_path is None:
             if args.cuda:
                 print("Warning: CUDA toolchain not found, building without CUDA support")
             warp_cu_paths = None

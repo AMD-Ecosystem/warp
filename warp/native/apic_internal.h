@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #include <cudaTypedefs.h>
 #endif
 
@@ -79,7 +79,7 @@ struct APICModule {
     std::string module_name;
     std::string cubin_filename;
     int target_arch = 0;
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     CUmodule cuda_module = nullptr;  // Set after loading
 #else
     void* cuda_module = nullptr;  // CUmodule, opaque on non-CUDA compilers
@@ -205,7 +205,7 @@ struct APICGraph {
 
     std::unordered_map<std::string, APICCPUKernel> cpu_kernels;
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     CUgraph cuda_graph = nullptr;
     CUgraphExec cuda_graph_exec = nullptr;
 #else

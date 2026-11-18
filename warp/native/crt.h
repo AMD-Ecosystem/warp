@@ -16,7 +16,7 @@
 //   standard C library headers, and it avoids mismatched redefinitions.
 
 #ifndef WP_API
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 #if defined(_WIN32)
 #define WP_API __declspec(dllexport)
 #else
@@ -27,7 +27,7 @@
 #endif
 #endif  // WP_API
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 
 // Helper for implementing assert() macro
 extern "C" WP_API void _wp_assert(const char* message, const char* file, unsigned int line);

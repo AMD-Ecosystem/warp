@@ -150,6 +150,12 @@ int wp_is_error_output_enabled() { return int(wp::is_error_output_enabled()); }
 
 int wp_is_cuda_enabled() { return int(WP_ENABLE_CUDA); }
 
+#if WP_ENABLE_HIP
+int wp_is_hip_enabled() { return 1; }
+#else
+int wp_is_hip_enabled() { return 0; }
+#endif
+
 int wp_is_cuda_compatibility_enabled() { return int(WP_ENABLE_CUDA_COMPATIBILITY); }
 
 int wp_is_mathdx_enabled() { return int(WP_ENABLE_MATHDX); }
@@ -995,6 +1001,7 @@ void wp_array_fill_device(void* context, void* arr, int arr_type, const void* va
 
 WP_API int wp_cuda_driver_version() { return 0; }
 WP_API int wp_cuda_toolkit_version() { return 0; }
+WP_API int wp_hip_runtime_version() { return 0; }
 
 WP_API bool wp_cuda_driver_is_initialized() { return false; }
 
@@ -1006,6 +1013,8 @@ WP_API void* wp_cuda_device_get_primary_context(int ordinal) { return NULL; }
 WP_API const char* wp_cuda_device_get_name(int ordinal) { return NULL; }
 WP_API int wp_cuda_device_get_arch(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_sm_count(int ordinal) { return 0; }
+WP_API const char* wp_cuda_device_get_arch_name(int ordinal) { return ""; }
+WP_API int wp_cuda_device_get_warp_size(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal) { return 0; }
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]) { }
 WP_API int wp_cuda_device_get_pci_domain_id(int ordinal) { return -1; }

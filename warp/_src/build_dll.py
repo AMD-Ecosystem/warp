@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import functools
+import json
 import os
 import pathlib
 import platform
@@ -233,6 +234,52 @@ def find_nvcc_executable(cuda_home) -> str:
             print("Warning: nvcc not found in PATH or cuda_home, compilation will likely fail")
 
     return nvcc_name
+
+
+def find_hip_clang(rocm_path) -> str:
+    """Return the ROCm Clang compiler used for HIP sources."""
+    exe = "clang++.exe" if os.name == "nt" else "clang++"
+    for subdir in (os.path.join("lib", "llvm", "bin"), os.path.join("llvm", "bin")):
+        path = os.path.join(rocm_path, subdir, exe)
+        if os.path.exists(path):
+            return path
+    raise RuntimeError(f"Could not find the ROCm Clang compiler ({exe}) under {rocm_path}")
+
+
+def get_hip_architectures(rocm_path, requested: str | None = None) -> list[str]:
+    """Return the AMD GPU targets to build for.
+
+    An explicit comma-separated list wins. Otherwise use every target the ROCm
+    installation was built for, as recorded by ROCm Python packages and other
+    TheRock-based distributions, and fall back to the GPUs present on this machine.
+    """
+    if requested:
+        return [arch.strip() for arch in requested.split(",") if arch.strip()]
+
+    dist_info_path = os.path.join(rocm_path, "share", "therock", "dist_info.json")
+    if os.path.exists(dist_info_path):
+        with open(dist_info_path) as f:
+            targets = json.load(f).get("dist_amdgpu_targets", "")
+        archs = [arch.strip() for arch in re.split(r"[;,]", targets) if arch.strip()]
+        if archs:
+            return archs
+
+    # list the GPUs present on this machine
+    for tool in ("offload-arch", "amdgpu-arch"):
+        exe = tool + (".exe" if os.name == "nt" else "")
+        for subdir in (os.path.join("lib", "llvm", "bin"), os.path.join("llvm", "bin"), "bin"):
+            path = os.path.join(rocm_path, subdir, exe)
+            if os.path.exists(path):
+                try:
+                    output = subprocess.check_output([path], stderr=subprocess.DEVNULL).decode()
+                except (OSError, subprocess.CalledProcessError):
+                    continue
+                archs = sorted({line.strip() for line in output.splitlines() if line.strip().startswith("gfx")})
+                if archs:
+                    print(f"Warning: Building only for the AMD GPUs on this machine: {','.join(archs)}")
+                    return archs
+
+    return []
 
 
 def quote(path):
@@ -502,7 +549,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
     # Add LLVM bin directory to PATH
     add_llvm_bin_to_path(args)
 
-    if args.quick or cu_paths is None:
+    rocm_path = getattr(args, "rocm_path", None) if cu_paths else None
+
+    if args.quick or cu_paths is None or rocm_path:
         cuda_compat_enabled = "WP_ENABLE_CUDA_COMPATIBILITY=0"
     else:
         cuda_compat_enabled = "WP_ENABLE_CUDA_COMPATIBILITY=1"
@@ -526,7 +575,25 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             f"Install the Python development package, e.g.: `sudo apt install libpython{sys.version_info.major}.{sys.version_info.minor}-dev`"
         )
 
-    if cu_paths:
+    if rocm_path:
+        nvcc_opts = []
+        hip_clang = find_hip_clang(rocm_path)
+        hip_opts = [
+            "-x hip",
+            f'--rocm-path="{rocm_path}"',
+            *[f"--offload-arch={hip_arch}" for hip_arch in args.hip_arch],
+            "-fno-gpu-rdc",
+            "-std=c++17",
+            "-DWP_ENABLE_HIP=1",
+            f'-I"{os.path.join(warp_home, "native", "hip")}"',
+            # nvcc includes the CUDA runtime implicitly; give HIP sources the same view
+            f'-include "{os.path.join(warp_home, "native", "hip_compat.h")}"',
+            # the vendored cuBQL builder does not compile for HIP yet
+            "-DWP_DISABLE_CUBQL",
+        ]
+        if args.fast_math:
+            hip_opts.append("-ffast-math")
+    elif cu_paths:
         # check CUDA Toolkit version
         ctk_version = get_cuda_toolkit_version(cuda_home)
         if ctk_version < MIN_CTK_VERSION:
@@ -584,6 +651,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
     else:
         libmathdx_includes = ""
         mathdx_enabled = "WP_ENABLE_MATHDX=0"
+
+    if os.name == "nt" and rocm_path:
+        raise RuntimeError("Warp build error: ROCm builds on Windows are not supported yet")
 
     if os.name == "nt":
         if args.host_compiler:
@@ -727,7 +797,14 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         # Build include paths for LLVM and CUDA
         llvm_include_paths = get_llvm_include_paths(args, warp_home_path, mode, arch)
         cpp_includes = format_include_paths(llvm_include_paths, "-I")
-        cuda_includes = f' -I"{cuda_home}/include"' if cu_paths else ""
+        if rocm_path:
+            # host sources see the CUDA headers they include through the HIP shims
+            cuda_includes = (
+                f' -DWP_ENABLE_HIP=1 -D__HIP_PLATFORM_AMD__ -DWP_DISABLE_CUBQL -I"{os.path.join(native_dir, "hip")}"'
+                f' -I"{rocm_path}/include"'
+            )
+        else:
+            cuda_includes = f' -I"{cuda_home}/include"' if cu_paths else ""
         includes = cpp_includes + cuda_includes
 
         if sys.platform == "darwin":
@@ -789,7 +866,12 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts
                     ]
 
-                    if cuda_compiler == "nvcc":
+                    if rocm_path:
+                        if mode == "debug":
+                            cuda_cmd = f'"{hip_clang}" {" ".join(hip_opts)} -g -O0 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -D_DEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
+                        elif mode == "release":
+                            cuda_cmd = f'"{hip_clang}" {" ".join(hip_opts)} -O3 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
+                    elif cuda_compiler == "nvcc":
                         if mode == "debug":
                             cuda_cmd = f'{nvcc_cmd} --std=c++17 -g -G -O0 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden,-D_GLIBCXX_USE_CXX11_ABI=0 -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                         elif mode == "release":
@@ -805,7 +887,11 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
 
                     ld_inputs.append(quote(cu_out))
 
-                if args.use_dynamic_cuda:
+                if rocm_path:
+                    ld_inputs.append(
+                        f'-L"{rocm_path}/lib" -Wl,-rpath,"{rocm_path}/lib" -lamdhip64 -lhiprtc -lpthread -ldl -lrt'
+                    )
+                elif args.use_dynamic_cuda:
                     ld_inputs.append(
                         f'-L"{cuda_home}/lib64" -L"{cuda_home}/lib" -lcudart -lnvrtc -lnvptxcompiler_static -lpthread -ldl -lrt'
                     )

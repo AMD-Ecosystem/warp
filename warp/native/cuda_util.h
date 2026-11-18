@@ -17,7 +17,7 @@
 #define check_cu(code) (check_cu_result(code, __FUNCTION__, __FILE__, __LINE__))
 
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #if _DEBUG
 // helper for launching kernels (synchronize + error checking after each kernel)
 #define wp_launch_device(context, kernel, dim, args) { \
@@ -42,7 +42,7 @@
         kernel<<<num_blocks, 256, 0, stream>>>args; \
         end_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream); }}
 #endif  // _DEBUG
-#endif  // defined(__CUDACC__)
+#endif  // defined(__CUDACC__) || defined(__HIPCC__)
 
 
 CUresult cuDriverGetVersion_f(int* version);

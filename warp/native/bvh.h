@@ -7,7 +7,7 @@
 
 #include "intersect.h"
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define BVH_SHARED_STACK 1
 #else
 #define BVH_SHARED_STACK 0
@@ -261,7 +261,7 @@ CUDA_CALLABLE inline void make_node(volatile BVHPackedNodeHalf* n, const vec3& b
     n->b = (unsigned int)(leaf ? 1 : 0);
 }
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 __device__ inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index)
 {
 #ifdef USE_LOAD4

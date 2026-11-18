@@ -34,6 +34,8 @@ WP_API int wp_is_error_output_enabled();
 
 // whether Warp was compiled with CUDA support
 WP_API int wp_is_cuda_enabled();
+// whether the GPU support Warp was compiled with is HIP (AMD GPUs) rather than CUDA
+WP_API int wp_is_hip_enabled();
 // whether Warp was compiled with enhanced CUDA compatibility
 WP_API int wp_is_cuda_compatibility_enabled();
 // whether Warp was compiled with MathDx support
@@ -398,6 +400,7 @@ WP_API void wp_bsr_transpose_device(
 
 WP_API int wp_cuda_driver_version();  // CUDA driver version
 WP_API int wp_cuda_toolkit_version();  // CUDA Toolkit version used to build Warp
+WP_API int wp_hip_runtime_version();  // HIP version used to build Warp (HIP_VERSION), 0 for CUDA builds
 WP_API const char* wp_version();  // Warp native library version string
 WP_API bool wp_cuda_driver_is_initialized();
 
@@ -416,6 +419,8 @@ WP_API void* wp_cuda_device_get_primary_context(int ordinal);
 WP_API const char* wp_cuda_device_get_name(int ordinal);
 WP_API int wp_cuda_device_get_arch(int ordinal);
 WP_API int wp_cuda_device_get_sm_count(int ordinal);
+WP_API const char* wp_cuda_device_get_arch_name(int ordinal);  // AMD target name, empty for CUDA devices
+WP_API int wp_cuda_device_get_warp_size(int ordinal);
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal);
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]);
 WP_API int wp_cuda_device_get_pci_domain_id(int ordinal);

@@ -14,7 +14,9 @@
 #include <cstdlib>
 #include <fstream>
 
+#if !WP_ENABLE_HIP
 #include <nvPTXCompiler.h>
+#endif
 #include <nvrtc.h>
 #if WP_ENABLE_MATHDX
 #include <libcublasdx.h>
@@ -89,6 +91,7 @@ bool check_nvrtc_result(nvrtcResult result, const char* file, int line)
     return false;
 }
 
+#if !WP_ENABLE_HIP
 bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
 {
     if (result == NVPTXCOMPILE_SUCCESS)
@@ -125,6 +128,7 @@ bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
     fprintf(stderr, "Warp PTX compilation error %u: %s (%s:%d)\n", unsigned(result), error_string, file, line);
     return false;
 }
+#endif
 
 bool check_generic(int result, const char* file, int line)
 {
@@ -156,6 +160,10 @@ struct DeviceInfo {
     int is_ipc_supported = -1;
     int max_smem_bytes = 0;
     CUcontext primary_context = NULL;
+#if WP_ENABLE_HIP
+    char arch_name[256] = "";  // target name, e.g. gfx942:sramecc+:xnack-
+    int warp_size = 0;
+#endif
 };
 
 struct ContextInfo {
@@ -307,6 +315,19 @@ int cuda_init()
                 check_cu(
                     cuDeviceGetAttribute_f(&g_devices[i].sm_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device)
                 );
+#if WP_ENABLE_HIP
+                hipDeviceProp_t props;
+                if (check_cuda(hipGetDeviceProperties(&props, device))) {
+                    snprintf(g_devices[i].arch_name, sizeof(g_devices[i].arch_name), "%s", props.gcnArchName);
+                    g_devices[i].warp_size = props.warpSize;
+                }
+                // HIP has no IPC capability attribute; IPC is available on discrete GPUs on Linux
+#if defined(_WIN32)
+                g_devices[i].is_ipc_supported = 0;
+#else
+                g_devices[i].is_ipc_supported = props.integrated ? 0 : 1;
+#endif
+#endif
 #ifdef CUDA_VERSION
 #if CUDA_VERSION >= 12000
                 int device_attribute_integrated = 0;
@@ -425,6 +446,16 @@ static inline CaptureInfo* get_capture_info(CUstream stream)
     return NULL;
 }
 
+// whether a graph capture can be paused and resumed (see wp_cuda_graph_pause_capture())
+static inline bool is_capture_pause_supported()
+{
+#if WP_ENABLE_HIP
+    return false;
+#else
+    return CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040;
+#endif
+}
+
 // helper function to copy a value to device memory in a graph-friendly way
 static bool capturable_tmp_alloc(void* context, const void* data, size_t size, void** devptr_ret, bool* free_devptr_ret)
 {
@@ -438,7 +469,7 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
-        if (CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040) {
+        if (is_capture_pause_supported()) {
             // pause the capture so that the alloc/memcpy won't be captured
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(WP_CURRENT_CONTEXT, stream, &graph))
@@ -2329,7 +2360,16 @@ int wp_cuda_driver_version()
         return 0;
 }
 
+#if WP_ENABLE_HIP
+// built without a CUDA Toolkit; see wp_hip_runtime_version()
+int wp_cuda_toolkit_version() { return 0; }
+
+int wp_hip_runtime_version() { return HIP_VERSION; }
+#else
 int wp_cuda_toolkit_version() { return CUDA_VERSION; }
+
+int wp_hip_runtime_version() { return 0; }
+#endif
 
 int wp_nvrtc_version()
 {
@@ -2351,6 +2391,12 @@ const char* wp_libmathdx_version()
 
 bool wp_cuda_driver_is_initialized() { return is_cuda_driver_initialized(); }
 
+#if WP_ENABLE_HIP
+// hipRTC compiles for any target the ROCm compiler supports and has no architecture list
+int wp_nvrtc_supported_arch_count() { return 0; }
+
+void wp_nvrtc_supported_archs(int* archs) { (void)archs; }
+#else
 int wp_nvrtc_supported_arch_count()
 {
     int count;
@@ -2366,6 +2412,7 @@ void wp_nvrtc_supported_archs(int* archs)
         check_nvrtc(nvrtcGetSupportedArchs(archs));
     }
 }
+#endif
 
 int wp_cuda_device_get_count()
 {
@@ -2401,6 +2448,28 @@ int wp_cuda_device_get_arch(int ordinal)
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
         return g_devices[ordinal].arch;
     return 0;
+}
+
+const char* wp_cuda_device_get_arch_name(int ordinal)
+{
+#if WP_ENABLE_HIP
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].arch_name;
+#else
+    (void)ordinal;
+#endif
+    return "";
+}
+
+int wp_cuda_device_get_warp_size(int ordinal)
+{
+#if WP_ENABLE_HIP
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].warp_size;
+    return 0;
+#else
+    return ordinal >= 0 && ordinal < int(g_devices.size()) ? 32 : 0;
+#endif
 }
 
 int wp_cuda_device_get_sm_count(int ordinal)
@@ -4391,6 +4460,36 @@ bool check_nvjitlink_result(nvJitLinkHandle handle, nvJitLinkResult result, cons
 }
 #endif
 
+#if WP_ENABLE_HIP
+size_t wp_cuda_compile_program(
+    const char* cuda_src,
+    const char* program_name,
+    int arch,
+    const char* arch_suffix,
+    const char* include_dir,
+    int num_cuda_include_dirs,
+    const char** cuda_include_dirs,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    bool compile_time_trace,
+    bool precompiled_headers,
+    const char* output_path,
+    const char* pch_dir,
+    size_t num_ltoirs,
+    char** ltoirs,
+    size_t* ltoir_sizes,
+    int* ltoir_input_types
+)
+{
+    fprintf(stderr, "Warp error: Runtime kernel compilation is not available in this build\n");
+    return size_t(-1);
+}
+#else
 size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
@@ -4733,6 +4832,7 @@ size_t wp_cuda_compile_program(
 
     return res;
 }
+#endif  // WP_ENABLE_HIP
 
 #if WP_ENABLE_MATHDX
 bool check_cufftdx_result(commondxStatusType result, const char* file, int line)
@@ -5047,6 +5147,13 @@ void* wp_cuda_load_module(void* context, const char* path)
     int driver_cuda_version = 0;
     CUmodule module = NULL;
 
+#if WP_ENABLE_HIP
+    (void)driver_cuda_version;
+    if (load_ptx) {
+        fprintf(stderr, "Warp error: PTX modules cannot be loaded on AMD GPUs\n");
+        return NULL;
+    }
+#else
     if (load_ptx) {
         if (check_cu(cuDriverGetVersion_f(&driver_cuda_version)) && driver_cuda_version >= CUDA_VERSION) {
             // let the driver compile the PTX
@@ -5110,7 +5217,9 @@ void* wp_cuda_load_module(void* context, const char* path)
                 return NULL;
             }
         }
-    } else {
+    } else
+#endif
+    {
         // load CUBIN
         if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
             fprintf(stderr, "Warp CUDA error: Loading module failed\n");
@@ -5309,7 +5418,7 @@ void wp_cuda_graphics_device_ptr_and_size(void* context, void* resource, uint64_
     size_t bytes;
     check_cu(cuGraphicsResourceGetMappedPointer_f(&device_ptr, &bytes, *(CUgraphicsResource*)resource));
 
-    *ptr = device_ptr;
+    *ptr = (uint64_t)device_ptr;
     *size = bytes;
 }
 
