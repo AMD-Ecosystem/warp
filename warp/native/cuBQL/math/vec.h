@@ -84,10 +84,10 @@ namespace cuBQL {
     using cuda_t = typename cuda_eq_t<T,2>::type;
     inline __cubql_both operator cuda_t() { cuda_t t; t.x = x; t.y = y; return t; }
 #endif
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     /*! allow to typecast that to a dim3, so it can be used as a cuda kernel launch dim */
     inline __cubql_both operator dim3() { dim3 t; t.x = x; t.y = y; t.z = 1; return t; }
-#endif    
+#endif
     T x, y;
   };
   template<typename T>
@@ -96,10 +96,10 @@ namespace cuBQL {
     inline __cubql_both T  operator[](int i) const { return (i==2)?z:(i?y:x); }
     inline __cubql_both T &operator[](int i)       { return (i==2)?z:(i?y:x); }
     /*! auto-cast to equivalent cuda type */
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     /*! allow to typecast that to a dim3, so it can be used as a cuda kernel launch dim */
     inline __cubql_both operator dim3() { dim3 t; t.x = x; t.y = y; t.z = z; return t; }
-#endif    
+#endif
 #if CUBQL_SUPPORT_CUDA_VECTOR_TYPES
     using cuda_t = typename cuda_eq_t<T,3>::type;
     inline __cubql_both operator cuda_t() { cuda_t t; t.x = x; t.y = y; t.z = z; return t; }
