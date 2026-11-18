@@ -9917,8 +9917,8 @@ def capture_begin(
 
     # ---- CUDA capture path ----
     if force_module_load is None:
-        if runtime.driver_version is not None and runtime.driver_version >= (12, 3):
-            # Driver versions 12.3 and can compile modules during graph capture
+        if runtime.is_hip or (runtime.driver_version is not None and runtime.driver_version >= (12, 3)):
+            # Driver versions 12.3 and can compile modules during graph capture, as can HIP
             force_module_load = False
         else:
             force_module_load = warp.config.enable_graph_capture_module_load_by_default
@@ -10046,6 +10046,11 @@ def assert_conditional_graph_support():
     if runtime is None:
         init()
 
+    if runtime.is_hip:
+        raise RuntimeError(
+            "Conditional graph nodes are not supported on AMD GPUs: HIP has no conditional graph node API"
+        )
+
     if runtime.toolkit_version is None or runtime.toolkit_version < (12, 4):
         raise RuntimeError("Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes")
 
@@ -10060,12 +10065,16 @@ def is_conditional_graph_supported() -> bool:
     """Check whether conditional graph nodes are supported.
 
     Conditional graph nodes require a CUDA driver 12.4+ and Warp to be built with CUDA Toolkit 12.4+.
+    They are not available on AMD GPUs (HIP has no conditional graph node API).
 
     Returns:
         ``True`` if both the CUDA Toolkit and driver versions are at least 12.4, ``False`` otherwise.
     """
     if runtime is None:
         init()
+
+    if runtime.is_hip:
+        return False
 
     return (
         runtime.toolkit_version is not None

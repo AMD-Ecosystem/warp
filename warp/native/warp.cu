@@ -450,7 +450,7 @@ static inline CaptureInfo* get_capture_info(CUstream stream)
 static inline bool is_capture_pause_supported()
 {
 #if WP_ENABLE_HIP
-    return false;
+    return true;
 #else
     return CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040;
 #endif
@@ -3743,6 +3743,59 @@ int wp_cuda_graph_alloc_query(void* alloc_node, void* query_node)
 }
 
 // Support for conditional graph nodes available with CUDA 12.4+.
+// pausing and resuming a capture; HIP provides hipStreamBeginCaptureToGraph, but no conditional graph nodes
+#if CUDA_VERSION >= 12040 || WP_ENABLE_HIP
+
+bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+    if (!check_cuda(cudaStreamEndCapture(cuda_stream, (cudaGraph_t*)graph_ret)))
+        return false;
+    return true;
+}
+
+bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+    cudaGraph_t cuda_graph = static_cast<cudaGraph_t>(graph);
+
+    std::vector<cudaGraphNode_t> leaf_nodes;
+    if (!get_graph_leaf_nodes(cuda_graph, leaf_nodes))
+        return false;
+
+    // Resume with the same capture mode the user picked at begin time so a
+    // pause/resume cycle (driven by conditional/while graph nodes) does not
+    // silently downgrade Global/Relaxed captures to ThreadLocal. The stream
+    // must already be known to Warp with an active CaptureInfo at this
+    // point because the resume path is only reached after a matching pause
+    // on a Warp-managed capture; if either is missing something is badly
+    // out of sync, fail fast rather than guess a mode.
+    StreamInfo* stream_info = get_stream_info(cuda_stream);
+    if (!stream_info) {
+        wp::set_error_string("Warp error: resume_capture called on unknown stream");
+        return false;
+    }
+    CaptureInfo* capture = stream_info->capture;
+    if (!capture) {
+        wp::set_error_string("Warp error: resume_capture called on stream with no active capture");
+        return false;
+    }
+    cudaStreamCaptureMode resume_mode = capture->mode;
+
+    if (!check_cuda(cudaStreamBeginCaptureToGraph(
+            cuda_stream, cuda_graph, leaf_nodes.data(), nullptr, leaf_nodes.size(), resume_mode
+        )))
+        return false;
+
+    return true;
+}
+
+#endif
+
 #if CUDA_VERSION >= 12040
 
 // CUBIN or PTX data for compiled conditional modules, loaded on demand, keyed on device architecture
@@ -3887,54 +3940,6 @@ static CUfunction get_conditional_kernel(void* context, int arch, bool use_ptx, 
     }
 
     return kernel;
-}
-
-bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
-{
-    ContextGuard guard(context);
-
-    CUstream cuda_stream = static_cast<CUstream>(stream);
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, (cudaGraph_t*)graph_ret)))
-        return false;
-    return true;
-}
-
-bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
-{
-    ContextGuard guard(context);
-
-    CUstream cuda_stream = static_cast<CUstream>(stream);
-    cudaGraph_t cuda_graph = static_cast<cudaGraph_t>(graph);
-
-    std::vector<cudaGraphNode_t> leaf_nodes;
-    if (!get_graph_leaf_nodes(cuda_graph, leaf_nodes))
-        return false;
-
-    // Resume with the same capture mode the user picked at begin time so a
-    // pause/resume cycle (driven by conditional/while graph nodes) does not
-    // silently downgrade Global/Relaxed captures to ThreadLocal. The stream
-    // must already be known to Warp with an active CaptureInfo at this
-    // point because the resume path is only reached after a matching pause
-    // on a Warp-managed capture; if either is missing something is badly
-    // out of sync, fail fast rather than guess a mode.
-    StreamInfo* stream_info = get_stream_info(cuda_stream);
-    if (!stream_info) {
-        wp::set_error_string("Warp error: resume_capture called on unknown stream");
-        return false;
-    }
-    CaptureInfo* capture = stream_info->capture;
-    if (!capture) {
-        wp::set_error_string("Warp error: resume_capture called on stream with no active capture");
-        return false;
-    }
-    cudaStreamCaptureMode resume_mode = capture->mode;
-
-    if (!check_cuda(cudaStreamBeginCaptureToGraph(
-            cuda_stream, cuda_graph, leaf_nodes.data(), nullptr, leaf_nodes.size(), resume_mode
-        )))
-        return false;
-
-    return true;
 }
 
 // https://developer.nvidia.com/blog/constructing-cuda-graphs-with-dynamic-parameters/#combined_approach
@@ -4328,6 +4333,7 @@ bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use
 #else
 // stubs for conditional graph node API if CUDA toolkit is too old.
 
+#if !WP_ENABLE_HIP
 bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
 {
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
@@ -4339,6 +4345,7 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
     return false;
 }
+#endif
 
 bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret

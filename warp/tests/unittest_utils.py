@@ -188,8 +188,10 @@ def get_test_devices_with_independent_thread_scheduling(mode: str | None = None)
 
 def is_cuda_graph_module_load_supported(device) -> bool:
     """Return whether modules can be loaded during CUDA graph capture."""
+    if not device.is_cuda or device.is_hip:
+        return True
     driver_version = wp.get_cuda_driver_version()
-    return not device.is_cuda or (driver_version is not None and driver_version >= (12, 3))
+    return driver_version is not None and driver_version >= (12, 3)
 
 
 def get_test_devices_with_cuda_graph_module_load(mode: str | None = None):
