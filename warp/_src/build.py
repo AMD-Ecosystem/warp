@@ -41,6 +41,7 @@ def build_cuda(
     ltoirs=None,
     fatbins=None,
     arch_suffix="",
+    hip_target=None,
     llvm_cuda=False,
     use_precompiled_headers=True,
 ) -> None:
@@ -53,6 +54,26 @@ def build_cuda(
 
     if llvm_cuda:
         warp._src.context.runtime.llvm.wp_compile_cuda(src, cu_path_bytes, inc_path, output_path, False)
+
+    elif warp._src.context.runtime.is_hip:
+        if not hip_target:
+            raise RuntimeError("Compiling for an AMD GPU requires the target device")
+        err = warp._src.context.runtime.core.wp_hip_compile_program(
+            src,
+            program_name_bytes,
+            hip_target.encode("utf-8"),
+            inc_path,
+            config == "debug",
+            optimization_level,
+            warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
+            verify_fp,
+            fast_math,
+            fuse_fp,
+            lineinfo,
+            output_path,
+        )
+        if err != 0:
+            raise Exception(f"HIP kernel build failed with error code {err}")
 
     else:
         if ltoirs is None:

@@ -230,11 +230,21 @@ typedef unsigned long long uint64_t;
 
 #define M_PI 3.14159265358979323846
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC_RTC__)
 
-#if defined(__clang__)
+#if defined(__clang__) && !defined(__HIPCC_RTC__)
 // When compiling CUDA with barebones Clang we need to define its builtins and runtime functions ourselves.
+// hipRTC provides them in its built-in headers.
 #include "cuda_crt.h"
+#endif
+
+#if defined(__HIPCC_RTC__)
+// hipRTC has no <assert.h>; use the device assert handler of the HIP runtime headers
+#ifdef NDEBUG
+#define assert(expression) ((void)0)
+#else
+#define assert(expression) ((expression) ? (void)0 : __assert_fail(#expression, __FILE__, __LINE__, __func__))
+#endif
 #endif
 
 #else
@@ -346,7 +356,7 @@ inline bool isinf(double x) { return _wp_isinf(x); }
 
 #endif  // WP_NO_CRT
 
-#if !defined(__CUDACC__)
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
 
 /*
  * From Cephes Library polevl.c
@@ -484,4 +494,4 @@ inline double erfcinv(double x) { return erfinv(1.0 - x); }
 
 inline float erfcinvf(float x) { return (float)erfcinv((double)x); }
 
-#endif  // !defined(__CUDACC__)
+#endif  // !defined(__CUDACC__) && !defined(__HIPCC__)

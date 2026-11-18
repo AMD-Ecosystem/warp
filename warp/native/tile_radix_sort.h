@@ -83,7 +83,7 @@ constexpr inline CUDA_CALLABLE int next_higher_pow2(int input)
 }
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 
 // Bitonic sort fast pass for small arrays
@@ -454,13 +454,13 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 
 // End bitonic sort
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int ballot_mask)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t ballot_mask)
 {
     uint32_t mask = ((1u << (lane + 1)) - 1);
     return __popc(ballot_mask & mask);
 }
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int mask, bool thread_contributes_element)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t mask, bool thread_contributes_element)
 {
     return warp_scan_inclusive(lane, __ballot_sync(mask, thread_contributes_element));
 }

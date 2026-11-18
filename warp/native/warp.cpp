@@ -1164,6 +1164,24 @@ WP_API size_t wp_cuda_compile_program(
     return 0;
 }
 
+WP_API size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
+)
+{
+    return 0;
+}
+
 WP_API void* wp_cuda_load_module(void* context, const char* ptx) { return NULL; }
 WP_API void wp_cuda_unload_module(void* context, void* module) { }
 WP_API void* wp_cuda_get_kernel(void* context, void* module, const char* name) { return NULL; }

@@ -8,7 +8,7 @@
 
 namespace wp {
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 struct bvh_query_thread_block_t {
     CUDA_CALLABLE bvh_query_thread_block_t()
@@ -70,7 +70,7 @@ using bvh_query_thread_block_t = bvh_query_t;
 #endif
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 CUDA_CALLABLE inline bvh_query_thread_block_t
 bvh_query_thread_block(uint64_t id, bool is_ray, const vec3& lower, const vec3& upper)
@@ -335,7 +335,7 @@ CUDA_CALLABLE inline bool bvh_query_next_thread_block_impl(bvh_query_thread_bloc
 
 
 // Tile-based interface
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 // CUDA implementation: uses thread-block parallel traversal
 template <int Length> CUDA_CALLABLE inline auto tile_bvh_query_next_impl(bvh_query_thread_block_t& query)

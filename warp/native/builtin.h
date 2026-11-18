@@ -61,6 +61,8 @@
 
 #if defined(__CUDACC__) && !defined(_MSC_VER)
 __device__ inline void __debugbreak() { __brkpt(); }
+#elif defined(__HIP_DEVICE_COMPILE__)
+__device__ inline void __debugbreak() { __builtin_debugtrap(); }
 #endif
 
 #if defined(__clang__) && defined(__CUDA__) && !defined(WP_NO_CRT)
@@ -238,7 +240,21 @@ typedef wp_bfloat16 bfloat16;
 #endif  // WP_NO_BFLOAT16
 
 // Approximate division/reciprocal intrinsics
-#if defined(__CUDA_ARCH__)
+#if defined(__HIP_DEVICE_COMPILE__)
+
+// AMD GPUs: hardware reciprocal approximation (v_rcp_f32, v_rcp_f64)
+inline __device__ float approx_rcp(float a) { return __builtin_amdgcn_rcpf(a); }
+inline __device__ double approx_rcp(double a) { return __builtin_amdgcn_rcp(a); }
+inline __device__ float16 approx_rcp(float16 a) { return float16(approx_rcp(float(a))); }
+inline __device__ float approx_div(float a, float b) { return a * approx_rcp(b); }
+inline __device__ double approx_div(double a, double b) { return a * approx_rcp(b); }
+inline __device__ float16 approx_div(float16 a, float16 b) { return float16(approx_div(float(a), float(b))); }
+#ifndef WP_NO_BFLOAT16
+inline __device__ bfloat16 approx_rcp(bfloat16 a) { return bfloat16(approx_rcp(float(a))); }
+inline __device__ bfloat16 approx_div(bfloat16 a, bfloat16 b) { return bfloat16(approx_div(float(a), float(b))); }
+#endif
+
+#elif defined(__CUDA_ARCH__)
 
 inline __device__ float approx_rcp(float a)
 {
@@ -334,7 +350,7 @@ inline CUDA_CALLABLE float wp_bfloat16_bits_to_float_sw(unsigned short u)
 }
 #endif  // WP_NO_BFLOAT16
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 
 CUDA_CALLABLE inline half float_to_half(float x)
 {
@@ -449,7 +465,7 @@ inline CUDA_CALLABLE half operator/(half a, half b) { return float_to_half(half_
 // bfloat16 arithmetic operators
 inline CUDA_CALLABLE wp_bfloat16 operator-(wp_bfloat16 a) { return float_to_bfloat16(-bfloat16_to_float(a)); }
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#if defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__) && __CUDA_ARCH__ >= 900
 inline CUDA_CALLABLE wp_bfloat16 operator+(wp_bfloat16 a, wp_bfloat16 b)
 {
     wp_bfloat16 result;
@@ -468,7 +484,7 @@ inline CUDA_CALLABLE wp_bfloat16 operator*(wp_bfloat16 a, wp_bfloat16 b)
     asm("{  mul.bf16 %0, %1, %2;}\n" : "=h"(result.u) : "h"(a.u), "h"(b.u));
     return result;
 }
-#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#elif defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__) && __CUDA_ARCH__ >= 800
 // sm_80-89: emulate add/sub/mul via fma.rn.bf16 (matches cuda_bf16.hpp)
 inline CUDA_CALLABLE wp_bfloat16 operator+(wp_bfloat16 a, wp_bfloat16 b)
 {
@@ -2242,7 +2258,10 @@ template <typename T> inline CUDA_CALLABLE T atomic_min(T* address, T val)
 // matches the just-written bits.
 template <> inline CUDA_CALLABLE float atomic_min(float* address, float val)
 {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    // hardware floating-point atomic where the target has one, a compare-and-swap loop otherwise
+    return atomicMin(address, val);
+#elif defined(__CUDA_ARCH__)
 
     int* address_as_i = reinterpret_cast<int*>(address);
     int old = *address_as_i;
@@ -2268,7 +2287,10 @@ template <> inline CUDA_CALLABLE float atomic_min(float* address, float val)
 // emulate atomic double min with atomicCAS()
 template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
 {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    // hardware floating-point atomic where the target has one, a compare-and-swap loop otherwise
+    return atomicMin(address, val);
+#elif defined(__CUDA_ARCH__)
 
     unsigned long long* address_as_ull = reinterpret_cast<unsigned long long*>(address);
     unsigned long long old = *address_as_ull;
@@ -2351,7 +2373,10 @@ template <typename T> inline CUDA_CALLABLE T atomic_max(T* address, T val)
 // emulate atomic float max with atomicCAS()
 template <> inline CUDA_CALLABLE float atomic_max(float* address, float val)
 {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    // hardware floating-point atomic where the target has one, a compare-and-swap loop otherwise
+    return atomicMax(address, val);
+#elif defined(__CUDA_ARCH__)
 
     int* address_as_i = reinterpret_cast<int*>(address);
     int old = *address_as_i;
@@ -2377,7 +2402,10 @@ template <> inline CUDA_CALLABLE float atomic_max(float* address, float val)
 // emulate atomic double max with atomicCAS()
 template <> inline CUDA_CALLABLE double atomic_max(double* address, double val)
 {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    // hardware floating-point atomic where the target has one, a compare-and-swap loop otherwise
+    return atomicMax(address, val);
+#elif defined(__CUDA_ARCH__)
 
     unsigned long long* address_as_ull = reinterpret_cast<unsigned long long*>(address);
     unsigned long long old = *address_as_ull;

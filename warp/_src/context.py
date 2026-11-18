@@ -2890,6 +2890,10 @@ class Module:
                     return f"{module_name_short}.cpu{cpu_isa_hash}.o"
             return f"{module_name_short}.o"
 
+        if device and device.is_hip:
+            # AMD code object for the device's target, e.g. gfx942:sramecc+:xnack- (':' is not valid in Windows file names)
+            return f"{module_name_short}.{device.arch_name.replace(':', '_')}.hsaco"
+
         # For CUDA compilation, we must have an architecture.
         final_arch = output_arch
         if final_arch is None:
@@ -2966,6 +2970,12 @@ class Module:
 
         # output_arch is None for CPU targets, set to a SM architecture for CUDA
         is_cpu = output_arch is None
+
+        if not is_cpu and options["llvm_cuda"] and runtime.is_hip:
+            raise RuntimeError(
+                "warp.config.llvm_cuda compiles kernels to PTX for NVIDIA GPUs and is not supported on AMD GPUs; "
+                "the HIP runtime compiler Warp uses for AMD GPUs is already Clang-based"
+            )
 
         options = options | {"output_arch": output_arch}
 
@@ -3100,6 +3110,7 @@ class Module:
                         fatbins=builder.fatbins.values(),
                         arch_suffix=arch_suffix,
                         pch_dir=runtime.get_nvrtc_pch_dir(),
+                        hip_target=device.arch_name if device and device.is_hip else None,
                         llvm_cuda=options["llvm_cuda"],
                         use_precompiled_headers=options["use_precompiled_headers"],
                     )
@@ -3954,8 +3965,8 @@ class Device:
 
             self._custom_allocator = None
 
-            # check whether our NVRTC can generate CUBINs for this architecture
-            self.is_cubin_supported = self.arch in runtime.nvrtc_supported_archs
+            # check whether our NVRTC can generate CUBINs for this architecture (hipRTC targets every AMD GPU)
+            self.is_cubin_supported = self.is_hip or self.arch in runtime.nvrtc_supported_archs
 
             # initialize streams unless context acquisition is postponed
             if self._context is not None:
@@ -4219,6 +4230,10 @@ class Device:
         if self.is_cpu:
             # CPU devices don't use CUDA compilation
             return None
+
+        if self.is_hip:
+            # AMD GPUs always load a code object built for the device; there is no PTX
+            return "cubin"
 
         if not self.is_cubin_supported:
             return "ptx"
@@ -5797,6 +5812,22 @@ class Runtime:
                 ctypes.POINTER(ctypes.c_int),  # ltoir_input_types, each of type nvJitLinkInputType
             ]
             self.core.wp_cuda_compile_program.restype = ctypes.c_size_t
+
+            self.core.wp_hip_compile_program.argtypes = [
+                ctypes.c_char_p,  # src
+                ctypes.c_char_p,  # program name
+                ctypes.c_char_p,  # target
+                ctypes.c_char_p,  # include_dir
+                ctypes.c_bool,  # debug
+                ctypes.c_int,  # optimization_level
+                ctypes.c_bool,  # verbose
+                ctypes.c_bool,  # verify_fp
+                ctypes.c_bool,  # fast_math
+                ctypes.c_bool,  # fuse_fp
+                ctypes.c_bool,  # lineinfo
+                ctypes.c_char_p,  # output_path
+            ]
+            self.core.wp_hip_compile_program.restype = ctypes.c_size_t
 
             self.core.wp_cuda_compile_fft.argtypes = [
                 ctypes.c_char_p,  # lto

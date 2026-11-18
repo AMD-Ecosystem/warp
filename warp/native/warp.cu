@@ -4461,6 +4461,107 @@ bool check_nvjitlink_result(nvJitLinkHandle handle, nvJitLinkResult result, cons
 #endif
 
 #if WP_ENABLE_HIP
+size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
+)
+{
+    const bool print_debug = (std::getenv("WARP_DEBUG") != nullptr);
+
+    std::vector<std::string> stored_options;
+    stored_options.push_back(std::string("--offload-arch=") + target);
+    stored_options.push_back(std::string("-I") + include_dir);
+    stored_options.push_back("-std=c++17");
+    stored_options.push_back("-O" + std::to_string(std::min(std::max(optimization_level, 0), 3)));
+
+    if (debug) {
+        stored_options.push_back("-D_DEBUG");
+        stored_options.push_back("-g");
+    } else {
+        stored_options.push_back("-DNDEBUG");
+        if (lineinfo)
+            stored_options.push_back("-gline-tables-only");
+    }
+
+    stored_options.push_back(verify_fp ? "-DWP_VERIFY_FP" : "-UWP_VERIFY_FP");
+    stored_options.push_back("-DWP_ENABLE_MATHDX=0");
+
+    if (fast_math)
+        stored_options.push_back("-ffast-math");
+
+    // nvcc contracts within an expression only; Clang's "on" mode is the closest match
+    stored_options.push_back(fuse_fp ? "-ffp-contract=on" : "-ffp-contract=off");
+
+    std::vector<const char*> opts;
+    for (const std::string& opt : stored_options)
+        opts.push_back(opt.c_str());
+
+    // NVRTC compiles functions without an execution space qualifier for the device
+    // (--device-as-default-execution-space); Clang's pragma makes them host and device,
+    // which gives the same result in a device-only compile
+    //
+    // __CUDA_ARCH__ is defined (after hipRTC's own headers) so that user code which selects its device
+    // branch with `#if defined(__CUDA_ARCH__)` takes it; Warp's headers test __HIP_DEVICE_COMPILE__ first.
+    // The low value keeps numeric architecture tests in user code on their portable branches.
+    std::string full_src = std::string("#pragma clang force_cuda_host_device begin\n#define __CUDA_ARCH__ 1\n#line 1\n")
+        + src + "\n#pragma clang force_cuda_host_device end\n";
+
+    hiprtcProgram prog;
+    hiprtcResult res = hiprtcCreateProgram(&prog, full_src.c_str(), program_name, 0, NULL, NULL);
+    if (!check_nvrtc(res))
+        return size_t(res);
+
+    if (print_debug) {
+        printf("hipRTC options:\n");
+        for (auto o : opts)
+            printf("%s\n", o);
+    }
+
+    res = hiprtcCompileProgram(prog, int(opts.size()), opts.data());
+
+    if (!check_nvrtc(res) || verbose) {
+        size_t log_size;
+        if (check_nvrtc(hiprtcGetProgramLogSize(prog, &log_size)) && log_size > 1) {
+            std::vector<char> log(log_size);
+            if (check_nvrtc(hiprtcGetProgramLog(prog, log.data()))) {
+                if (res != HIPRTC_SUCCESS)
+                    fprintf(stderr, "%s", log.data());
+                else
+                    fprintf(stdout, "%s", log.data());
+            }
+        }
+
+        if (res != HIPRTC_SUCCESS) {
+            hiprtcDestroyProgram(&prog);
+            return size_t(res);
+        }
+    }
+
+    // save the code object
+    size_t output_size;
+    res = hiprtcGetCodeSize(prog, &output_size);
+    if (check_nvrtc(res)) {
+        std::vector<char> output(output_size);
+        res = hiprtcGetCode(prog, output.data());
+        if (check_nvrtc(res) && !write_file(output.data(), output.size(), output_path, "wb"))
+            res = hiprtcResult(-1);
+    }
+
+    check_nvrtc(hiprtcDestroyProgram(&prog));
+
+    return res;
+}
+
 size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
@@ -4486,7 +4587,7 @@ size_t wp_cuda_compile_program(
     int* ltoir_input_types
 )
 {
-    fprintf(stderr, "Warp error: Runtime kernel compilation is not available in this build\n");
+    fprintf(stderr, "Warp error: ROCm builds compile kernels with wp_hip_compile_program()\n");
     return size_t(-1);
 }
 #else
@@ -4831,6 +4932,25 @@ size_t wp_cuda_compile_program(
     check_nvrtc(nvrtcDestroyProgram(&prog));
 
     return res;
+}
+
+size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
+)
+{
+    fprintf(stderr, "Warp error: hipRTC compilation requires a ROCm build of Warp\n");
+    return size_t(-1);
 }
 #endif  // WP_ENABLE_HIP
 

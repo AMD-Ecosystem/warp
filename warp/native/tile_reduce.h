@@ -13,6 +13,13 @@
 
 #define WP_TILE_WARP_SIZE 32
 
+// lane mask taken and returned by the warp functions (__ballot_sync, __shfl_*_sync); HIP's are 64-bit
+#if defined(__HIP_DEVICE_COMPILE__)
+typedef unsigned long long tile_mask_t;
+#else
+typedef unsigned int tile_mask_t;
+#endif
+
 namespace wp {
 
 
@@ -27,7 +34,7 @@ template <typename T> int argmin_tracker(T champion_value, T current_value, int 
 }
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset, int mask)
 {
@@ -628,7 +635,7 @@ template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile&
 
     auto adj_reg = adj_ret.grad_to_register();
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     T scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block
@@ -681,7 +688,7 @@ template <typename TileA, typename TileB> CUDA_CALLABLE auto tile_dot(TileA& a, 
     }
 
     // Phase 2: cross-thread reduction (same pattern as tile_reduce_impl)
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
     auto add_op = [](ScalarT x, ScalarT y) { return x + y; };
 
@@ -726,7 +733,7 @@ CUDA_CALLABLE void adj_tile_dot(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& a
 
     auto adj_reg = adj_ret.grad_to_register();
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     ScalarT scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block

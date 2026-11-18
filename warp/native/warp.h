@@ -551,6 +551,21 @@ WP_API size_t wp_cuda_compile_program(
     size_t* ltoir_sizes,
     int* ltoir_input_types
 );
+// compile a kernel module with hipRTC for an AMD GPU target (e.g. "gfx942:sramecc+:xnack-"); ROCm builds only
+WP_API size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
+);
 WP_API bool wp_cuda_compile_fft(
     const char* ltoir_output_path,
     const char* symbol_name,
