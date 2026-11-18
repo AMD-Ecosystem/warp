@@ -588,8 +588,6 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             f'-I"{os.path.join(warp_home, "native", "hip")}"',
             # nvcc includes the CUDA runtime implicitly; give HIP sources the same view
             f'-include "{os.path.join(warp_home, "native", "hip_compat.h")}"',
-            # the vendored cuBQL builder does not compile for HIP yet
-            "-DWP_DISABLE_CUBQL",
         ]
         if args.fast_math:
             hip_opts.append("-ffast-math")
@@ -800,7 +798,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         if rocm_path:
             # host sources see the CUDA headers they include through the HIP shims
             cuda_includes = (
-                f' -DWP_ENABLE_HIP=1 -D__HIP_PLATFORM_AMD__ -DWP_DISABLE_CUBQL -I"{os.path.join(native_dir, "hip")}"'
+                f' -DWP_ENABLE_HIP=1 -D__HIP_PLATFORM_AMD__ -I"{os.path.join(native_dir, "hip")}"'
                 f' -I"{rocm_path}/include"'
             )
         else:

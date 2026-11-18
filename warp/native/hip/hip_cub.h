@@ -7,4 +7,7 @@
 #include "../hip_compat.h"
 #include <hipcub/hipcub.hpp>
 
-namespace cub = hipcub;
+// the form vendored cuBQL also uses, so that both may declare it
+namespace cub {
+using namespace hipcub;
+}

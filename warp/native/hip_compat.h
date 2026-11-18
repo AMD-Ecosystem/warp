@@ -39,7 +39,8 @@ typedef WpHipContext* CUcontext;
 typedef uint64_t cuuint64_t;
 typedef size_t (*CUoccupancyB2DSize)(int blockSize);
 
-#define cudaMallocHost(ptr, size) hipHostMalloc((ptr), (size), hipHostMallocDefault)
+// the C++ overload of hipHostMalloc defaults its flags to hipHostMallocDefault
+#define cudaMallocHost hipHostMalloc
 
 #define CU_EVENT_WAIT_DEFAULT hipEventWaitDefault
 #define CU_EVENT_WAIT_EXTERNAL hipEventWaitExternal
