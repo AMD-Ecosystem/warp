@@ -186,17 +186,20 @@ template <typename Op> constexpr int k_step()
 }
 
 // gfx11 WMMA reads every operand in both half-waves, twice the shared-memory loads of gfx12. On a
-// tile of 16 or more fragments it beats the scalar path only when each wavefront takes a full row
-// of 4 fragments sharing A (measured on gfx1100: a 64x64 tile at 256 threads, 2 fragments per
-// wavefront, ran at 0.91x the scalar path); otherwise the scalar path keeps the call.
-template <typename Op> constexpr bool amortizes_operand_loads(int fragments)
+// tile of 16 or more fragments with both operands row-major (a forward product; the adjoint's two
+// products each read one transposed operand) it beats the scalar path only when each wavefront
+// takes a full row of 4 fragments sharing A (measured on gfx1100: a 64x64 tile at 256 threads, 2
+// fragments per wavefront, ran at 0.91x the scalar path forward and 1.59x faster in the adjoint);
+// otherwise the scalar path keeps the call.
+template <typename Op, typename LayoutA, typename LayoutB> constexpr bool amortizes_operand_loads(int fragments)
 {
     if constexpr (kWave == 64)
         return true;
     else if constexpr (Op::k_split)
         return true;
     else
-        return fragments < 16 || fragments / (WP_TILE_BLOCK_DIM / kWave) >= 4;
+        return fragments < 16 || fragments / (WP_TILE_BLOCK_DIM / kWave) >= 4 || LayoutA::Stride::dim(1) != 1
+            || LayoutB::Stride::dim(1) != 1;
 }
 
 template <
@@ -221,7 +224,9 @@ constexpr bool supported()
     else
         return LayoutC::Shape::dim(0) % 16 == 0 && LayoutC::Shape::dim(1) % 16 == 0
             && LayoutA::Shape::dim(1) % k_step<op<ElemA>>() == 0 && WP_TILE_BLOCK_DIM % kWave == 0
-            && amortizes_operand_loads<op<ElemA>>((LayoutC::Shape::dim(0) / 16) * (LayoutC::Shape::dim(1) / 16));
+            && amortizes_operand_loads<op<ElemA>, LayoutA, LayoutB>(
+                   (LayoutC::Shape::dim(0) / 16) * (LayoutC::Shape::dim(1) / 16)
+            );
 }
 
 template <
