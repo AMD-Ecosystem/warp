@@ -15,7 +15,9 @@
 #include <dlfcn.h>
 #endif
 
+#include <mutex>
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -448,21 +450,79 @@ CUresult cuIpcOpenMemHandle_f(CUdeviceptr* pdptr, CUipcMemHandle handle, unsigne
 CUresult cuIpcCloseMemHandle_f(CUdeviceptr dptr) { return hipIpcCloseMemHandle(dptr); }
 
 // Texture functions
-CUresult cuArrayCreate_f(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
+// Bytes per array element, recorded at creation: the 3D copy needs it and HIP's descriptor
+// query is not permitted while a stream is capturing
+static std::mutex g_array_element_size_mutex;
+static std::unordered_map<hipArray_t, size_t> g_array_element_size;
+
+static size_t hip_array_format_size(hipArray_Format format, unsigned int num_channels)
 {
-    return hipArrayCreate(pHandle, pAllocateArray);
+    switch (format) {
+    case HIP_AD_FORMAT_UNSIGNED_INT8:
+    case HIP_AD_FORMAT_SIGNED_INT8:
+        return num_channels;
+    case HIP_AD_FORMAT_UNSIGNED_INT16:
+    case HIP_AD_FORMAT_SIGNED_INT16:
+    case HIP_AD_FORMAT_HALF:
+        return 2 * num_channels;
+    default:
+        return 4 * num_channels;
+    }
 }
 
-CUresult cuArrayDestroy_f(CUarray hArray) { return hipArrayDestroy(hArray); }
+static void record_array_element_size(hipArray_t array, hipArray_Format format, unsigned int num_channels)
+{
+    std::lock_guard<std::mutex> lock(g_array_element_size_mutex);
+    g_array_element_size[array] = hip_array_format_size(format, num_channels);
+}
+
+static size_t hip_array_element_size(hipArray_t array)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_array_element_size_mutex);
+        auto it = g_array_element_size.find(array);
+        if (it != g_array_element_size.end())
+            return it->second;
+    }
+    // not created or described through these wrappers; the query fails during a capture
+    HIP_ARRAY3D_DESCRIPTOR desc;
+    if (hipArray3DGetDescriptor(&desc, array) != hipSuccess)
+        return 0;
+    return hip_array_format_size(desc.Format, desc.NumChannels);
+}
+
+CUresult cuArrayCreate_f(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
+{
+    hipError_t result = hipArrayCreate(pHandle, pAllocateArray);
+    if (result == hipSuccess)
+        record_array_element_size(*pHandle, pAllocateArray->Format, pAllocateArray->NumChannels);
+    return result;
+}
+
+CUresult cuArrayDestroy_f(CUarray hArray)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_array_element_size_mutex);
+        g_array_element_size.erase(hArray);
+    }
+    return hipArrayDestroy(hArray);
+}
 
 CUresult cuArray3DCreate_f(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray)
 {
-    return hipArray3DCreate(pHandle, pAllocateArray);
+    hipError_t result = hipArray3DCreate(pHandle, pAllocateArray);
+    if (result == hipSuccess)
+        record_array_element_size(*pHandle, pAllocateArray->Format, pAllocateArray->NumChannels);
+    return result;
 }
 
 CUresult cuArray3DGetDescriptor_f(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
 {
-    return hipArray3DGetDescriptor(pArrayDescriptor, hArray);
+    // a texture wrapping an external array queries it here, outside any capture
+    hipError_t result = hipArray3DGetDescriptor(pArrayDescriptor, hArray);
+    if (result == hipSuccess)
+        record_array_element_size(hArray, pArrayDescriptor->Format, pArrayDescriptor->NumChannels);
+    return result;
 }
 
 CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy) { return hipMemcpyParam2D(pCopy); }
@@ -474,7 +534,69 @@ CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
 
 CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy) { return hipDrvMemcpy3D(pCopy); }
 
-CUresult cuMemcpy3DAsync_f(const CUDA_MEMCPY3D* pCopy, CUstream hStream) { return hipDrvMemcpy3DAsync(pCopy, hStream); }
+static hipPitchedPtr
+hip_linear_side(hipMemoryType type, const void* host, hipDeviceptr_t device, size_t pitch, size_t width, size_t height)
+{
+    void* ptr = type == hipMemoryTypeHost ? const_cast<void*>(host) : reinterpret_cast<void*>(device);
+    return make_hipPitchedPtr(ptr, pitch, width, height);
+}
+
+// Warp's 3D copies (texture uploads and readbacks) have an array on at least one side and no
+// offsets. They go through the runtime-API hipMemcpy3DAsync because hipDrvMemcpy3DAsync on a
+// capturing stream copies at once and records no graph node.
+CUresult cuMemcpy3DAsync_f(const CUDA_MEMCPY3D* pCopy, CUstream hStream)
+{
+    bool has_offsets = pCopy->srcXInBytes || pCopy->srcY || pCopy->srcZ || pCopy->srcLOD || pCopy->dstXInBytes
+        || pCopy->dstY || pCopy->dstZ || pCopy->dstLOD;
+    hipArray_t array = pCopy->dstMemoryType == hipMemoryTypeArray ? pCopy->dstArray
+        : pCopy->srcMemoryType == hipMemoryTypeArray              ? pCopy->srcArray
+                                                                  : nullptr;
+    if (!array || has_offsets)
+        return hipDrvMemcpy3DAsync(pCopy, hStream);
+
+    size_t element_size = hip_array_element_size(array);
+    if (element_size == 0)
+        return hipErrorInvalidValue;
+
+    size_t height = pCopy->Height ? pCopy->Height : 1;
+    size_t depth = pCopy->Depth ? pCopy->Depth : 1;
+
+    hipMemcpy3DParms params = {};
+    params.extent = make_hipExtent(pCopy->WidthInBytes / element_size, height, depth);
+    if (pCopy->srcMemoryType == hipMemoryTypeArray)
+        params.srcArray = pCopy->srcArray;
+    else
+        params.srcPtr = hip_linear_side(
+            pCopy->srcMemoryType, pCopy->srcHost, pCopy->srcDevice, pCopy->srcPitch, params.extent.width,
+            pCopy->srcHeight ? pCopy->srcHeight : height
+        );
+    if (pCopy->dstMemoryType == hipMemoryTypeArray)
+        params.dstArray = pCopy->dstArray;
+    else
+        params.dstPtr = hip_linear_side(
+            pCopy->dstMemoryType, pCopy->dstHost, pCopy->dstDevice, pCopy->dstPitch, params.extent.width,
+            pCopy->dstHeight ? pCopy->dstHeight : height
+        );
+    if (pCopy->srcMemoryType == hipMemoryTypeHost)
+        params.kind = hipMemcpyHostToDevice;
+    else if (pCopy->dstMemoryType == hipMemoryTypeHost)
+        params.kind = hipMemcpyDeviceToHost;
+    else
+        params.kind = hipMemcpyDeviceToDevice;
+
+    hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+    hipError_t result = hipStreamIsCapturing(hStream, &status);
+    if (result == hipSuccess)
+        result = hipMemcpy3DAsync(&params, hStream);
+
+    // CUDA stages pageable host memory before cuMemcpy3DAsync returns, so callers free or
+    // reuse the buffer at once; HIP's 3D copies still access it afterwards
+    if (result == hipSuccess && status == hipStreamCaptureStatusNone
+        && (pCopy->srcMemoryType == hipMemoryTypeHost || pCopy->dstMemoryType == hipMemoryTypeHost))
+        result = hipStreamSynchronize(hStream);
+
+    return result;
+}
 
 CUresult cuTexObjectCreate_f(
     CUtexObject* pTexObject,
