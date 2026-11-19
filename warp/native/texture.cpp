@@ -181,6 +181,25 @@ void wp_texture_destroy_device(void* context, uint64_t array_handle)
     }
 }
 
+// MemoryType in texture.py carries the CUDA driver values (host 1, device 2, array 3);
+// HIP numbers its array type differently, so translate rather than cast
+static bool texture_memory_type(int warp_memory_type, CUmemorytype* memory_type)
+{
+    switch (warp_memory_type) {
+    case 1:
+        *memory_type = CU_MEMORYTYPE_HOST;
+        return true;
+    case 2:
+        *memory_type = CU_MEMORYTYPE_DEVICE;
+        return true;
+    case 3:
+        *memory_type = CU_MEMORYTYPE_ARRAY;
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool wp_texture_copy_device(
     void* context,
     unsigned width_bytes,
@@ -206,30 +225,34 @@ bool wp_texture_copy_device(
     copy_params.Height = height;
     copy_params.Depth = depth;
 
-    copy_params.dstMemoryType = static_cast<CUmemorytype>(dst_memory_type);
-    if (dst_memory_type == CU_MEMORYTYPE_HOST) {
-        copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
-    } else if (dst_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.dstDevice = (CUdeviceptr)dst_handle;
-    } else if (dst_memory_type == CU_MEMORYTYPE_ARRAY) {
-        copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
-    } else {
+    CUmemorytype dst_type;
+    if (!texture_memory_type(dst_memory_type, &dst_type)) {
         wp::set_error_string("Invalid destination memory type %d", dst_memory_type);
         return false;
+    }
+    copy_params.dstMemoryType = dst_type;
+    if (dst_type == CU_MEMORYTYPE_HOST) {
+        copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
+    } else if (dst_type == CU_MEMORYTYPE_DEVICE) {
+        copy_params.dstDevice = (CUdeviceptr)dst_handle;
+    } else {
+        copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
     }
     copy_params.dstPitch = dst_pitch;
     copy_params.dstHeight = dst_height;
 
-    copy_params.srcMemoryType = static_cast<CUmemorytype>(src_memory_type);
-    if (src_memory_type == CU_MEMORYTYPE_HOST) {
-        copy_params.srcHost = reinterpret_cast<void*>(src_handle);
-    } else if (src_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.srcDevice = (CUdeviceptr)src_handle;
-    } else if (src_memory_type == CU_MEMORYTYPE_ARRAY) {
-        copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
-    } else {
+    CUmemorytype src_type;
+    if (!texture_memory_type(src_memory_type, &src_type)) {
         wp::set_error_string("Invalid source memory type %d", src_memory_type);
         return false;
+    }
+    copy_params.srcMemoryType = src_type;
+    if (src_type == CU_MEMORYTYPE_HOST) {
+        copy_params.srcHost = reinterpret_cast<void*>(src_handle);
+    } else if (src_type == CU_MEMORYTYPE_DEVICE) {
+        copy_params.srcDevice = (CUdeviceptr)src_handle;
+    } else {
+        copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
     }
     copy_params.srcPitch = src_pitch;
     copy_params.srcHeight = src_height;
