@@ -5479,6 +5479,11 @@ size_t wp_cuda_launch_kernel(
         max_blocks = 2147483647;
     }
 
+#if WP_ENABLE_HIP
+    // HIP rejects a grid of more than 2^32 - 1 threads in a dimension; kernels loop over the remaining elements
+    max_blocks = std::min(max_blocks, int(0xFFFFFFFFu / unsigned(block_dim)));
+#endif
+
     if (grid_dim < 0) {
 #if defined(_DEBUG)
         fprintf(
