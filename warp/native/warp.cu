@@ -161,6 +161,7 @@ struct DeviceInfo {
     int max_smem_bytes = 0;
     CUcontext primary_context = NULL;
     int is_texture_hardware_supported = 1;
+    int is_texture3d_hardware_supported = 1;
 #if WP_ENABLE_HIP
     char arch_name[256] = "";  // target name, e.g. gfx942:sramecc+:xnack-
     int warp_size = 0;
@@ -326,6 +327,10 @@ int cuda_init()
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].is_texture_hardware_supported, hipDeviceAttributeImageSupport, device
                 ));
+                // HIP refuses 3D linear filtering on gfx90a by target name; texture.h selects the
+                // software sampler for its 3D textures by the same name, and the two must agree
+                g_devices[i].is_texture3d_hardware_supported
+                    = g_devices[i].is_texture_hardware_supported && strncmp(g_devices[i].arch_name, "gfx90a", 6) != 0;
                 // HIP has no IPC capability attribute; IPC is available on discrete GPUs on Linux
 #if defined(_WIN32)
                 g_devices[i].is_ipc_supported = 0;
@@ -2545,10 +2550,11 @@ int wp_cuda_device_get_host_native_atomic_supported(int ordinal)
     return 0;
 }
 
-int wp_cuda_device_is_texture_hardware_supported(int ordinal)
+int wp_cuda_device_is_texture_hardware_supported(int ordinal, int ndim)
 {
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
-        return g_devices[ordinal].is_texture_hardware_supported;
+        return ndim == 3 ? g_devices[ordinal].is_texture3d_hardware_supported
+                         : g_devices[ordinal].is_texture_hardware_supported;
     return 0;
 }
 

@@ -149,7 +149,7 @@ uint64_t wp_texture_create_device(void* context, int ndim, int* shape, int num_c
         return 0;
     }
 
-    if (wp_texture_software_enabled(context))
+    if (wp_texture_software_enabled(context, ndim))
         return wp_texture_software_create(context, ndim, shape, num_channels, dtype);
 
     ContextGuard guard(context);
@@ -179,7 +179,7 @@ uint64_t wp_texture_create_device(void* context, int ndim, int* shape, int num_c
 
 void wp_texture_destroy_device(void* context, uint64_t array_handle)
 {
-    if (wp_texture_software_enabled(context))
+    if (wp_texture_software_owns(array_handle))
         return wp_texture_software_destroy(context, array_handle);
     ContextGuard guard(context);
     if (array_handle != 0) {
@@ -222,7 +222,7 @@ bool wp_texture_copy_device(
     void* stream
 )
 {
-    if (wp_texture_software_enabled(context))
+    if (wp_texture_software_owns_copy(dst_memory_type, dst_handle, src_memory_type, src_handle))
         return wp_texture_software_copy(
             context, width_bytes, height, depth, dst_memory_type, dst_handle, dst_pitch, dst_height, src_memory_type,
             src_handle, src_pitch, src_height, stream
@@ -350,7 +350,7 @@ uint64_t wp_texture_object_create_device(
         return 0;
     }
 
-    if (wp_texture_software_enabled(context))
+    if (wp_texture_software_owns(array_handle))
         return wp_texture_software_object_create(
             context, array_handle, ndim, filter_mode, address_modes, use_normalized_coords
         );
@@ -397,7 +397,7 @@ uint64_t wp_texture_object_create_device(
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
 {
-    if (wp_texture_software_enabled(context))
+    if (wp_texture_software_owns(tex_handle))
         return wp_texture_software_object_destroy(context, tex_handle);
     ContextGuard guard(context);
 

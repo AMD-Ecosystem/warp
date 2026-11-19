@@ -6,6 +6,9 @@
 #include "texture.h"
 #include "texture_software.h"
 
+#include <mutex>
+#include <unordered_set>
+
 #if WP_ENABLE_CUDA
 
 namespace {
@@ -23,11 +26,36 @@ struct SoftwareTextureArray {
 // Memory types as texture.py passes them (the CUDA driver's values)
 enum { kHost = 1, kDevice = 2, kArray = 3 };
 
+// software array and texture handles; a device may hold hardware textures of other dimensions
+std::mutex g_handles_mutex;
+std::unordered_set<uint64_t> g_handles;
+
+void track(uint64_t handle, bool add)
+{
+    std::lock_guard<std::mutex> lock(g_handles_mutex);
+    if (add)
+        g_handles.insert(handle);
+    else
+        g_handles.erase(handle);
+}
+
 }  // namespace
 
-bool wp_texture_software_enabled(void* context)
+bool wp_texture_software_enabled(void* context, int ndim)
 {
-    return !wp_cuda_device_is_texture_hardware_supported(wp_cuda_context_get_device_ordinal(context));
+    return !wp_cuda_device_is_texture_hardware_supported(wp_cuda_context_get_device_ordinal(context), ndim);
+}
+
+bool wp_texture_software_owns(uint64_t handle)
+{
+    std::lock_guard<std::mutex> lock(g_handles_mutex);
+    return g_handles.count(handle) != 0;
+}
+
+bool wp_texture_software_owns_copy(int dst_memory_type, uint64_t dst_handle, int src_memory_type, uint64_t src_handle)
+{
+    return (dst_memory_type == kArray && wp_texture_software_owns(dst_handle))
+        || (src_memory_type == kArray && wp_texture_software_owns(src_handle));
 }
 
 uint64_t wp_texture_software_create(void* context, int ndim, int* shape, int num_channels, int dtype)
@@ -46,12 +74,14 @@ uint64_t wp_texture_software_create(void* context, int ndim, int* shape, int num
         delete array;
         return 0;
     }
+    track(reinterpret_cast<uint64_t>(array), true);
     return reinterpret_cast<uint64_t>(array);
 }
 
 void wp_texture_software_destroy(void* context, uint64_t array_handle)
 {
     SoftwareTextureArray* array = reinterpret_cast<SoftwareTextureArray*>(array_handle);
+    track(array_handle, false);
     wp_free_device(context, array->texels);
     delete array;
 }
@@ -116,8 +146,10 @@ uint64_t wp_texture_software_object_create(
     desc.address_mode_w = ndim > 2 ? address_modes[2] : 0;
 
     wp::Texture* desc_device = (wp::Texture*)wp_alloc_device(context, sizeof(wp::Texture), "(native:texture)");
-    if (desc_device)
+    if (desc_device) {
         wp_memcpy_h2d(context, desc_device, &desc, sizeof(wp::Texture));
+        track(reinterpret_cast<uint64_t>(desc_device), true);
+    }
 
     desc.data = host_texels;
     return reinterpret_cast<uint64_t>(desc_device);
@@ -125,6 +157,7 @@ uint64_t wp_texture_software_object_create(
 
 void wp_texture_software_object_destroy(void* context, uint64_t tex_handle)
 {
+    track(tex_handle, false);
     wp_free_device(context, reinterpret_cast<void*>(tex_handle));
 }
 

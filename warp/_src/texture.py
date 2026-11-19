@@ -270,7 +270,7 @@ class Texture:
         if cuda_array:
             if not device.is_cuda:
                 raise ValueError("Texture cuda_array was given, but the device is not a CUDA device")
-            Texture._require_texture_hardware(device, "cuda_array")
+            Texture._require_texture_hardware(device, "cuda_array", ndim)
 
             # we don't own this CUDA array, just aliasing
             self._array_owner = False
@@ -425,8 +425,8 @@ class Texture:
             pass
 
     @staticmethod
-    def _require_texture_hardware(device, name):
-        if not device.is_texture_hardware_supported:
+    def _require_texture_hardware(device, name, ndim):
+        if not (device.is_texture3d_hardware_supported if ndim == 3 else device.is_texture_hardware_supported):
             raise RuntimeError(
                 f"{name} is not available on {device}: it has no texture hardware and samples textures in software"
             )
@@ -845,7 +845,7 @@ class Texture:
         """
         if not self.device.is_cuda:
             raise RuntimeError("cuda_array is only supported for CUDA textures.")
-        Texture._require_texture_hardware(self.device, "cuda_array")
+        Texture._require_texture_hardware(self.device, "cuda_array", self._ndim)
         return self._array_handle
 
     @property
@@ -859,7 +859,7 @@ class Texture:
             raise RuntimeError(
                 "cuda_texture is only supported for CUDA textures. Use id for a device-independent handle."
             )
-        Texture._require_texture_hardware(self.device, "cuda_texture")
+        Texture._require_texture_hardware(self.device, "cuda_texture", self._ndim)
         return self._tex_handle
 
     @property
@@ -875,7 +875,7 @@ class Texture:
             return self._surface_handle
         if not self.device.is_cuda:
             raise RuntimeError("cuda_surface is only supported for CUDA textures.")
-        Texture._require_texture_hardware(self.device, "cuda_surface")
+        Texture._require_texture_hardware(self.device, "cuda_surface", self._ndim)
         if not self._surface_access:
             raise RuntimeError(
                 "Texture CUDA array was not created with surface load/store support. "

@@ -2626,6 +2626,8 @@ all_devices = get_test_devices()
 # the CUDA interop handles exist only where texture hardware samples (some AMD GPUs sample in software)
 interop_cuda_devices = [d for d in cuda_devices if d.is_texture_hardware_supported]
 interop_devices = [d for d in all_devices if not d.is_cuda or d.is_texture_hardware_supported]
+interop3d_cuda_devices = [d for d in cuda_devices if d.is_texture3d_hardware_supported]
+interop3d_devices = [d for d in all_devices if not d.is_cuda or d.is_texture3d_hardware_supported]
 
 add_function_test(
     TestTexture,
@@ -2688,7 +2690,7 @@ add_function_test(
     TestTexture,
     "test_texture3d_cuda_interop_handles",
     test_texture3d_cuda_interop_handles,
-    devices=interop_cuda_devices,
+    devices=interop3d_cuda_devices,
 )
 add_function_test(
     TestTexture, "test_texture_id_device_independent", test_texture_id_device_independent, devices=interop_devices
@@ -2697,7 +2699,7 @@ add_function_test(
     TestTexture,
     "test_texture_handle_properties_host_vs_cuda",
     test_texture_handle_properties_host_vs_cuda,
-    devices=interop_devices,
+    devices=interop3d_devices,
 )
 add_function_test(
     TestTexture, "test_texture2d_cuda_array_copy_api", test_texture2d_cuda_array_copy_api, devices=cuda_devices
@@ -2757,7 +2759,7 @@ add_function_test(
     TestTexture,
     "test_texture3d_cuda_surface_property_api",
     test_texture3d_cuda_surface_property_api,
-    devices=interop_cuda_devices,
+    devices=interop3d_cuda_devices,
 )
 add_function_test(
     TestTexture,
@@ -2769,7 +2771,7 @@ add_function_test(
     TestTexture,
     "test_texture3d_cuda_surface_property_requires_surface_access",
     test_texture3d_cuda_surface_property_requires_surface_access,
-    devices=interop_cuda_devices,
+    devices=interop3d_cuda_devices,
 )
 
 # Interpolation tests - run on all devices

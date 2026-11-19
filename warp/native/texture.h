@@ -648,6 +648,11 @@ template <typename T> __device__ T tex3D(unsigned long long texObj, float x, flo
 #define WP_TEXTURE_HW_SAMPLING 1
 #define WP_TEXTURE_OBJECT(handle) (handle)
 #endif
+// gfx90a has image hardware but HIP refuses 3D linear filtering on it, so its 3D textures use the
+// software sampler too (keyed on the target name, as HIP's own check is; no feature macro exists)
+#if defined(WP_TEXTURE_HW_SAMPLING) && !defined(__gfx90a__)
+#define WP_TEXTURE_HW_SAMPLING_3D 1
+#endif
 
 // Helper to convert CUDA types to Warp types
 template <typename T> struct texture_sample_helper;
@@ -679,7 +684,7 @@ template <> struct texture_sample_helper<float> {
 
     static CUDA_CALLABLE float sample_3d(const texture3d_t& tex, float u, float v, float w)
     {
-#if WP_TEXTURE_HW_SAMPLING
+#if WP_TEXTURE_HW_SAMPLING_3D
         return tex3D<float>(WP_TEXTURE_OBJECT(tex.tex), u, v, w);
 #else
         if (tex.tex == 0)
@@ -721,7 +726,7 @@ template <> struct texture_sample_helper<vec2f> {
 
     static CUDA_CALLABLE vec2f sample_3d(const texture3d_t& tex, float u, float v, float w)
     {
-#if WP_TEXTURE_HW_SAMPLING
+#if WP_TEXTURE_HW_SAMPLING_3D
         float2 val = tex3D<float2>(WP_TEXTURE_OBJECT(tex.tex), u, v, w);
         return vec2f(val.x, val.y);
 #else
@@ -770,7 +775,7 @@ template <> struct texture_sample_helper<vec4f> {
 
     static CUDA_CALLABLE vec4f sample_3d(const texture3d_t& tex, float u, float v, float w)
     {
-#if WP_TEXTURE_HW_SAMPLING
+#if WP_TEXTURE_HW_SAMPLING_3D
         float4 val = tex3D<float4>(WP_TEXTURE_OBJECT(tex.tex), u, v, w);
         return vec4f(val.x, val.y, val.z, val.w);
 #else
