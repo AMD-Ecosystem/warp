@@ -76,32 +76,47 @@ def test_tile_assign_1d(test, device):
     assert_np_equal(a.grad.numpy(), np.ones_like(a.numpy()))
 
 
-@wp.kernel
-def test_tile_assign_2d_kernel(src: wp.array3d[float], dst: wp.array3d[float]):
-    # load whole source into local memory
-    a = wp.tile_load(src, shape=(TILE_M, TILE_N, TILE_O))
-    b = wp.tile_zeros(dtype=float, shape=(TILE_M, TILE_N, TILE_O))
+test_tile_assign_2d_kernels = {}
 
-    # copy the source array slice by slice
-    for i in range(TILE_M):
-        # create views onto source and dest slice
-        row_src = a[i]
-        row_dst = b[i]
 
-        # copy onto dest slice
-        wp.tile_assign(row_dst, row_src)
+def test_tile_assign_2d_kernel(slices):
+    if slices not in test_tile_assign_2d_kernels:
 
-    wp.tile_store(dst, b)
+        @wp.kernel(module="unique")
+        def kernel(src: wp.array3d[float], dst: wp.array3d[float]):
+            # load whole source into local memory
+            a = wp.tile_load(src, shape=(slices, TILE_N, TILE_O))
+            b = wp.tile_zeros(dtype=float, shape=(slices, TILE_N, TILE_O))
+
+            # copy the source array slice by slice
+            for i in range(slices):
+                # create views onto source and dest slice
+                row_src = a[i]
+                row_dst = b[i]
+
+                # copy onto dest slice
+                wp.tile_assign(row_dst, row_src)
+
+            wp.tile_store(dst, b)
+
+        test_tile_assign_2d_kernels[slices] = kernel
+    return test_tile_assign_2d_kernels[slices]
 
 
 def test_tile_assign_2d(test, device):
     rng = np.random.default_rng(42)
 
-    a = wp.array(rng.random((TILE_M, TILE_N, TILE_O), dtype=np.float32), requires_grad=True, device=device)
-    b = wp.array(np.zeros((TILE_M, TILE_N, TILE_O), dtype=np.float32), requires_grad=True, device=device)
+    # the backward kernel keeps both tiles and their adjoints in shared memory, 64kb with
+    # TILE_M slices; use fewer slices where the device's shared memory per block is smaller
+    slices = select_shared_memory_fit(
+        device, (TILE_M, TILE_M // 2, TILE_M // 4), lambda m: 4 * m * TILE_N * TILE_O * 4, 32
+    )
+
+    a = wp.array(rng.random((slices, TILE_N, TILE_O), dtype=np.float32), requires_grad=True, device=device)
+    b = wp.array(np.zeros((slices, TILE_N, TILE_O), dtype=np.float32), requires_grad=True, device=device)
 
     with wp.Tape() as tape:
-        wp.launch_tiled(test_tile_assign_2d_kernel, dim=[1], inputs=[a, b], block_dim=32, device=device)
+        wp.launch_tiled(test_tile_assign_2d_kernel(slices), dim=[1], inputs=[a, b], block_dim=32, device=device)
 
     assert_np_equal(b.numpy(), a.numpy())
     b.grad = wp.ones_like(b, device=device)

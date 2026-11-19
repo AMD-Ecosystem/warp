@@ -45,11 +45,13 @@ def test_tile_shared_mem_size(test, device):
 
 # checks that we can configure shared memory > 48kb default
 def test_tile_shared_mem_large(test, device):
-    # set dimensions that require 64kb for the forward kernel
-    DIM_M = 64
+    # set dimensions that require 64kb for the forward kernel, or the most above the 48kb
+    # default that fits where the device's shared memory per block is smaller
     DIM_N = 128
 
     BLOCK_DIM = 256
+
+    DIM_M = select_shared_memory_fit(device, (64, 56), lambda m: m * DIM_N * 4 * 2, BLOCK_DIM)
 
     # we disable backward kernel gen since 128k is not supported on most architectures
     @wp.kernel(enable_backward=False, module="unique")
@@ -71,7 +73,7 @@ def test_tile_shared_mem_large(test, device):
     expected_forward_bytes = DIM_M * DIM_N * 4 * 2
     expected_backward_bytes = 0
 
-    assert expected_forward_bytes == 2**16
+    assert expected_forward_bytes > 48 * 1024
 
     # check shared memory for kernel on the device
     module_exec = compute.module.load(device, BLOCK_DIM)
