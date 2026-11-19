@@ -125,13 +125,16 @@ def test_tile_shared_mem_graph(test, device):
 
 # checks that stack allocations work for user functions
 def test_tile_shared_mem_func(test, device):
-    DIM_M = 64
     DIM_N = 64
 
     SMALL_DIM_M = 64 // 4
     SMALL_DIM_N = 64 // 4
 
     BLOCK_DIM = 256
+
+    # the backward kernel needs twice the forward's shared memory, 64kb at 64 rows; use fewer
+    # rows where the device's shared memory per block is smaller
+    DIM_M = select_shared_memory_fit(device, (64, 32), lambda m: m * DIM_N * 4 * 2 * 2, BLOCK_DIM)
 
     @wp.func
     def add_tile_small():
@@ -163,7 +166,7 @@ def test_tile_shared_mem_func(test, device):
     hooks = module_exec.get_kernel_hooks(compute)
 
     # ensure that total required dynamic shared is the larger of the two tiles
-    expected_required_shared = 64 * 64 * 4 * 2
+    expected_required_shared = DIM_M * DIM_N * 4 * 2
 
     assert hooks.forward_smem_bytes == expected_required_shared
     assert hooks.backward_smem_bytes == expected_required_shared * 2
