@@ -1274,6 +1274,10 @@ __global__ void memset_kernel(int* dest, int value, size_t n)
     }
 }
 
+#if WP_ENABLE_HIP && defined(_WIN32)
+template <typename T> __global__ void memtile_value_kernel(T* dst, T value, size_t n);
+#endif
+
 bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stream)
 {
     ContextGuard guard(context);
@@ -1286,7 +1290,23 @@ bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stre
 
     begin_cuda_range(WP_TIMING_MEMSET, cuda_stream, context, "memset");
 
+#if WP_ENABLE_HIP && defined(_WIN32)
+    // On Windows the HIP runtime can fail to launch a graph whose memset node targets memory
+    // allocated in the same graph (hipErrorInvalidValue), so captured memsets use a kernel.
+    bool result = true;
+    if (!wp_cuda_stream_is_capturing(cuda_stream)) {
+        result = check_cuda(cudaMemsetAsync(dest, value, n, cuda_stream));
+    } else if (n) {
+        const unsigned int byte = value & 0xff;
+        if ((reinterpret_cast<size_t>(dest) & 3) == 0 && (n & 3) == 0)
+            memset_kernel<<<(n / 4 + 255) / 256, 256, 0, cuda_stream>>>((int*)dest, int(byte * 0x01010101u), n / 4);
+        else
+            memtile_value_kernel<<<(n + 255) / 256, 256, 0, cuda_stream>>>((uint8_t*)dest, uint8_t(byte), n);
+        result = check_cuda(cudaGetLastError());
+    }
+#else
     bool result = check_cuda(cudaMemsetAsync(dest, value, n, cuda_stream));
+#endif
 
     end_cuda_range(WP_TIMING_MEMSET, cuda_stream);
 
