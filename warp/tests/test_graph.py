@@ -15,7 +15,6 @@ import warp as wp
 from warp._src.utils import check_p2p
 from warp.tests.unittest_utils import (
     GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED,
-    GRAPH_LAUNCH_WITH_MEMSET_OF_CAPTURE_ALLOCATION_UNRELIABLE,
     MEMPOOL_ACCESS_NOT_REVOCABLE,
     add_function_test,
     assert_np_equal,
@@ -26,7 +25,6 @@ from warp.tests.unittest_utils import (
     get_test_devices_with_cuda_graph_module_load,
     get_test_devices_with_mempool_and_cuda_graph_module_load,
     is_graph_host_copy_of_capture_allocation_supported,
-    is_graph_launch_with_memset_of_capture_allocation_reliable,
     is_mempool_access_revocable,
 )
 
@@ -445,8 +443,6 @@ def test_cuda_graph_alloc_retained_release(test, device):
 def test_cuda_graph_alloc_transient_stream(test, device):
     if not is_graph_host_copy_of_capture_allocation_supported(device):
         test.skipTest(GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED)
-    if not is_graph_launch_with_memset_of_capture_allocation_reliable(device):
-        test.skipTest(GRAPH_LAUNCH_WITH_MEMSET_OF_CAPTURE_ALLOCATION_UNRELIABLE)
 
     def foo(n, num_launches):
         # use temporary side stream

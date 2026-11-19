@@ -174,10 +174,6 @@ GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED = (
     "memory and memory allocated during the capture"
 )
 MULTI_DEVICE_GRAPH_UNSUPPORTED = "HIP cannot instantiate a graph with kernel nodes on more than one device"
-GRAPH_LAUNCH_WITH_MEMSET_OF_CAPTURE_ALLOCATION_UNRELIABLE = (
-    "HIP without direct dispatch can fail to launch a graph that memsets memory allocated during the "
-    "capture (hipGraphLaunch returns hipErrorInvalidValue)"
-)
 
 
 def _devices(devices):
@@ -217,18 +213,6 @@ def is_multi_device_graph_supported(devices) -> bool:
     :data:`MULTI_DEVICE_GRAPH_UNSUPPORTED` there.
     """
     return not any(d.is_hip for d in _devices(devices))
-
-
-def is_graph_launch_with_memset_of_capture_allocation_reliable(device) -> bool:
-    """Return whether a graph that memsets a capture allocation always launches.
-
-    Without direct dispatch, the default on Windows, HIP executes a graph's memory allocation node on a
-    worker thread, which maps the allocation again on every launch of a graph instantiated to free its
-    allocations on launch, as Warp's are. Creating the command for a memset node that follows it can then
-    miss the allocation, so ``hipGraphLaunch`` intermittently returns ``hipErrorInvalidValue``. Tests that
-    need it skip with :data:`GRAPH_LAUNCH_WITH_MEMSET_OF_CAPTURE_ALLOCATION_UNRELIABLE` there.
-    """
-    return not (sys.platform == "win32" and any(d.is_hip for d in _devices(device)))
 
 
 def skip_if_shared_memory_exceeded(test, device, dynamic_bytes: int, block_dim: int):
