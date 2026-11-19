@@ -85,6 +85,7 @@ void wp_texture_destroy_host(uint64_t tex_handle)
 // ============================================================================
 
 #include "cuda_util.h"
+#include "texture_software.h"
 
 // Helper function to get CUDA array format from dtype
 static CUarray_format get_cuda_format(int dtype)
@@ -148,6 +149,9 @@ uint64_t wp_texture_create_device(void* context, int ndim, int* shape, int num_c
         return 0;
     }
 
+    if (wp_texture_software_enabled(context))
+        return wp_texture_software_create(context, ndim, shape, num_channels, dtype);
+
     ContextGuard guard(context);
 
     size_t width = shape[0];
@@ -175,6 +179,8 @@ uint64_t wp_texture_create_device(void* context, int ndim, int* shape, int num_c
 
 void wp_texture_destroy_device(void* context, uint64_t array_handle)
 {
+    if (wp_texture_software_enabled(context))
+        return wp_texture_software_destroy(context, array_handle);
     ContextGuard guard(context);
     if (array_handle != 0) {
         check_cu(cuArrayDestroy_f((CUarray)array_handle));
@@ -216,6 +222,11 @@ bool wp_texture_copy_device(
     void* stream
 )
 {
+    if (wp_texture_software_enabled(context))
+        return wp_texture_software_copy(
+            context, width_bytes, height, depth, dst_memory_type, dst_handle, dst_pitch, dst_height, src_memory_type,
+            src_handle, src_pitch, src_height, stream
+        );
     ContextGuard guard(context);
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
@@ -339,6 +350,11 @@ uint64_t wp_texture_object_create_device(
         return 0;
     }
 
+    if (wp_texture_software_enabled(context))
+        return wp_texture_software_object_create(
+            context, array_handle, ndim, filter_mode, address_modes, use_normalized_coords
+        );
+
     ContextGuard guard(context);
 
     // Create resource descriptor
@@ -381,6 +397,8 @@ uint64_t wp_texture_object_create_device(
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
 {
+    if (wp_texture_software_enabled(context))
+        return wp_texture_software_object_destroy(context, tex_handle);
     ContextGuard guard(context);
 
     if (tex_handle != 0) {

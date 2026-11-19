@@ -430,7 +430,7 @@ WP_API int wp_cuda_device_is_uva(int ordinal);
 WP_API int wp_cuda_device_get_pageable_memory_access(int ordinal);
 WP_API int wp_cuda_device_get_direct_managed_mem_access_from_host(int ordinal);
 WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal);
-WP_API int wp_cuda_device_is_texture_supported(int ordinal);
+WP_API int wp_cuda_device_is_texture_hardware_supported(int ordinal);
 WP_API int wp_cuda_device_is_mempool_supported(int ordinal);
 WP_API int wp_cuda_device_is_ipc_supported(int ordinal);
 WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold);

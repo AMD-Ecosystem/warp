@@ -3848,7 +3848,8 @@ class Device:
         is_mempool_supported (bool): Indicates whether the device supports using the ``cuMemAllocAsync`` and
             ``cuMemPool`` family of APIs for stream-ordered memory allocations. ``False`` for CPU devices.
         is_texture_supported (bool): Indicates whether :class:`warp.Texture` objects can be created on this device.
-            ``False`` for AMD GPUs without image support; ``True`` for CPU devices, which sample textures in software.
+        is_texture_hardware_supported (bool): Indicates whether textures on this device are sampled by texture
+            hardware. ``False`` for CPU devices and for AMD GPUs without image support, which sample in software.
         is_ipc_supported (Optional[bool]): Indicates whether the device supports IPC.
 
             - ``True`` if supported.
@@ -3899,6 +3900,7 @@ class Device:
             self.is_mempool_supported = False
             self.is_mempool_enabled = False
             self.is_texture_supported = True
+            self.is_texture_hardware_supported = False
             self.is_ipc_supported = False  # TODO: Support IPC for CPU arrays
             self.is_cubin_supported = False
             self.uuid = None
@@ -3930,7 +3932,8 @@ class Device:
             )
             self.is_cpu_gpu_atomic_supported = runtime.core.wp_cuda_device_get_host_native_atomic_supported(ordinal) > 0
             self.is_mempool_supported = runtime.core.wp_cuda_device_is_mempool_supported(ordinal) > 0
-            self.is_texture_supported = runtime.core.wp_cuda_device_is_texture_supported(ordinal) > 0
+            self.is_texture_supported = True
+            self.is_texture_hardware_supported = runtime.core.wp_cuda_device_is_texture_hardware_supported(ordinal) > 0
             if platform.system() == "Linux":
                 # Use None when IPC support cannot be determined
                 ipc_support_api_query = runtime.core.wp_cuda_device_is_ipc_supported(ordinal)
@@ -5526,8 +5529,8 @@ class Runtime:
             self.core.wp_cuda_device_get_direct_managed_mem_access_from_host.restype = ctypes.c_int
             self.core.wp_cuda_device_get_host_native_atomic_supported.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_host_native_atomic_supported.restype = ctypes.c_int
-            self.core.wp_cuda_device_is_texture_supported.argtypes = [ctypes.c_int]
-            self.core.wp_cuda_device_is_texture_supported.restype = ctypes.c_int
+            self.core.wp_cuda_device_is_texture_hardware_supported.argtypes = [ctypes.c_int]
+            self.core.wp_cuda_device_is_texture_hardware_supported.restype = ctypes.c_int
             self.core.wp_cuda_device_is_mempool_supported.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_is_mempool_supported.restype = ctypes.c_int
             self.core.wp_cuda_device_is_ipc_supported.argtypes = [ctypes.c_int]

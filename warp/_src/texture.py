@@ -270,6 +270,7 @@ class Texture:
         if cuda_array:
             if not device.is_cuda:
                 raise ValueError("Texture cuda_array was given, but the device is not a CUDA device")
+            Texture._require_texture_hardware(device, "cuda_array")
 
             # we don't own this CUDA array, just aliasing
             self._array_owner = False
@@ -356,11 +357,6 @@ class Texture:
 
         # create texture
         if device.is_cuda:
-            if not device.is_texture_supported:
-                raise RuntimeError(
-                    f"Textures are not supported on device {device} ({device.name}): it has no image support"
-                )
-
             # create CUDA array if it was not provided
             if not self._array_handle:
                 self._array_owner = True
@@ -427,6 +423,13 @@ class Texture:
                 self._runtime.core.wp_texture_destroy_host(self._tex_handle)
         except (TypeError, AttributeError):
             pass
+
+    @staticmethod
+    def _require_texture_hardware(device, name):
+        if not device.is_texture_hardware_supported:
+            raise RuntimeError(
+                f"{name} is not available on {device}: it has no texture hardware and samples textures in software"
+            )
 
     @staticmethod
     def _validate_texture_dtype(dtype):
@@ -549,7 +552,7 @@ class Texture:
             if isinstance(src, Texture):
                 if src.device == self.device:
                     src_memory_type = MemoryType.ARRAY
-                    src_handle = src.cuda_array
+                    src_handle = src._array_handle
                     src_pitch = 0  # ignored
                     src_height = 0  # ignored
                 elif src.device.is_cpu:
@@ -586,7 +589,7 @@ class Texture:
                 height,
                 depth,
                 MemoryType.ARRAY,
-                self.cuda_array,
+                self._array_handle,
                 0,
                 0,
                 src_memory_type,
@@ -639,7 +642,7 @@ class Texture:
             if isinstance(dst, Texture):
                 if dst.device == self.device:
                     dst_memory_type = MemoryType.ARRAY
-                    dst_handle = dst.cuda_array
+                    dst_handle = dst._array_handle
                     dst_pitch = 0  # ignored
                     dst_height = 0  # ignored
                 elif dst.device.is_cpu:
@@ -680,7 +683,7 @@ class Texture:
                 dst_pitch,
                 dst_height,
                 MemoryType.ARRAY,
-                self.cuda_array,
+                self._array_handle,
                 0,
                 0,
                 self.device.stream.cuda_stream,
@@ -842,6 +845,7 @@ class Texture:
         """
         if not self.device.is_cuda:
             raise RuntimeError("cuda_array is only supported for CUDA textures.")
+        Texture._require_texture_hardware(self.device, "cuda_array")
         return self._array_handle
 
     @property
@@ -855,6 +859,7 @@ class Texture:
             raise RuntimeError(
                 "cuda_texture is only supported for CUDA textures. Use id for a device-independent handle."
             )
+        Texture._require_texture_hardware(self.device, "cuda_texture")
         return self._tex_handle
 
     @property
@@ -870,6 +875,7 @@ class Texture:
             return self._surface_handle
         if not self.device.is_cuda:
             raise RuntimeError("cuda_surface is only supported for CUDA textures.")
+        Texture._require_texture_hardware(self.device, "cuda_surface")
         if not self._surface_access:
             raise RuntimeError(
                 "Texture CUDA array was not created with surface load/store support. "

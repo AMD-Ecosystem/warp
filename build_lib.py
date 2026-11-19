@@ -602,6 +602,7 @@ def main(argv: list[str] | None = None) -> int:
             "native/sparse.cpp",
             "native/volume.cpp",
             "native/texture.cpp",
+            "native/texture_software.cpp",
             "native/mathdx.cpp",
             "native/coloring.cpp",
             "native/fastcall.cpp",
