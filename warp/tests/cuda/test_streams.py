@@ -362,6 +362,8 @@ def test_event_external(test, device):
         a = wp.zeros(n, dtype=float)
         b = wp.zeros(n, dtype=float)
         c = wp.zeros(n, dtype=float)
+        # the graphs run on other streams, which are not ordered after the zero fills
+        wp.synchronize_device()
 
         with wp.ScopedCapture() as capture1:
             wp.launch(inc, dim=n, inputs=[a])
