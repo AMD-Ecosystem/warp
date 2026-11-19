@@ -356,6 +356,11 @@ class Texture:
 
         # create texture
         if device.is_cuda:
+            if not device.is_texture_supported:
+                raise RuntimeError(
+                    f"Textures are not supported on device {device} ({device.name}): it has no image support"
+                )
+
             # create CUDA array if it was not provided
             if not self._array_handle:
                 self._array_owner = True

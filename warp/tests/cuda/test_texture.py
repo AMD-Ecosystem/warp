@@ -2605,13 +2605,28 @@ def test_texture3d_array(test, device):
 # ============================================================================
 
 
+def test_texture_unsupported_device_raises(test, device):
+    """Creating a texture on a GPU without image support raises a clear error."""
+    data = np.zeros((4, 4), dtype=np.float32)
+    with test.assertRaisesRegex(RuntimeError, "Textures are not supported on device"):
+        wp.Texture2D(data, device=device)
+
+
 class TestTexture(unittest.TestCase):
     pass
 
 
-# Register tests - textures work on both CPU and CUDA devices
-cuda_devices = get_selected_cuda_test_devices()
-all_devices = get_test_devices()
+# Register tests - textures work on both CPU and CUDA devices; some AMD GPUs have no image support
+cuda_devices = [d for d in get_selected_cuda_test_devices() if d.is_texture_supported]
+all_devices = [d for d in get_test_devices() if d.is_texture_supported]
+devices_without_textures = [d for d in get_selected_cuda_test_devices() if not d.is_texture_supported]
+
+add_function_test(
+    TestTexture,
+    "test_texture_unsupported_device_raises",
+    test_texture_unsupported_device_raises,
+    devices=devices_without_textures,
+)
 
 # Core texture tests - run on all devices (CPU + CUDA)
 add_function_test(TestTexture, "test_texture1d_1channel", test_texture1d_1channel, devices=all_devices)

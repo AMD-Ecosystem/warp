@@ -160,6 +160,7 @@ struct DeviceInfo {
     int is_ipc_supported = -1;
     int max_smem_bytes = 0;
     CUcontext primary_context = NULL;
+    int is_texture_supported = 1;
 #if WP_ENABLE_HIP
     char arch_name[256] = "";  // target name, e.g. gfx942:sramecc+:xnack-
     int warp_size = 0;
@@ -321,6 +322,10 @@ int cuda_init()
                     snprintf(g_devices[i].arch_name, sizeof(g_devices[i].arch_name), "%s", props.gcnArchName);
                     g_devices[i].warp_size = props.warpSize;
                 }
+                // AMD GPUs without image hardware cannot create texture arrays or objects
+                check_cu(
+                    cuDeviceGetAttribute_f(&g_devices[i].is_texture_supported, hipDeviceAttributeImageSupport, device)
+                );
                 // HIP has no IPC capability attribute; IPC is available on discrete GPUs on Linux
 #if defined(_WIN32)
                 g_devices[i].is_ipc_supported = 0;
@@ -2537,6 +2542,13 @@ int wp_cuda_device_get_host_native_atomic_supported(int ordinal)
 {
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
         return g_devices[ordinal].host_native_atomic_supported;
+    return 0;
+}
+
+int wp_cuda_device_is_texture_supported(int ordinal)
+{
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].is_texture_supported;
     return 0;
 }
 
