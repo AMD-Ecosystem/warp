@@ -89,19 +89,20 @@ typedef size_t (*CUoccupancyB2DSize)(int blockSize);
 #define cudaGraphInstantiateFlagAutoFreeOnLaunch    hipGraphInstantiateFlagAutoFreeOnLaunch
 #define cudaGraphInstantiateWithFlags               hipGraphInstantiateWithFlags
 #if defined(_WIN32)
-// On Windows the HIP runtime executes graph memory nodes on a worker thread, and a launch of a
-// graph instantiated with hipGraphInstantiateFlagAutoFreeOnLaunch frees the graph's memory before
-// it waits for the previous launch, which may still be running those nodes. Waiting first avoids
-// the race (an invalid-argument launch error or an access violation in the runtime).
+// On Windows the HIP runtime executes graph memory nodes on a worker thread. A launch of a graph
+// instantiated with hipGraphInstantiateFlagAutoFreeOnLaunch frees the graph's memory before it
+// waits for the previous launch, which may still be running those nodes, and while a memory
+// allocation node runs, the runtime does not recognize pointers into that allocation, so a copy
+// issued right after the launch fails with an invalid-argument error. Waiting for the launch to
+// finish closes both windows (an invalid-argument error or an access violation in the runtime).
 static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStream_t stream)
 {
     hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
-    if (hipStreamIsCapturing(stream, &status) == hipSuccess && status == hipStreamCaptureStatusNone) {
-        hipError_t err = hipStreamSynchronize(stream);
-        if (err != hipSuccess)
-            return err;
-    }
-    return hipGraphLaunch(graph_exec, stream);
+    bool capturing = hipStreamIsCapturing(stream, &status) != hipSuccess || status != hipStreamCaptureStatusNone;
+    hipError_t err = hipGraphLaunch(graph_exec, stream);
+    if (err != hipSuccess || capturing)
+        return err;
+    return hipStreamSynchronize(stream);
 }
 #define cudaGraphLaunch                             wp_hip_graph_launch
 #else
