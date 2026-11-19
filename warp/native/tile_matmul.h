@@ -17,6 +17,7 @@
 #pragma once
 
 #include "tile.h"
+#include "tile_matmul_mma.h"
 
 #ifdef __clang__
 // disable warnings related to C++17 extensions on CPU JIT builds
@@ -181,6 +182,11 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
     using ElemA = typename remove_reference<decltype(A.ptr[0])>::type;
     using ElemB = typename remove_reference<decltype(B.ptr[0])>::type;
     using ElemC = typename remove_reference<decltype(C.ptr[0])>::type;
+
+#if defined(WP_TILE_MMA)
+    if constexpr (tile_mma::supported<LayoutA, LayoutB, LayoutC, ElemA, ElemB, ElemC, T>())
+        return tile_mma::matmul<Accumulate, LayoutA, LayoutB, LayoutC>(A, B, C, alpha, beta);
+#endif
 
     // Direct pointer access with __restrict__ to enable compiler optimizations
     const ElemA* __restrict__ a_ptr = A.ptr;

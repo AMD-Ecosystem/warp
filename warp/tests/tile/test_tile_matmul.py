@@ -374,6 +374,40 @@ class TestTileMatmul(unittest.TestCase):
     pass
 
 
+def create_matmul_kernel(dtype, M, N, K):
+    @wp.kernel(module="unique")
+    def mm(A: wp.array2d(dtype=dtype), B: wp.array2d(dtype=dtype), C: wp.array2d(dtype=dtype)):
+        wp.tile_store(C, wp.tile_matmul(wp.tile_load(A, shape=(M, K)), wp.tile_load(B, shape=(K, N))))
+
+    return mm
+
+
+def test_tile_matmul_fragment_shapes(dtype):
+    # shapes that fill 16x16 fragments, a non-square one, and ones that do not fit; a block of a
+    # whole number of 64-thread groups and one that is not; GPU results against the CPU
+    def test(test, device):
+        rng = np.random.default_rng(7)
+        for M, N, K in ((16, 16, 16), (48, 16, 32), (24, 16, 16), (17, 33, 15)):
+            mm = create_matmul_kernel(dtype, M, N, K)
+            A, B = rng.uniform(-1, 1, (M, K)), rng.uniform(-1, 1, (K, N))
+            for block_dim in (64, 96):
+                results = []
+                for dev in (device, "cpu"):
+                    a = wp.array(A, dtype=dtype, device=dev, requires_grad=True)
+                    b = wp.array(B, dtype=dtype, device=dev, requires_grad=True)
+                    c = wp.zeros((M, N), dtype=dtype, device=dev, requires_grad=True)
+                    with wp.Tape() as tape:
+                        wp.launch_tiled(mm, dim=[1], inputs=[a, b, c], block_dim=block_dim, device=dev)
+                    c.grad = wp.ones_like(c)
+                    tape.backward()
+                    results.append([x.numpy().astype(np.float64) for x in (c, a.grad, b.grad)])
+                tol = 2e-2 if dtype == wp.float16 else 1e-5
+                for got, ref in zip(*results, strict=True):
+                    assert_np_equal(got, ref, tol=tol)
+
+    return test
+
+
 devices = get_test_devices()
 
 # bfloat16 requires CC >= 8.0 (Ampere+)
@@ -419,6 +453,13 @@ add_function_test(TestTileMatmul, "test_tile_gemm_fp64", test_tile_gemm(wp.float
 add_function_test(TestTileMatmul, "test_tile_grouped_gemm", test_tile_grouped_gemm, devices=devices)
 add_function_test(TestTileMatmul, "test_tile_transpose_matmul", test_tile_transpose_matmul, devices=devices)
 add_function_test(TestTileMatmul, "test_tile_matmul_return_form", test_tile_matmul_return_form, devices=devices)
+for dtype in (wp.float16, wp.float32, wp.float64):
+    add_function_test(
+        TestTileMatmul,
+        f"test_tile_matmul_fragment_shapes_{dtype.__name__}",
+        test_tile_matmul_fragment_shapes(dtype),
+        devices=get_cuda_test_devices(),
+    )
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
