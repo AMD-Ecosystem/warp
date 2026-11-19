@@ -231,36 +231,50 @@ inline CUDA_CALLABLE void matmul(const StorageA& A, const StorageB& B, StorageC&
     constexpr int fragments = (M / 16) * fragments_n;
     constexpr int waves = WP_TILE_BLOCK_DIM / kWave;
     constexpr int acc_size = kWave == 64 ? 4 : 8;
+    // each wavefront computes a row of `group` fragments that share the A operand of every K step;
+    // the widest group that divides the fragment row and still leaves work for every wavefront
+    constexpr int group = (fragments_n % 4 == 0 && fragments / 4 >= waves) ? 4
+        : (fragments_n % 2 == 0 && fragments / 2 >= waves)                 ? 2
+                                                                           : 1;
+    constexpr int groups = fragments / group;
 
     const int lane = WP_TILE_THREAD_IDX % kWave;
     const int lo = lane % 16;
     const int g = lane / 16;
     const int kofs = k_offset<Op>(g);
 
-    for (int f = WP_TILE_THREAD_IDX / kWave; f < fragments; f += waves) {
-        const int fi = (f / fragments_n) * 16;
-        const int fj = (f % fragments_n) * 16;
+    for (int f = WP_TILE_THREAD_IDX / kWave; f < groups; f += waves) {
+        const int fi = (f * group / fragments_n) * 16;
+        const int fj = (f * group % fragments_n) * 16;
         const ElemA* a_row = &A.ptr[(fi + lo) * sa0];
         const ElemA* b_col = &B.ptr[(fj + lo) * sb1];
 
-        typename Op::Acc acc = {};
+        typename Op::Acc acc[group] = {};
         for (int k0 = 0; k0 < K; k0 += k_step<Op>()) {
-            typename Op::In a[Op::kpl], b[Op::kpl];
+            typename Op::In a[Op::kpl];
             WP_PRAGMA_UNROLL
-            for (int v = 0; v < Op::kpl; ++v) {
+            for (int v = 0; v < Op::kpl; ++v)
                 a[v] = Op::in(a_row[(k0 + kofs + v) * sa1]);
-                b[v] = Op::in(b_col[(k0 + kofs + v) * sb0]);
+            WP_PRAGMA_UNROLL
+            for (int h = 0; h < group; ++h) {
+                typename Op::In b[Op::kpl];
+                WP_PRAGMA_UNROLL
+                for (int v = 0; v < Op::kpl; ++v)
+                    b[v] = Op::in(b_col[16 * h * sb1 + (k0 + kofs + v) * sb0]);
+                acc[h] = Op::mma(a, b, acc[h]);
             }
-            acc = Op::mma(a, b, acc);
         }
 
         WP_PRAGMA_UNROLL
-        for (int r = 0; r < acc_size; ++r) {
-            const int idx = (fi + Op::row(g, r)) * sc0 + (fj + lo) * sc1;
-            if constexpr (Accumulate)
-                C.ptr[idx] = alpha * T(acc[r]) + beta * C.ptr[idx];
-            else
-                C.ptr[idx] = alpha * T(acc[r]);
+        for (int h = 0; h < group; ++h) {
+            WP_PRAGMA_UNROLL
+            for (int r = 0; r < acc_size; ++r) {
+                const int idx = (fi + Op::row(g, r)) * sc0 + (fj + 16 * h + lo) * sc1;
+                if constexpr (Accumulate)
+                    C.ptr[idx] = alpha * T(acc[h][r]) + beta * C.ptr[idx];
+                else
+                    C.ptr[idx] = alpha * T(acc[h][r]);
+            }
         }
     }
 }
