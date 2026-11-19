@@ -88,7 +88,25 @@ typedef size_t (*CUoccupancyB2DSize)(int blockSize);
 #define cudaGraphGetNodes                           hipGraphGetNodes
 #define cudaGraphInstantiateFlagAutoFreeOnLaunch    hipGraphInstantiateFlagAutoFreeOnLaunch
 #define cudaGraphInstantiateWithFlags               hipGraphInstantiateWithFlags
+#if defined(_WIN32)
+// On Windows the HIP runtime executes graph memory nodes on a worker thread, and a launch of a
+// graph instantiated with hipGraphInstantiateFlagAutoFreeOnLaunch frees the graph's memory before
+// it waits for the previous launch, which may still be running those nodes. Waiting first avoids
+// the race (an invalid-argument launch error or an access violation in the runtime).
+static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStream_t stream)
+{
+    hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+    if (hipStreamIsCapturing(stream, &status) == hipSuccess && status == hipStreamCaptureStatusNone) {
+        hipError_t err = hipStreamSynchronize(stream);
+        if (err != hipSuccess)
+            return err;
+    }
+    return hipGraphLaunch(graph_exec, stream);
+}
+#define cudaGraphLaunch                             wp_hip_graph_launch
+#else
 #define cudaGraphLaunch                             hipGraphLaunch
+#endif
 #define cudaGraphMemAllocNodeGetParams              hipGraphMemAllocNodeGetParams
 #define cudaGraphMemAttrUsedMemCurrent              hipGraphMemAttrUsedMemCurrent
 #define cudaGraphMemFreeNodeGetParams               hipGraphMemFreeNodeGetParams
