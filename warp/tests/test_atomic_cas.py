@@ -269,6 +269,55 @@ def test_atomic_cas_4d(test, device, dtype, register_kernels=False):
     assert_np_equal(counter_np, expected)
 
 
+def test_atomic_cas_single_winner(test, device, dtype, register_kernels=False):
+    warp_type = wp.dtype_from_numpy(np.dtype(dtype))
+
+    def cas_once(cell: wp.array(dtype=warp_type), old: wp.array(dtype=warp_type)):
+        tid = wp.tid()
+        old[tid] = wp.atomic_cas(cell, 0, warp_type(0), warp_type(tid + 1))
+
+    kernel = getkernel(cas_once, suffix=dtype.__name__)
+
+    if register_kernels:
+        return
+
+    # every thread tries once to claim the cell; nobody waits on another thread
+    n = 1024
+    cell = wp.zeros(1, dtype=warp_type, device=device)
+    old = wp.full(n, value=n + 7, dtype=warp_type, device=device)
+    wp.launch(kernel, dim=n, inputs=[cell, old], device=device)
+
+    old_np = old.numpy()
+    winners = np.flatnonzero(old_np == 0)
+    test.assertEqual(len(winners), 1)
+    test.assertEqual(cell.numpy()[0], winners[0] + 1)
+    # the losers all saw the winner's value
+    assert_np_equal(np.delete(old_np, winners[0]), np.full(n - 1, winners[0] + 1, dtype=dtype))
+
+
+def test_atomic_exch_permutation(test, device, dtype, register_kernels=False):
+    warp_type = wp.dtype_from_numpy(np.dtype(dtype))
+
+    def exch_once(cell: wp.array(dtype=warp_type), old: wp.array(dtype=warp_type)):
+        tid = wp.tid()
+        old[tid] = wp.atomic_exch(cell, 0, warp_type(tid + 1))
+
+    kernel = getkernel(exch_once, suffix=dtype.__name__)
+
+    if register_kernels:
+        return
+
+    # the exchanges form one chain: every value written is read back exactly once, by the
+    # next thread in the chain or as the final cell value
+    n = 1024
+    cell = wp.zeros(1, dtype=warp_type, device=device)
+    old = wp.zeros(n, dtype=warp_type, device=device)
+    wp.launch(kernel, dim=n, inputs=[cell, old], device=device)
+
+    seen = np.sort(np.append(old.numpy(), cell.numpy()[0]))
+    assert_np_equal(seen, np.arange(n + 1, dtype=dtype))
+
+
 # every thread of the launch takes the same spin lock
 devices = get_test_devices_with_independent_thread_scheduling()
 
@@ -294,6 +343,20 @@ for dtype in np_test_types:
     )
     add_function_test_register_kernel(
         TestAtomicCAS, f"test_cas_4d_{type_name}", test_atomic_cas_4d, devices=devices, dtype=dtype
+    )
+    add_function_test_register_kernel(
+        TestAtomicCAS,
+        f"test_cas_single_winner_{type_name}",
+        test_atomic_cas_single_winner,
+        devices=get_test_devices(),
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestAtomicCAS,
+        f"test_exch_permutation_{type_name}",
+        test_atomic_exch_permutation,
+        devices=get_test_devices(),
+        dtype=dtype,
     )
 
 if __name__ == "__main__":
