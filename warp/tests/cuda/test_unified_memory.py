@@ -458,6 +458,9 @@ class TestUnifiedMemory(unittest.TestCase):
 
     @unittest.skipUnless(get_cuda_device_pair_with_peer_access_support(), "Requires devices with peer access support")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(
+        is_mempool_access_revocable(get_cuda_device_pair_with_peer_access_support()), MEMPOOL_ACCESS_NOT_REVOCABLE
+    )
     def test_unified_memory_verify_uses_peer_access_for_default_cuda_allocations(self):
         """Default CUDA allocations use peer-access state for cross-GPU verification.
 
@@ -495,6 +498,9 @@ class TestUnifiedMemory(unittest.TestCase):
 
     @unittest.skipUnless(get_cuda_device_pair_with_peer_access_support(), "Requires devices with peer access support")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(
+        is_mempool_access_revocable(get_cuda_device_pair_with_peer_access_support()), MEMPOOL_ACCESS_NOT_REVOCABLE
+    )
     def test_unified_memory_verify_uses_parent_allocator_for_default_cuda_slices(self):
         """Slices of default CUDA allocations should follow the base array's allocator.
 
@@ -533,6 +539,9 @@ class TestUnifiedMemory(unittest.TestCase):
     @unittest.skipUnless(
         get_cuda_device_pair_with_mempool_access_support(), "Requires devices with mempool access support"
     )
+    @unittest.skipUnless(
+        is_mempool_access_revocable(get_cuda_device_pair_with_mempool_access_support()), MEMPOOL_ACCESS_NOT_REVOCABLE
+    )
     def test_unified_memory_device_can_access_uses_mempool_state_when_target_mempools_enabled(self):
         """Device.can_access() follows the target device's current built-in allocator mode.
 
@@ -565,6 +574,9 @@ class TestUnifiedMemory(unittest.TestCase):
         get_cuda_device_pair_with_mempool_access_support(), "Requires devices with mempool access support"
     )
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(
+        is_mempool_access_revocable(get_cuda_device_pair_with_mempool_access_support()), MEMPOOL_ACCESS_NOT_REVOCABLE
+    )
     def test_unified_memory_verify_uses_mempool_access_for_cuda_mempool_allocations(self):
         """CUDA mempool allocations use mempool-access state for cross-GPU verification.
 
@@ -606,6 +618,9 @@ class TestUnifiedMemory(unittest.TestCase):
         get_cuda_device_pair_with_mempool_access_support(), "Requires devices with mempool access support"
     )
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(
+        is_mempool_access_revocable(get_cuda_device_pair_with_mempool_access_support()), MEMPOOL_ACCESS_NOT_REVOCABLE
+    )
     def test_unified_memory_verify_uses_parent_allocator_for_cuda_mempool_slices(self):
         """Slices of CUDA mempool allocations should follow the base array's allocator.
 

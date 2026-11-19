@@ -564,6 +564,7 @@ class TestStreams(unittest.TestCase):
 
     @unittest.skipUnless(len(wp.get_cuda_devices()) > 1, "Requires at least two CUDA devices")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(is_multi_device_graph_supported(wp.get_cuda_devices()[:2]), MULTI_DEVICE_GRAPH_UNSUPPORTED)
     def test_stream_arg_graph_mgpu(self):
         wp.load_module(device="cuda:0")
         wp.load_module(device="cuda:1")
@@ -614,6 +615,7 @@ class TestStreams(unittest.TestCase):
 
     @unittest.skipUnless(len(wp.get_cuda_devices()) > 1, "Requires at least two CUDA devices")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(is_multi_device_graph_supported(wp.get_cuda_devices()[:2]), MULTI_DEVICE_GRAPH_UNSUPPORTED)
     def test_stream_scope_graph_mgpu(self):
         wp.load_module(device="cuda:0")
         wp.load_module(device="cuda:1")

@@ -729,6 +729,9 @@ def test_bsr_mm_max_new_nnz(test, device):
 def test_capturability(test, device):
     """Test that BSR operations are graph-capturable"""
 
+    if not is_graph_host_copy_of_capture_allocation_supported(device):
+        test.skipTest(GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED)
+
     N = 5
     M = 3
 

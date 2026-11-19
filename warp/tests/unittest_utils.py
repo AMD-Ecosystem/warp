@@ -166,6 +166,55 @@ def get_test_devices_with_mempool(mode: str | None = None):
     return [d for d in get_test_devices(mode) if not d.is_cuda or d.is_mempool_supported]
 
 
+MEMPOOL_ACCESS_NOT_REVOCABLE = (
+    "HIP cannot revoke memory pool peer access (hipMemPoolSetAccess with hipMemAccessFlagsProtNone fails)"
+)
+GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED = (
+    "HIP cannot instantiate a graph captured on a device other than 0 that copies between pinned host "
+    "memory and memory allocated during the capture"
+)
+MULTI_DEVICE_GRAPH_UNSUPPORTED = "HIP cannot instantiate a graph with kernel nodes on more than one device"
+
+
+def _devices(devices):
+    if devices is None:
+        return []
+    if isinstance(devices, (list, tuple)):
+        return [wp.get_device(d) for d in devices if d is not None]
+    return [wp.get_device(devices)]
+
+
+def is_mempool_access_revocable(devices) -> bool:
+    """Return whether memory pool peer access granted between ``devices`` can be revoked again.
+
+    HIP grants peer access to a device's memory pool but rejects revoking it: ``hipMemPoolSetAccess``
+    with ``hipMemAccessFlagsProtNone`` returns ``hipErrorInvalidDevice``. Tests that turn memory pool
+    peer access off, or restore it to off, skip with :data:`MEMPOOL_ACCESS_NOT_REVOCABLE` there.
+    ``devices`` is a device, a sequence of devices or ``None``.
+    """
+    return not any(d.is_hip for d in _devices(devices))
+
+
+def is_graph_host_copy_of_capture_allocation_supported(device) -> bool:
+    """Return whether a graph captured on ``device`` may copy between pinned host memory and capture allocations.
+
+    HIP fails to instantiate such a graph (``hipErrorNotSupported``) when it is captured on a device
+    other than device 0; tests that need it skip with
+    :data:`GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED` there.
+    """
+    return all(not d.is_hip or d.ordinal == 0 for d in _devices(device))
+
+
+def is_multi_device_graph_supported(devices) -> bool:
+    """Return whether one graph may hold kernel nodes for all of ``devices``.
+
+    HIP fails to instantiate a graph with kernel nodes on more than one device
+    (``hipErrorNotSupported``); tests that capture across devices skip with
+    :data:`MULTI_DEVICE_GRAPH_UNSUPPORTED` there.
+    """
+    return not any(d.is_hip for d in _devices(devices))
+
+
 def is_independent_thread_scheduling_supported(device) -> bool:
     """Return whether threads of one warp make independent forward progress on the device.
 
