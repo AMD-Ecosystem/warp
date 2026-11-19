@@ -95,6 +95,7 @@ def test_tile_assign_2d_kernel(src: wp.array3d[float], dst: wp.array3d[float]):
 
 
 def test_tile_assign_2d(test, device):
+    skip_if_shared_memory_exceeded(test, device, 4 * TILE_M * TILE_N * TILE_O * 4, 32)
     rng = np.random.default_rng(42)
 
     a = wp.array(rng.random((TILE_M, TILE_N, TILE_O), dtype=np.float32), requires_grad=True, device=device)
