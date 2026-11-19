@@ -426,9 +426,14 @@ class Texture:
 
     @staticmethod
     def _require_texture_hardware(device, name, ndim):
-        if not (device.is_texture3d_hardware_supported if ndim == 3 else device.is_texture_hardware_supported):
+        if not device.is_texture_hardware_supported:
             raise RuntimeError(
                 f"{name} is not available on {device}: it has no texture hardware and samples textures in software"
+            )
+        if ndim == 3 and not device.is_texture3d_hardware_supported:
+            raise RuntimeError(
+                f"{name} is not available for 3D textures on {device}: its texture hardware cannot filter 3D "
+                "textures, so they are sampled in software"
             )
 
     @staticmethod
