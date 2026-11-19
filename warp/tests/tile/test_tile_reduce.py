@@ -612,21 +612,11 @@ def tile_reduce_axis_tier2_prod_axis1_kernel(x: wp.array2d[float], y: wp.array[f
     wp.tile_store(y, b)
 
 
-tile_reduce_axis_tier2_sum_axis2_kernels = {}
-
-
-def tile_reduce_axis_tier2_sum_axis2_kernel(outer):
-    # the leading dimension sizes the shared tile; the reduced axis stays 128 long
-    if outer not in tile_reduce_axis_tier2_sum_axis2_kernels:
-
-        @wp.kernel(module="unique")
-        def kernel(x: wp.array3d[float], y: wp.array2d[float]):
-            a = wp.tile_load(x, shape=(outer, 8, 128), storage="shared")
-            b = wp.tile_sum(a, axis=2)
-            wp.tile_store(y, b)
-
-        tile_reduce_axis_tier2_sum_axis2_kernels[outer] = kernel
-    return tile_reduce_axis_tier2_sum_axis2_kernels[outer]
+@wp.kernel
+def tile_reduce_axis_tier2_sum_axis2_kernel(x: wp.array3d[float], y: wp.array2d[float]):
+    a = wp.tile_load(x, shape=(8, 8, 128), storage="shared")
+    b = wp.tile_sum(a, axis=2)
+    wp.tile_store(y, b)
 
 
 # Tier 3: axis size > 256
@@ -738,15 +728,13 @@ def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
 
     assert_np_equal(y.numpy(), np.prod(x_np, axis=1), tol=1e-2)
 
-    # 3D sum: axis=2, size 128 (forward and backward); the backward kernel keeps the tile and
-    # its adjoint in shared memory, 64kb at the full (8, 8, 128) size
-    outer = select_shared_memory_fit(device, (8, 4, 2), lambda o: 2 * o * 8 * 128 * 4, block_dim)
-    x = wp.ones((outer, 8, 128), dtype=float, requires_grad=True, device=device)
-    y = wp.zeros((outer, 8), dtype=float, requires_grad=True, device=device)
+    # 3D sum: axis=2, size 128 (forward and backward)
+    x = wp.ones((8, 8, 128), dtype=float, requires_grad=True, device=device)
+    y = wp.zeros((8, 8), dtype=float, requires_grad=True, device=device)
 
     with wp.Tape() as tape:
         wp.launch_tiled(
-            tile_reduce_axis_tier2_sum_axis2_kernel(outer),
+            tile_reduce_axis_tier2_sum_axis2_kernel,
             dim=[1],
             inputs=[x],
             outputs=[y],
@@ -757,8 +745,8 @@ def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
     y.grad = wp.ones_like(y)
     tape.backward()
 
-    assert_np_equal(y.numpy(), np.ones((outer, 8), dtype=float) * 128.0)
-    assert_np_equal(x.grad.numpy(), np.ones((outer, 8, 128), dtype=float))
+    assert_np_equal(y.numpy(), np.ones((8, 8), dtype=float) * 128.0)
+    assert_np_equal(x.grad.numpy(), np.ones((8, 8, 128), dtype=float))
 
 
 def test_tile_reduce_axis_tier3(test, device, block_dim=TILE_DIM):

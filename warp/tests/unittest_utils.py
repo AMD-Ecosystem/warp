@@ -235,24 +235,6 @@ def get_test_devices_with_independent_thread_scheduling(mode: str | None = None)
     return [d for d in get_test_devices(mode) if is_independent_thread_scheduling_supported(d)]
 
 
-def select_shared_memory_fit(device, candidates, shared_bytes, block_dim: int):
-    """Return the first of ``candidates`` whose tile kernel fits in the device's shared memory per block.
-
-    Order ``candidates`` from the preferred size down; ``shared_bytes(candidate)`` is the dynamic
-    shared memory the kernel needs. A kernel's static shared memory counts against the same
-    per-block limit: Warp's tile allocator keeps 4 bytes per thread there, plus a few scalars,
-    so ``4 * block_dim + 1024`` bytes are kept free for it. CPU devices have no such limit and
-    get the first candidate; if none fits, the last candidate is returned.
-    """
-    if not device.is_cuda:
-        return candidates[0]
-    budget = device.max_shared_memory_per_block - 4 * block_dim - 1024
-    for candidate in candidates:
-        if shared_bytes(candidate) <= budget:
-            return candidate
-    return candidates[-1]
-
-
 def is_cuda_graph_module_load_supported(device) -> bool:
     """Return whether modules can be loaded during CUDA graph capture."""
     if not device.is_cuda or device.is_hip:
