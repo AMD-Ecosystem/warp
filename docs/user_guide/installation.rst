@@ -81,6 +81,14 @@ the ``pip install`` command, e.g.
 
 The ``--force-reinstall`` option may need to be used to overwrite a previous installation.
 
+Packages for AMD GPUs (``warp_lang-{ver}+rocm.{rev}-py3-none-{platform}.whl``, Linux x86-64 and Windows x86-64)
+are built with ROCm 10.2 and are available on the `AMD-Ecosystem/warp GitHub Releases <https://github.com/AMD-Ecosystem/warp/releases>`_ page.
+They depend on the ROCm Python packages, which are hosted on AMD's package index rather than PyPI, so pass that index as well, e.g.
+
+.. code-block:: console
+
+    $ pip install https://github.com/AMD-Ecosystem/warp/releases/download/v1.14.0+rocm.0/warp_lang-1.14.0+rocm.0-py3-none-manylinux_2_28_x86_64.whl --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
+
 CUDA Requirements
 -----------------
 

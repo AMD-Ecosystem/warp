@@ -4594,20 +4594,38 @@ class Graph:
         return self._native_graph is not None
 
 
-def load_windows_hip_runtime(rocm_marker_path: str):
-    """Load the HIP runtime that a Windows ROCm build of ``warp.dll`` imports, by full path.
+def read_rocm_marker(rocm_marker_path: str) -> tuple[str, str | None]:
+    """Return the ROCm root that a ROCm build of the Warp library was built against, and the
+    ``major.minor`` version of that ROCm if the build recorded it."""
+    with open(rocm_marker_path) as f:
+        root, _, version = f.read().partition("\n")
+    match = re.match(r"\d+\.\d+", version.strip())
+    return root.strip(), match[0] if match else None
 
-    The display driver installs its own copy of the runtime in System32, which comes first in the
-    DLL search order. The build writes the ROCm it used to ``rocm_marker_path``.
+
+def load_hip_runtime(rocm_marker_path: str):
+    """Load the HIP runtime that a ROCm build of the Warp library imports.
+
+    The ROCm Python packages keep the runtime in site-packages, off the library search path, and
+    provide the code to load it. Without them, a Windows build loads the runtime by full path from
+    the ROCm it was built against, because the display driver installs its own copy in System32,
+    which comes first in the DLL search order; elsewhere the dynamic loader finds it.
     """
+    rocm_root, rocm_version = read_rocm_marker(rocm_marker_path)
+
     if importlib.util.find_spec("rocm_sdk"):
         import rocm_sdk  # noqa: PLC0415
 
-        rocm_sdk.initialize_process(preload_shortnames=["amdhip64", "hiprtc"])
+        rocm_sdk.initialize_process(
+            preload_shortnames=["amd_comgr", "amdhip64", "hiprtc"],
+            check_version=f"{rocm_version}.*" if rocm_version else None,
+        )
         return
 
-    with open(rocm_marker_path) as f:
-        rocm_bin = os.path.join(f.read().strip(), "bin")
+    if os.name != "nt":
+        return
+
+    rocm_bin = os.path.join(rocm_root, "bin")
     names = os.listdir(rocm_bin) if os.path.isdir(rocm_bin) else []
     libs = [
         sorted(n for n in names if re.fullmatch(p, n, re.IGNORECASE)) for p in (r"amdhip64_\d+\.dll", r"hiprtc\d+\.dll")
@@ -4672,8 +4690,8 @@ class Runtime:
             warp_lib = os.path.join(bin_path, "warp.so")
             llvm_lib = os.path.join(bin_path, "warp-clang.so")
 
-        if os.name == "nt" and os.path.exists(warp_lib + ".rocm"):
-            load_windows_hip_runtime(warp_lib + ".rocm")
+        if os.path.exists(warp_lib + ".rocm"):
+            load_hip_runtime(warp_lib + ".rocm")
 
         self.core = self.load_dll(warp_lib)
 
@@ -6511,6 +6529,15 @@ class Runtime:
                     f"Failed to load the shared library '{dll_path}'.\n"
                     "The execution environment's libstdc++ runtime is older than the version the Warp library was built for.\n"
                     "See https://nvidia.github.io/warp/stable/user_guide/installation.html#conda-environments for details."
+                ) from e
+            elif os.path.exists(dll_path + ".rocm"):
+                rocm_version = read_rocm_marker(dll_path + ".rocm")[1]
+                rocm_requirement = f'"rocm=={rocm_version}.*"' if rocm_version else "rocm"
+                raise RuntimeError(
+                    f"Failed to load the shared library '{dll_path}'.\n"
+                    "Warp was built for AMD GPUs and needs the HIP runtime. Install the ROCm Python packages with\n"
+                    f"  pip install {rocm_requirement} --extra-index-url https://stable.repo.amd.com/rocm/whl-next/\n"
+                    "or add the ROCm this build used to the library search path."
                 ) from e
             else:
                 raise RuntimeError(f"Failed to load the shared library '{dll_path}'") from e

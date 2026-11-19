@@ -821,14 +821,6 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             link_cmd = f'"{host_linker}" {" ".join(linkopts + libs)} /out:"{dll_path}"'
             run_cmd(link_cmd)
 
-        # Tell the loader that this library imports the HIP runtime, and from which ROCm
-        rocm_marker_path = dll_path + ".rocm"
-        if rocm_path:
-            with open(rocm_marker_path, "w") as f:
-                f.write(os.path.abspath(rocm_path))
-        elif os.path.exists(rocm_marker_path):
-            os.remove(rocm_marker_path)
-
     else:
         # Unix compilation
         cuda_compiler = "clang++" if args.clang_build_toolchain else "nvcc"
@@ -1050,6 +1042,20 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     run_cmd(
                         f"strip --strip-all --keep-symbol=__jit_debug_register_code --keep-symbol=__jit_debug_descriptor {dll_path}"
                     )
+
+    # Tell the loader and the wheel packaging that this library imports the HIP runtime: the ROCm
+    # it was built against, then that ROCm's version
+    rocm_marker_path = dll_path + ".rocm"
+    if rocm_path:
+        rocm_version = ""
+        version_path = os.path.join(rocm_path, ".info", "version")
+        if os.path.exists(version_path):
+            with open(version_path) as f:
+                rocm_version = f.read().strip()
+        with open(rocm_marker_path, "w") as f:
+            f.write(os.path.abspath(rocm_path) + "\n" + rocm_version + "\n")
+    elif os.path.exists(rocm_marker_path):
+        os.remove(rocm_marker_path)
 
 
 def build_dll(args, dll_path, cpp_paths, cu_paths, libs=None):
