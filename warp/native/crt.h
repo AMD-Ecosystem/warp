@@ -242,6 +242,13 @@ typedef unsigned long long uint64_t;
 // hipRTC has no <assert.h>; use the device assert handler of the HIP runtime headers
 #ifdef NDEBUG
 #define assert(expression) ((void)0)
+#elif defined(_WIN32)
+// on Windows the HIP headers declare no __assert_fail, only a _wassert that traps without a message
+#define assert(expression)                                                                                             \
+    ((expression) ? (void)0                                                                                            \
+                  : (printf("%s:%d: %s: Device-side assertion `%s' failed.\n", __FILE__, __LINE__, __func__,          \
+                            #expression),                                                                              \
+                     __builtin_trap()))
 #else
 #define assert(expression) ((expression) ? (void)0 : __assert_fail(#expression, __FILE__, __LINE__, __func__))
 #endif
