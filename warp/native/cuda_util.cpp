@@ -409,19 +409,20 @@ CUresult cuModuleGetGlobal_f(CUdeviceptr* dptr, size_t* bytes, CUmodule hmod, co
 
 CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int value)
 {
-    (void)hfunc;
-
     // AMD GPUs have no opt-in for dynamic shared memory: a kernel may use up to the
-    // per-block limit without configuration
+    // per-block limit, shared with its static shared memory, without configuration
     if (attrib == CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES) {
         hipDevice_t device;
         int max_smem_bytes = 0;
+        int static_smem_bytes = 0;
         hipError_t result = hipGetDevice(&device);
         if (result == hipSuccess)
             result = hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeMaxSharedMemoryPerBlock, device);
+        if (result == hipSuccess)
+            result = hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, hfunc);
         if (result != hipSuccess)
             return result;
-        return value <= max_smem_bytes ? hipSuccess : hipErrorInvalidValue;
+        return value <= max_smem_bytes - static_smem_bytes ? hipSuccess : hipErrorInvalidValue;
     }
 
     return hipErrorNotSupported;
