@@ -86,9 +86,9 @@ template <> struct op<bfloat16> {
 };
 #endif
 
-#elif defined(WP_TILE_WMMA) && WP_TILE_WMMA
-// 32-lane WMMA. The operand and accumulator layouts below come from the ISA documentation and
-// have not been measured yet, so this path is off unless WP_TILE_WMMA is defined to 1.
+#elif (defined(WP_TILE_WMMA) && WP_TILE_WMMA) || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)
+// 32-lane WMMA. The gfx12 fp16 layout is measured and on; the gfx11 and gfx1250 paths stay off
+// unless WP_TILE_WMMA is defined to 1 (each WMMA builtin exists on exactly one target family).
 #define WP_TILE_MMA 1
 constexpr int kWave = 32;
 
