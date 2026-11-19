@@ -61,7 +61,7 @@
 
 #if defined(__CUDACC__) && !defined(_MSC_VER)
 __device__ inline void __debugbreak() { __brkpt(); }
-#elif defined(__HIP_DEVICE_COMPILE__)
+#elif defined(__HIP_DEVICE_COMPILE__) && !defined(_MSC_VER)
 __device__ inline void __debugbreak() { __builtin_debugtrap(); }
 #endif
 

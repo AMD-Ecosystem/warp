@@ -4594,6 +4594,33 @@ class Graph:
         return self._native_graph is not None
 
 
+def load_windows_hip_runtime(rocm_marker_path: str):
+    """Load the HIP runtime that a Windows ROCm build of ``warp.dll`` imports, by full path.
+
+    The display driver installs its own copy of the runtime in System32, which comes first in the
+    DLL search order. The build writes the ROCm it used to ``rocm_marker_path``.
+    """
+    if importlib.util.find_spec("rocm_sdk"):
+        import rocm_sdk  # noqa: PLC0415
+
+        rocm_sdk.initialize_process(preload_shortnames=["amdhip64", "hiprtc"])
+        return
+
+    with open(rocm_marker_path) as f:
+        rocm_bin = os.path.join(f.read().strip(), "bin")
+    names = os.listdir(rocm_bin) if os.path.isdir(rocm_bin) else []
+    libs = [
+        sorted(n for n in names if re.fullmatch(p, n, re.IGNORECASE)) for p in (r"amdhip64_\d+\.dll", r"hiprtc\d+\.dll")
+    ]
+    if not all(libs):
+        raise RuntimeError(
+            f"Warp was built for AMD GPUs, but the HIP runtime was not found in '{rocm_bin}'. "
+            "Install the ROCm Python packages or the ROCm this build used."
+        )
+    for lib in libs:
+        ctypes.CDLL(os.path.join(rocm_bin, lib[-1]))
+
+
 class Runtime:
     def __init__(self):
         if platform.system() == "Darwin" and platform.machine() == "x86_64":
@@ -4644,6 +4671,9 @@ class Runtime:
         else:
             warp_lib = os.path.join(bin_path, "warp.so")
             llvm_lib = os.path.join(bin_path, "warp-clang.so")
+
+        if os.name == "nt" and os.path.exists(warp_lib + ".rocm"):
+            load_windows_hip_runtime(warp_lib + ".rocm")
 
         self.core = self.load_dll(warp_lib)
 

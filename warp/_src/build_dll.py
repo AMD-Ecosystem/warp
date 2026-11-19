@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import functools
+import glob
 import json
 import os
 import pathlib
@@ -591,6 +592,11 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         ]
         if args.fast_math:
             hip_opts.append("-ffast-math")
+        if os.name == "nt":
+            # the ROCm Python packages keep the device libraries where Clang does not look for them on Windows
+            hip_device_lib = os.path.join(os.path.dirname(os.path.dirname(hip_clang)), "amdgcn", "bitcode")
+            if os.path.isdir(hip_device_lib):
+                hip_opts.append(f'--rocm-device-lib-path="{hip_device_lib}"')
     elif cu_paths:
         # check CUDA Toolkit version
         ctk_version = get_cuda_toolkit_version(cuda_home)
@@ -650,19 +656,29 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         libmathdx_includes = ""
         mathdx_enabled = "WP_ENABLE_MATHDX=0"
 
-    if os.name == "nt" and rocm_path:
-        raise RuntimeError("Warp build error: ROCm builds on Windows are not supported yet")
-
     if os.name == "nt":
         if args.host_compiler:
             host_linker = os.path.join(os.path.dirname(args.host_compiler), "link.exe")
         else:
             raise RuntimeError("Warp build error: No host compiler was found")
 
+        host_compiler = args.host_compiler
+        if rocm_path:
+            # MSVC cannot parse the HIP headers: host sources are compiled by ROCm's clang-cl,
+            # which takes the same options, and linked by the MSVC linker
+            host_compiler = os.path.join(os.path.dirname(hip_clang), "clang-cl.exe")
+
         # Build include paths for LLVM and CUDA
         llvm_include_paths = get_llvm_include_paths(args, warp_home_path, mode, arch)
         cpp_includes = format_include_paths(llvm_include_paths, "/I")
-        cuda_includes = f' /I"{cuda_home}/include"' if cu_paths else ""
+        if rocm_path:
+            # host sources see the CUDA headers they include through the HIP shims
+            cuda_includes = (
+                f' /D "WP_ENABLE_HIP=1" /D "__HIP_PLATFORM_AMD__" /I"{os.path.join(native_dir, "hip")}"'
+                f' /I"{rocm_path}/include"'
+            )
+        else:
+            cuda_includes = f' /I"{cuda_home}/include"' if cu_paths else ""
         includes = cpp_includes + cuda_includes
 
         # nvrtc_static.lib is built with /MT and _ITERATOR_DEBUG_LEVEL=0 so if we link it in we must match these options
@@ -715,7 +731,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     extra_flags = " /wd4624"  # suppress C4624: destructor was implicitly defined as deleted
                 if "fastcall.cpp" in cpp_path:
                     extra_flags += f' /I"{python_include_dir}" /DPy_LIMITED_API=0x030a0000'  # Python 3.10
-                cpp_cmd = f'"{args.host_compiler}" {cpp_flags}{extra_flags} -c "{cpp_path}" /Fo"{cpp_out}"'
+                cpp_cmd = f'"{host_compiler}" {cpp_flags}{extra_flags} -c "{cpp_path}" /Fo"{cpp_out}"'
                 cpp_cmds.append(cpp_cmd)
 
             if args.jobs <= 1:
@@ -734,7 +750,14 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts
                     ]
 
-                    if mode == "debug":
+                    if rocm_path:
+                        # match the host objects: static CRT, release iterators
+                        hip_win_opts = f'{" ".join(hip_opts)} -fms-runtime-lib=static -DNDEBUG -D_ITERATOR_DEBUG_LEVEL=0 -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled}'
+                        if mode == "debug":
+                            cuda_cmd = f'"{hip_clang}" {hip_win_opts} -g -O0 -o "{cu_out}" -c "{cu_path}"'
+                        elif mode == "release":
+                            cuda_cmd = f'"{hip_clang}" {hip_win_opts} -O3 -o "{cu_out}" -c "{cu_path}"'
+                    elif mode == "debug":
                         cuda_cmd = f'{nvcc_cmd} --std=c++17 --compiler-options=/MT,/Zi,/Od -g -G -O0 -DNDEBUG -D_ITERATOR_DEBUG_LEVEL=0 -I"{native_dir}" -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                     elif mode == "release":
                         cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 {" ".join(_nvcc_opts)} -I"{native_dir}" -DNDEBUG -DWP_ENABLE_CUDA=1 -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
@@ -743,7 +766,18 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
 
                     linkopts.append(quote(cu_out))
 
-                if args.use_dynamic_cuda:
+                if rocm_path:
+                    linkopts.append(f'amdhip64.lib hiprtc.lib /LIBPATH:"{rocm_path}/lib"')
+                    # Clang calls its runtime for float16 conversions on x86-64, and the MSVC linker
+                    # does not add that library by itself
+                    llvm_lib = os.path.join(os.path.dirname(os.path.dirname(hip_clang)), "lib")
+                    linkopts.extend(
+                        quote(path)
+                        for path in glob.glob(
+                            os.path.join(llvm_lib, "clang", "*", "lib", "windows", "clang_rt.builtins-x86_64.lib")
+                        )
+                    )
+                elif args.use_dynamic_cuda:
                     linkopts.append(
                         f'cudart.lib nvrtc.lib nvptxcompiler_static.lib ws2_32.lib user32.lib /LIBPATH:"{cuda_home}/lib/x64"'
                     )
@@ -786,6 +820,14 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         with ScopedTimer("link", active=args.verbose):
             link_cmd = f'"{host_linker}" {" ".join(linkopts + libs)} /out:"{dll_path}"'
             run_cmd(link_cmd)
+
+        # Tell the loader that this library imports the HIP runtime, and from which ROCm
+        rocm_marker_path = dll_path + ".rocm"
+        if rocm_path:
+            with open(rocm_marker_path, "w") as f:
+                f.write(os.path.abspath(rocm_path))
+        elif os.path.exists(rocm_marker_path):
+            os.remove(rocm_marker_path)
 
     else:
         # Unix compilation
