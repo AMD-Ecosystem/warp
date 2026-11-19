@@ -178,6 +178,21 @@ pass ``--use-dynamic-cuda``:
 
 The corresponding shared libraries must be available at runtime when using this option.
 
+To build for AMD GPUs, install ROCm instead of the CUDA Toolkit, for example the ROCm Python packages,
+and run the same command:
+
+.. code-block:: console
+
+    $ pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[devel]==10.2.*"
+    $ python build_lib.py
+
+The build script selects ROCm when it finds a ROCm installation and no CUDA Toolkit (through the
+``WARP_ROCM_PATH`` or ``ROCM_PATH`` environment variables, ``HIP_PATH`` on Windows, the ROCm Python packages,
+or ``/opt/rocm``); if it finds both, it asks for ``--cuda-path="..."`` or ``--rocm-path="..."``. By default
+it compiles for every AMD GPU target the installed ROCm supports; ``--hip-arch`` narrows the list, for example
+``--hip-arch gfx942,gfx1100``. On Windows the build uses the Clang compilers that ROCm provides together with
+the Visual Studio linker. MathDx is not used in a ROCm build.
+
 After building, the Warp package should be installed using:
 
 .. code-block:: console
