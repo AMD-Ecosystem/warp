@@ -88,8 +88,9 @@ template <> struct op<bfloat16> {
 
 #elif (defined(WP_TILE_WMMA) && WP_TILE_WMMA) || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)       \
     || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
-// 32-lane WMMA. The gfx11 and gfx12 fp16 layouts are measured and on; the gfx1250 path stays off
-// unless WP_TILE_WMMA is defined to 1 (each WMMA builtin exists on exactly one target family).
+// 32-lane WMMA. The gfx11 and gfx12 fp16 layouts and the gfx11 bf16 layout are measured and on (gfx12 bf16
+// assumes the gfx12 fp16 layout); the gfx1250 path stays off unless WP_TILE_WMMA is defined to 1 (each WMMA
+// builtin exists on exactly one target family).
 #define WP_TILE_MMA 1
 constexpr int kWave = 32;
 
@@ -117,6 +118,29 @@ template <> struct op<half> {
 };
 #endif
 
+#if __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32) && !defined(WP_NO_BFLOAT16)
+// gfx11 bf16 inputs (float32 output only): the gfx11 fp16 layout (measured on gfx1151)
+template <> struct op<bfloat16> {
+    static constexpr bool available = true;
+    static constexpr int kpl = 16;
+    static constexpr bool k_split = false;
+    typedef float Acc __attribute__((ext_vector_type(8)));
+    typedef short In;
+    static inline CUDA_CALLABLE In in(bfloat16 x) { return short(x.u); }
+    static inline CUDA_CALLABLE Acc mma(const In* a, const In* b, Acc c)
+    {
+        typedef short V __attribute__((ext_vector_type(16)));
+        V va, vb;
+        for (int v = 0; v < 16; ++v) {
+            va[v] = a[v];
+            vb[v] = b[v];
+        }
+        return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(va, vb, c);
+    }
+    static inline CUDA_CALLABLE int row(int g, int r) { return 2 * r + g; }
+};
+#endif
+
 #if __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)
 // gfx12 fp16: lanes 0-15 hold K 0-7 and lanes 16-31 K 8-15 of their row (A) or column (B);
 // accumulator r of lane l is C[8 (l / 16) + r][l % 16]
@@ -136,6 +160,29 @@ template <> struct op<half> {
             vb[v] = b[v];
         }
         return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(va, vb, c);
+    }
+    static inline CUDA_CALLABLE int row(int g, int r) { return 8 * g + r; }
+};
+#endif
+
+#if __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12) && !defined(WP_NO_BFLOAT16)
+// gfx12 bf16 inputs (float32 output only): assumed to share the gfx12 fp16 layout
+template <> struct op<bfloat16> {
+    static constexpr bool available = true;
+    static constexpr int kpl = 8;
+    static constexpr bool k_split = true;
+    typedef float Acc __attribute__((ext_vector_type(8)));
+    typedef short In;
+    static inline CUDA_CALLABLE In in(bfloat16 x) { return short(x.u); }
+    static inline CUDA_CALLABLE Acc mma(const In* a, const In* b, Acc c)
+    {
+        typedef short V __attribute__((ext_vector_type(8)));
+        V va, vb;
+        for (int v = 0; v < 8; ++v) {
+            va[v] = a[v];
+            vb[v] = b[v];
+        }
+        return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(va, vb, c);
     }
     static inline CUDA_CALLABLE int row(int g, int r) { return 8 * g + r; }
 };
