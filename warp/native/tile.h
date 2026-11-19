@@ -16,8 +16,8 @@
 // Check if the CUDA toolkit is available
 #if WP_ENABLE_CUDA || defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__) || (defined(__clang__) && defined(__CUDA__))
 
-// NVRTC and hipRTC have built-in float4; Clang CUDA JIT defines it in cuda_crt.h
-#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+// NVRTC and hipRTC have built-in float4; Clang CUDA JIT defines it in cuda_crt.h; HIP in its runtime header
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__) || defined(__HIP__) || (defined(__clang__) && defined(__CUDA__))
 // float4 already available
 #else
 // NVCC: Include vector_types.h to get float4

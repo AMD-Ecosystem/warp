@@ -37,7 +37,10 @@ if __name__ == "__main__":
     print("Compiling Warp kernel to CUBIN...")
     device = wp.get_device()
     print(f"Target device: {device.name}")
-    print(f"Target architecture: sm_{device.get_cuda_compile_arch()}")
+    if device.is_hip:
+        print(f"Target architecture: {device.arch_name}")
+    else:
+        print(f"Target architecture: sm_{device.get_cuda_compile_arch()}")
 
     wp.compile_aot_module("__main__", module_dir=output_dir, use_ptx=False, strip_hash=True)
 
@@ -45,8 +48,9 @@ if __name__ == "__main__":
     forward_kernel_name = f"{saxpy.get_mangled_name()}_cuda_kernel_forward"
     print(f"Kernel name: {forward_kernel_name}")
 
-    # Verify CUBIN file was generated
+    # Verify CUBIN file (code object on AMD GPUs) was generated
     cubin_files = glob.glob(os.path.join(output_dir, "wp___main__.sm*.cubin"))
+    cubin_files += glob.glob(os.path.join(output_dir, "wp___main__.gfx*.hsaco"))
     if not cubin_files:
         raise RuntimeError(f"No CUBIN files generated in {output_dir}")
 

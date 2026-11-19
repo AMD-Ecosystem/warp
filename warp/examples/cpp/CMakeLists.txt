@@ -15,7 +15,14 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     message(STATUS "Setting default CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
-project(warp_cpp_examples CUDA CXX)
+option(WARP_USE_HIP "Build for AMD GPUs with HIP instead of CUDA" OFF)
+if(WARP_USE_HIP)
+    set(WARP_GPU_LANGUAGE HIP)
+else()
+    set(WARP_GPU_LANGUAGE CUDA)
+endif()
+
+project(warp_cpp_examples ${WARP_GPU_LANGUAGE} CXX)
 
 # Enable testing at the top level
 enable_testing()

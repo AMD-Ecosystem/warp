@@ -9,13 +9,21 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real;120-virtual")
 endif()
 
-project(warp_source_include CUDA CXX)
+option(WARP_USE_HIP "Build for AMD GPUs with HIP instead of CUDA" OFF)
+if(WARP_USE_HIP)
+    set(WARP_GPU_LANGUAGE HIP)
+else()
+    set(WARP_GPU_LANGUAGE CUDA)
+endif()
+project(warp_source_include ${WARP_GPU_LANGUAGE} CXX)
 
 # Enable testing support
 enable_testing()
 
 # Find CUDA
-find_package(CUDAToolkit REQUIRED)
+if(NOT WARP_USE_HIP)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 # Check that generated kernel exists (must be compiled before configuration)
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/wp___main__.cu")
@@ -27,11 +35,13 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/wp___main__.cu")
         "  uv run compile_kernel.py")
 endif()
 
-message(STATUS "Target architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "Target architectures: ${CMAKE_${WARP_GPU_LANGUAGE}_ARCHITECTURES}")
 
 # Add line information for profilers/debuggers
 # Suppress warnings from generated code (550: set but never used, 177: declared but never referenced)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo -diag-suppress 550 -diag-suppress 177")
+if(NOT WARP_USE_HIP)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo -diag-suppress 550 -diag-suppress 177")
+endif()
 
 # Find Warp native directory
 # Default: assume repository checkout (examples are in warp/examples/cpp/)
@@ -50,9 +60,14 @@ endif()
 # Add executable (generated .cu is included in main.cu, not compiled separately)
 # Named after example directory for consistency with Makefile
 add_executable(01_source_include main.cu)
+set_source_files_properties(main.cu PROPERTIES LANGUAGE ${WARP_GPU_LANGUAGE})
 
 # Set C++ and CUDA standards
-target_compile_features(01_source_include PRIVATE cxx_std_17 cuda_std_17)
+if(WARP_USE_HIP)
+    target_compile_features(01_source_include PRIVATE cxx_std_17 hip_std_17)
+else()
+    target_compile_features(01_source_include PRIVATE cxx_std_17 cuda_std_17)
+endif()
 
 # Add includes
 # Use SYSTEM for Warp headers to suppress library warnings
@@ -60,7 +75,7 @@ target_include_directories(01_source_include SYSTEM PRIVATE ${WARP_INCLUDE})
 target_include_directories(01_source_include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 message(STATUS "Warp include: ${WARP_INCLUDE}")
-message(STATUS "Target architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "Target architectures: ${CMAKE_${WARP_GPU_LANGUAGE}_ARCHITECTURES}")
 
 # Add test that runs the example executable
 add_test(NAME source_include_test COMMAND $<TARGET_FILE:01_source_include>)

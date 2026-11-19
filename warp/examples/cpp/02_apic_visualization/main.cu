@@ -303,7 +303,12 @@ int main(int argc, char** argv)
 
     // Load APIC graph
     printf("\nLoading APIC graph from: %s\n", graph_path);
+#if defined(__HIP__)
+    // HIP has no driver-API contexts to share with Warp; pass Warp's handle for the device instead
+    APICGraph* graph = wp_apic_load_graph(wp_cuda_device_get_primary_context(0), graph_path, 0);  // 0 = CUDA device
+#else
     APICGraph* graph = wp_apic_load_graph(context, graph_path, 0);  // 0 = CUDA device
+#endif
     if (!graph) {
         fprintf(stderr, "Failed to load graph: %s\n", wp_get_error_string());
         return 1;

@@ -14,13 +14,21 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.20)
-project(apic_visualization CUDA CXX C)
+option(WARP_USE_HIP "Build for AMD GPUs with HIP instead of CUDA" OFF)
+if(WARP_USE_HIP)
+    set(WARP_GPU_LANGUAGE HIP)
+else()
+    set(WARP_GPU_LANGUAGE CUDA)
+endif()
+project(apic_visualization ${WARP_GPU_LANGUAGE} CXX C)
 
 # Enable testing support
 enable_testing()
 
 # Find CUDA
-find_package(CUDAToolkit REQUIRED)
+if(NOT WARP_USE_HIP)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 # Find OpenGL (optional — skip this example on headless CI systems)
 find_package(OpenGL QUIET)
@@ -117,6 +125,7 @@ endif()
 
 # Add executable
 add_executable(02_apic_visualization main.cu)
+set_source_files_properties(main.cu PROPERTIES LANGUAGE ${WARP_GPU_LANGUAGE})
 
 # Set CUDA architecture (needed for device code - update_vertices kernel)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
@@ -132,10 +141,11 @@ target_include_directories(02_apic_visualization SYSTEM PRIVATE
     ${WARP_INCLUDE}
 )
 
-# Link libraries
+# Link libraries (the HIP runtime is linked implicitly)
+if(NOT WARP_USE_HIP)
+    target_link_libraries(02_apic_visualization CUDA::cuda_driver CUDA::cudart)
+endif()
 target_link_libraries(02_apic_visualization
-    CUDA::cuda_driver
-    CUDA::cudart
     OpenGL::GL
     glfw
     glad
@@ -166,7 +176,7 @@ endif()
 
 message(STATUS "Warp include: ${WARP_INCLUDE}")
 message(STATUS "Warp library: ${WARP_LIB}")
-message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "${WARP_GPU_LANGUAGE} architectures: ${CMAKE_${WARP_GPU_LANGUAGE}_ARCHITECTURES}")
 
 # Add headless smoke test (uses --smoke to skip GUI; needs a CUDA-capable runtime).
 # PASS_REGULAR_EXPRESSION asserts the iteration count actually ran — guards against

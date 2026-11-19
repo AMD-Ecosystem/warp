@@ -175,3 +175,7 @@ cmake -B build && ctest --test-dir build --output-on-failure
 ```
 
 Tests verify that examples compile and run successfully.
+
+### AMD GPUs
+
+With a ROCm build of Warp, the CMake projects build the examples with HIP when configured with `-DWARP_USE_HIP=ON` (CMake 3.21+), which `bash test_examples.sh --hip` does. The AOT examples then load a code object (`generated/wp___main__.gfx*.hsaco`) instead of a CUBIN. The Makefiles build with CUDA only.
