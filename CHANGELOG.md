@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.13.0+rocm.0] - unreleased
+## [1.13.0+amd0] - unreleased
 
 ### ROCm Fork
 
