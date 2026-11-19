@@ -228,6 +228,11 @@ def skip_if_shared_memory_exceeded(test, device, dynamic_bytes: int, block_dim: 
         )
 
 
+def is_stream_priority_scheduling_supported(device) -> bool:
+    """Return whether stream priorities affect scheduling; HIP maps them to normal priority."""
+    return not device.is_hip
+
+
 def is_independent_thread_scheduling_supported(device) -> bool:
     """Return whether threads of one warp make independent forward progress on the device.
 

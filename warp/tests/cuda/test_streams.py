@@ -421,6 +421,8 @@ def test_stream_priority_timings(test, device):
 
     if stream_lo.priority == stream_hi.priority:
         test.skipTest("Device must support stream priorities.")
+    if not is_stream_priority_scheduling_supported(device):
+        test.skipTest("HIP maps stream priorities to normal priority, so priority has no scheduling effect.")
 
     # Create some events
     start_lo_event = wp.Event(device, enable_timing=True)
