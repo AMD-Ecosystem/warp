@@ -884,6 +884,30 @@ void* wp_alloc_device_async(void* context, size_t s, const char* tag)
     return ptr;
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// Free on the current stream once the device's other streams known to Warp have finished their
+// queued work, the ordering a free on the legacy null stream gives (Warp's streams are blocking).
+static void free_async_after_device_streams(void* context, void* ptr)
+{
+    ContextInfo* context_info = get_context_info(context);
+    CUstream stream = context_info ? context_info->stream : NULL;
+    hipDevice_t device;
+    if (!stream || hipStreamGetDevice(stream, &device) != hipSuccess) {
+        check_cuda(cudaFreeAsync(ptr, NULL));
+        return;
+    }
+
+    for (const auto& kv : g_streams) {
+        hipDevice_t other_device;
+        if (kv.first != stream && hipStreamGetDevice(kv.first, &other_device) == hipSuccess && other_device == device) {
+            check_cu(cuEventRecord_f(kv.second.cached_event, kv.first));
+            check_cu(cuStreamWaitEvent_f(stream, kv.second.cached_event, CU_EVENT_WAIT_DEFAULT));
+        }
+    }
+    check_cuda(cudaFreeAsync(ptr, stream));
+}
+#endif
+
 void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
 {
     if (g_alloc_tracker.enabled && ptr)
@@ -907,7 +931,12 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             // cudaFreeAsync on the null stream does not block or trigger synchronization, but it postpones
             // the deallocation until a synchronization point is reached, so preceding work on this pointer
             // should safely complete.
+#if defined(__HIP_PLATFORM_AMD__)
+            // On HIP a free on the null stream keeps the host waiting for queued device work.
+            free_async_after_device_streams(context, ptr);
+#else
             check_cuda(cudaFreeAsync(ptr, NULL));
+#endif
         } else {
             // We must defer the free operation until graph capture completes.
             deferred_free(ptr, context, true);
