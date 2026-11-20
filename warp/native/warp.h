@@ -400,7 +400,7 @@ WP_API void wp_bsr_transpose_device(
 
 WP_API int wp_cuda_driver_version();  // CUDA driver version
 WP_API int wp_cuda_toolkit_version();  // CUDA Toolkit version used to build Warp
-WP_API int wp_hip_runtime_version();  // HIP version used to build Warp (HIP_VERSION), 0 for CUDA builds
+WP_API int wp_hip_runtime_version();  // version of the HIP runtime loaded in the process, 0 for CUDA builds
 WP_API const char* wp_version();  // Warp native library version string
 WP_API bool wp_cuda_driver_is_initialized();
 

@@ -149,6 +149,21 @@ class TestDevices(unittest.TestCase):
             for key in (*stale_mempool_keys, unrelated_mempool_key):
                 runtime.cuda_mempool_access_enabled.pop(key, None)
 
+    def test_runtime_rocm_and_hip_versions(self):
+        runtime = wp._src.context.runtime
+        if runtime.is_hip:
+            # a HIP build reports the ROCm release it was built with and the loaded HIP runtime, not CUDA versions
+            self.assertIsNone(runtime.toolkit_version)
+            self.assertIsNone(runtime.driver_version)
+            self.assertEqual(len(runtime.rocm_version), 2)
+            self.assertTrue(all(isinstance(v, int) for v in runtime.rocm_version))
+            if wp.is_cuda_available():
+                self.assertEqual(len(runtime.hip_version), 2)
+                self.assertGreater(runtime.hip_version, (0, 0))
+        else:
+            self.assertIsNone(runtime.rocm_version)
+            self.assertIsNone(runtime.hip_version)
+
     def test_devices_get_cuda_supported_archs(self):
         archs = wp.get_cuda_supported_archs()
         self.assertIsInstance(archs, list)

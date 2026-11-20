@@ -4690,8 +4690,12 @@ class Runtime:
             warp_lib = os.path.join(bin_path, "warp.so")
             llvm_lib = os.path.join(bin_path, "warp-clang.so")
 
+        self.rocm_version = None  # ROCm release the core lib was built with (HIP builds only)
         if os.path.exists(warp_lib + ".rocm"):
             load_hip_runtime(warp_lib + ".rocm")
+            rocm_version = read_rocm_marker(warp_lib + ".rocm")[1]
+            if rocm_version:
+                self.rocm_version = tuple(int(v) for v in rocm_version.split("."))
 
         self.core = self.load_dll(warp_lib)
 
@@ -6112,7 +6116,7 @@ class Runtime:
         self.toolkit_version = None  # CTK version used to build the core lib
         self.driver_version = None  # installed driver version
         self.min_driver_version = None  # minimum required driver version
-        self.hip_version = None  # HIP version used to build the core lib (HIP builds only)
+        self.hip_version = None  # version of the HIP runtime loaded in the process (HIP builds only)
 
         self._pch_dirs: dict[int, tempfile.TemporaryDirectory] = {}
         self._pch_dirs_lock = threading.Lock()
@@ -6129,7 +6133,8 @@ class Runtime:
             if self.is_hip:
                 # HIP builds have no CUDA Toolkit or CUDA driver version
                 hip_version = self.core.wp_hip_runtime_version()
-                self.hip_version = (hip_version // 10000000, (hip_version // 100000) % 100)
+                if hip_version:
+                    self.hip_version = (hip_version // 10000000, (hip_version // 100000) % 100)
             else:
                 # get CUDA Toolkit and driver versions
                 toolkit_version = self.core.wp_cuda_toolkit_version()
@@ -6230,9 +6235,16 @@ class Runtime:
             if warp.config._git_commit_hash is not None:
                 greeting.append(f"   Git commit: {warp.config._git_commit_hash}")
 
+            if self.is_hip:
+                versions = ", ".join(
+                    f"{name} {version[0]}.{version[1]}"
+                    for name, version in (("ROCm", self.rocm_version), ("HIP runtime", self.hip_version))
+                    if version
+                )
+
             if cuda_device_count > 0 and self.is_hip:
-                # print HIP version info
-                greeting.append(f"   HIP {self.hip_version[0]}.{self.hip_version[1]}")
+                # print ROCm and HIP version info
+                greeting.append(f"   {versions}")
             elif cuda_device_count > 0:
                 # print CUDA version info
                 greeting.append(
@@ -6244,9 +6256,7 @@ class Runtime:
                     # Warp was compiled without CUDA support
                     greeting.append("   CUDA not enabled in this build")
                 elif self.is_hip:
-                    greeting.append(
-                        f"   HIP {self.hip_version[0]}.{self.hip_version[1]}, HIP runtime or AMD GPU devices not available"
-                    )
+                    greeting.append(f"   {versions}, HIP runtime or AMD GPU devices not available")
                 elif self.driver_version is None:
                     if self.nvrtc_supported_archs:
                         greeting.append(

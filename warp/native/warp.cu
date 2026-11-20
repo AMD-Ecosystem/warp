@@ -2423,7 +2423,11 @@ int wp_cuda_driver_version()
 // built without a CUDA Toolkit; see wp_hip_runtime_version()
 int wp_cuda_toolkit_version() { return 0; }
 
-int wp_hip_runtime_version() { return HIP_VERSION; }
+int wp_hip_runtime_version()
+{
+    int version = 0;
+    return hipRuntimeGetVersion(&version) == hipSuccess ? version : 0;
+}
 #else
 int wp_cuda_toolkit_version() { return CUDA_VERSION; }
 
