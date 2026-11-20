@@ -209,7 +209,21 @@ public:
         bounds3* total_bounds,
         int* item_groups
     );
-}
+
+private:
+    // temporary data used during building
+    int* indices;
+    uint64_t* keys;
+    int* deltas;
+    int* range_lefts;
+    int* range_rights;
+    int* num_children;
+
+    // bounds data when total item bounds built on GPU
+    vec3* total_lower;
+    vec3* total_upper;
+    vec3* total_inv_edges;
+};
 #endif
 
 __global__ void compute_morton_codes(
