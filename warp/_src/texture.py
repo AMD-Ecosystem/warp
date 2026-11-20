@@ -355,6 +355,12 @@ class Texture:
 
         # create texture
         if device.is_cuda:
+            if device.is_hip and device.is_capturing:
+                # HIP textures allocate and upload with synchronous calls that would invalidate the capture.
+                raise RuntimeError(
+                    "Textures cannot be created on HIP devices during graph capture; create them before capturing"
+                )
+
             # create CUDA array if it was not provided
             if not self._array_handle:
                 self._array_owner = True

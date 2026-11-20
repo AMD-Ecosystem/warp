@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for 1D, 2D, and 3D texture functionality on both CPU and CUDA devices.
+"""Unit tests for 1D, 2D, and 3D texture functionality on CPU, CUDA, and HIP devices.
 
-Texture tests are skipped on HIP devices (see all_devices filter below)."""
+HIP sampling uses a linear device buffer because hipArray creation is not
+supported. Surface-object tests stay on CUDA devices."""
 
 import unittest
 
@@ -1159,6 +1160,54 @@ def test_texture3d_cuda_surface_property_requires_surface_access(test, device):
 
     with test.assertRaisesRegex(RuntimeError, "surface_access=True"):
         _ = tex.cuda_surface
+
+
+@wp.kernel
+def sample_texture2d_f_at_uv(tex: wp.Texture2D, uv: wp.vec2f, output: wp.array(dtype=float)):
+    output[0] = wp.texture_sample(tex, uv, dtype=float)
+
+
+def test_texture2d_cuda_array_alias_keeps_sampler_state(test, device):
+    """Textures sharing a CUDA array keep independent filter modes."""
+    data = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=np.float32)
+    # Away from the texel edge at u=0.5: linear gives 0.7, nearest picks texel 1.
+    uv = wp.vec2f(0.6, 0.5)
+    out = wp.zeros(1, dtype=float, device=device)
+
+    linear = wp.Texture2D(data, filter_mode=wp.TextureFilterMode.LINEAR, device=device)
+    alias = wp.Texture2D(cuda_array=linear.cuda_array, filter_mode=wp.TextureFilterMode.CLOSEST, device=device)
+    test.assertNotEqual(linear.cuda_texture, alias.cuda_texture)
+
+    wp.launch(sample_texture2d_f_at_uv, dim=1, inputs=[linear, uv, out], device=device)
+    test.assertAlmostEqual(float(out.numpy()[0]), 0.7, places=2)
+    wp.launch(sample_texture2d_f_at_uv, dim=1, inputs=[alias, uv, out], device=device)
+    test.assertAlmostEqual(float(out.numpy()[0]), 1.0, places=5)
+
+    del alias
+    wp.launch(sample_texture2d_f_at_uv, dim=1, inputs=[linear, uv, out], device=device)
+    test.assertAlmostEqual(float(out.numpy()[0]), 0.7, places=2)
+
+
+def test_texture_surface_access_unsupported_on_hip(test, device):
+    """HIP has no hipArray support, so surface-backed textures are rejected at creation."""
+    data = np.zeros((4, 4), dtype=np.float32)
+    with test.assertRaisesRegex(RuntimeError, "surface textures are not supported on HIP"):
+        wp.Texture2D(data, device=device, surface_access=True)
+
+
+def test_texture_create_during_capture_rejected_on_hip(test, device):
+    """HIP texture creation is rejected during capture without invalidating the capture."""
+    data = np.ones((4, 4), dtype=np.float32)
+    tex = wp.Texture2D(data, device=device)
+    dst = wp.zeros((4, 4), dtype=float, device=device)
+
+    with wp.ScopedCapture(device, force_module_load=False) as capture:
+        with test.assertRaisesRegex(RuntimeError, "during graph capture"):
+            wp.Texture2D(data, device=device)
+        tex.copy_to(dst)
+
+    wp.capture_launch(capture.graph)
+    np.testing.assert_array_equal(dst.numpy(), data)
 
 
 def test_texture2d_new_del(test, device):
@@ -2611,11 +2660,14 @@ class TestTexture(unittest.TestCase):
     pass
 
 
-# Register tests - skip HIP devices for texture tests
-all_devices = [d for d in get_test_devices() if not d.is_hip]
+# Surface objects need hipArray, which ROCm does not provide, so surface tests run
+# only on non-HIP CUDA devices.
+all_devices = get_test_devices()
 cuda_devices = [d for d in all_devices if d.is_cuda]
+surface_devices = [d for d in cuda_devices if not d.is_hip]
+hip_devices = [d for d in cuda_devices if d.is_hip]
 
-# Core texture tests - run on all devices (CPU + CUDA); HIP devices are filtered out above
+# Core texture tests - run on all devices (CPU, CUDA, HIP)
 add_function_test(TestTexture, "test_texture1d_1channel", test_texture1d_1channel, devices=all_devices)
 add_function_test(TestTexture, "test_texture1d_2channel", test_texture1d_2channel, devices=all_devices)
 add_function_test(TestTexture, "test_texture1d_4channel", test_texture1d_4channel, devices=all_devices)
@@ -2720,19 +2772,19 @@ add_function_test(
     TestTexture,
     "test_texture2d_cuda_surface_property_graph_capture_stability",
     test_texture2d_cuda_surface_property_graph_capture_stability,
-    devices=cuda_devices,
+    devices=surface_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture2d_cuda_surface_property_api",
     test_texture2d_cuda_surface_property_api,
-    devices=cuda_devices,
+    devices=surface_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture3d_cuda_surface_property_api",
     test_texture3d_cuda_surface_property_api,
-    devices=cuda_devices,
+    devices=surface_devices,
 )
 add_function_test(
     TestTexture,
@@ -2745,6 +2797,24 @@ add_function_test(
     "test_texture3d_cuda_surface_property_requires_surface_access",
     test_texture3d_cuda_surface_property_requires_surface_access,
     devices=cuda_devices,
+)
+add_function_test(
+    TestTexture,
+    "test_texture2d_cuda_array_alias_keeps_sampler_state",
+    test_texture2d_cuda_array_alias_keeps_sampler_state,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestTexture,
+    "test_texture_surface_access_unsupported_on_hip",
+    test_texture_surface_access_unsupported_on_hip,
+    devices=hip_devices,
+)
+add_function_test(
+    TestTexture,
+    "test_texture_create_during_capture_rejected_on_hip",
+    test_texture_create_during_capture_rejected_on_hip,
+    devices=hip_devices,
 )
 
 # Interpolation tests - run on all devices
