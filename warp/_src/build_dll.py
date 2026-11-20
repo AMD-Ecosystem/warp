@@ -592,6 +592,8 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         ]
         if args.fast_math:
             hip_opts.append("-ffast-math")
+        # zstd-compress the device code bundles (one code object per target, largely alike)
+        hip_opts.append("--offload-compress")
         if os.name == "nt":
             # the ROCm Python packages keep the device libraries where Clang does not look for them on Windows
             hip_device_lib = os.path.join(os.path.dirname(os.path.dirname(hip_clang)), "amdgcn", "bitcode")
