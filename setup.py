@@ -195,6 +195,11 @@ class BinaryDistribution(setuptools.Distribution):
         if extra_requirements:
             self.install_requires = [*self.install_requires, *extra_requirements]
             self.metadata.install_requires = self.install_requires
+        if rocm_wheel:
+            # PyPI has no ROCm classifier; a ROCm wheel only drops the CUDA ones
+            self.metadata.classifiers = [
+                c for c in self.metadata.classifiers if not c.startswith("Environment :: GPU :: NVIDIA CUDA")
+            ]
 
 
 def get_warp_libraries(platform):
@@ -231,10 +236,12 @@ def get_rocm_requirement(marker):
 
 license_files = ["LICENSE.md", "licenses/*.txt"]
 extra_requirements = []
+rocm_wheel = False
 
 if wheel_platform is not None:
     warp_binary_libraries = get_warp_libraries(wheel_platform)
     rocm_markers = [lib for lib in warp_binary_libraries if lib.endswith(".rocm")]
+    rocm_wheel = bool(rocm_markers)
     if rocm_markers:
         # A ROCm wheel depends on the ROCm runtime packages and contains no NVIDIA software
         extra_requirements.append(get_rocm_requirement("warp/" + rocm_markers[0]))
