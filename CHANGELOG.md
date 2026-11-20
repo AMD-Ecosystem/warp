@@ -14,6 +14,9 @@
   `(const char* arch)`. On HIP, callers pass `arch=0` and `arch_suffix="gfx???"`.
 - `warp/tests/test_fem.py` was removed upstream; AMD's HIP-skip filter for `test_capturability` and
   `test_integrate_high_order` is ported to `warp/tests/fem/test_fem_integrate.py`.
+- Add HIP texture sampling. `hipArray` creation is unsupported on ROCm 7.1, so a texture is a
+  packed device buffer plus a device-side descriptor, sampled with the CPU filter and address-mode
+  code. `surface_access=True` is rejected.
 
 ## [1.13.0] - 2026-05-04
 
