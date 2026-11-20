@@ -4578,8 +4578,8 @@ size_t wp_hip_compile_program(
     if (fast_math)
         stored_options.push_back("-ffast-math");
 
-    // nvcc contracts within an expression only; Clang's "on" mode is the closest match
-    stored_options.push_back(fuse_fp ? "-ffp-contract=on" : "-ffp-contract=off");
+    // NVRTC's default --fmad=true contracts across statements; Clang's HIP default does too and honors pragmas
+    stored_options.push_back(fuse_fp ? "-ffp-contract=fast-honor-pragmas" : "-ffp-contract=off");
 
     std::vector<const char*> opts;
     for (const std::string& opt : stored_options)
