@@ -594,6 +594,10 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             hip_opts.append("-ffast-math")
         # zstd-compress the device code bundles (one code object per target, largely alike)
         hip_opts.append("--offload-compress")
+        # compile the targets of each source file in parallel, keeping the files compiled at once
+        # times the jobs per file within the build's job count (the C++ files are compiled first)
+        hip_files_at_once = max(1, min(args.jobs, len(cu_paths or [])))
+        hip_opts.append(f"--offload-jobs={max(1, args.jobs // hip_files_at_once)}")
         if os.name == "nt":
             # the ROCm Python packages keep the device libraries where Clang does not look for them on Windows
             hip_device_lib = os.path.join(os.path.dirname(os.path.dirname(hip_clang)), "amdgcn", "bitcode")
@@ -801,6 +805,8 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     for cuda_cmd in cuda_cmds:
                         run_cmd(cuda_cmd)
             else:
+                if rocm_path:
+                    concurrent.futures.wait(futures)
                 futures.extend([executor.submit(run_cmd, cmd=cuda_cmd) for cuda_cmd in cuda_cmds])
 
             if futures:
@@ -945,6 +951,8 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     for cuda_cmd in cuda_cmds:
                         run_cmd(cuda_cmd)
             else:
+                if rocm_path:
+                    concurrent.futures.wait(futures)
                 futures.extend([executor.submit(run_cmd, cmd=cuda_cmd) for cuda_cmd in cuda_cmds])
 
             if futures:
