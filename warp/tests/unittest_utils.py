@@ -368,6 +368,9 @@ class CheckOutput:
     def __enter__(self):
         # wp.force_load()
 
+        # initialize Warp first, so that its greeting is not captured as output of the test
+        wp.init()
+
         self.capture = StdOutCapture()
         self.capture.begin()
 
