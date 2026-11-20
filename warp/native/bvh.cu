@@ -604,7 +604,7 @@ compute_node_depths(int num_nodes, const int* __restrict__ parents, int* __restr
             block_max[threadIdx.x] = max(block_max[threadIdx.x], block_max[threadIdx.x + s]);
         __syncthreads();
     }
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0 && max_depth)
         atomicMax(max_depth, block_max[0]);
 }
 
@@ -632,6 +632,43 @@ __global__ void refit_nodes_at_depth(
     );
     make_node(lowers + node, lower, left, false);
     make_node(uppers + node, upper, right, false);
+}
+
+// Refit of the nodes at one depth, deepest level first, giving the bottom-up bvh_refit_kernel's results: a leaf or
+// packed leaf takes its primitives' bounds unless its parent is a packed leaf; an internal node takes its children's.
+__global__ void refit_tree_at_depth(
+    int num_nodes,
+    int depth,
+    const int* __restrict__ depths,
+    const int* __restrict__ parents,
+    const int* __restrict__ primitive_indices,
+    const vec3* __restrict__ item_lowers,
+    const vec3* __restrict__ item_uppers,
+    BVHPackedNodeHalf* __restrict__ lowers,
+    BVHPackedNodeHalf* __restrict__ uppers
+)
+{
+    const int node = blockDim.x * blockIdx.x + threadIdx.x;
+    if (node >= num_nodes || depths[node] != depth)
+        return;
+
+    if (lowers[node].b) {
+        const int parent = parents[node];
+        if (parent != -1 && lowers[parent].b)
+            return;
+        bounds3 bound;
+        for (int primitive_counter = lowers[node].i; primitive_counter < uppers[node].i; primitive_counter++) {
+            const int primitive = primitive_indices[primitive_counter];
+            bound.add_bounds(item_lowers[primitive], item_uppers[primitive]);
+        }
+        (vec3&)lowers[node] = bound.lower;
+        (vec3&)uppers[node] = bound.upper;
+    } else {
+        const int left_child = lowers[node].i;
+        const int right_child = uppers[node].i;
+        (vec3&)lowers[node] = min((vec3&)lowers[left_child], (vec3&)lowers[right_child]);
+        (vec3&)uppers[node] = max((vec3&)uppers[left_child], (vec3&)uppers[right_child]);
+    }
 }
 
 // Total bounds in two passes (per-block bounds, then one block over those) instead of vec3 atomics on one address.
@@ -751,7 +788,6 @@ void LinearBVHBuilderGPU::build(
     const size_t keys_at = reserve(sizeof(uint64_t) * num_items * 2);  // keys, then the sorted keys
     const size_t range_lefts_at = reserve(sizeof(int) * bvh.max_nodes);
     const size_t range_rights_at = reserve(sizeof(int) * bvh.max_nodes);
-    const size_t depths_at = reserve(sizeof(int) * bvh.max_nodes);
     const size_t max_depth_at = reserve(sizeof(int));
     const size_t total_at = reserve(sizeof(vec3) * 3);
     const size_t block_bounds_at = reserve(sizeof(vec3) * num_bounds_blocks * 2);
@@ -762,7 +798,7 @@ void LinearBVHBuilderGPU::build(
     keys = (uint64_t*)(pool + keys_at);
     range_lefts = (int*)(pool + range_lefts_at);
     range_rights = (int*)(pool + range_rights_at);
-    int* depths = (int*)(pool + depths_at);
+    int* depths = bvh.node_counts;  // kept for refits
     int* max_depth = (int*)(pool + max_depth_at);
     total_lower = (vec3*)(pool + total_at);
     total_upper = total_lower + 1;
@@ -827,6 +863,7 @@ void LinearBVHBuilderGPU::build(
     int index_bits = 0;
     while ((1ll << index_bits) < num_items)
         index_bits++;
+    bvh.max_depth = key_bits + index_bits;  // a bound on the internal depth, for bvh_refit_device
     for (int depth = key_bits + index_bits; depth >= 1; depth--) {
         wp_launch_device(
             WP_CURRENT_CONTEXT, refit_nodes_at_depth, num_items - 1,
@@ -1025,6 +1062,16 @@ void bvh_create_device(
         // node_counts is not allocated for host tree
         bvh_device_on_host.node_counts
             = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes, "(native:bvh)");
+#if defined(__HIP_PLATFORM_AMD__)
+        // node depths for the refit; nodes past num_nodes are unused and get depth 0
+        wp_memset_device(
+            WP_CURRENT_CONTEXT, bvh_device_on_host.node_counts, 0, sizeof(int) * bvh_device_on_host.max_nodes
+        );
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, compute_node_depths, bvh_device_on_host.num_nodes,
+            (bvh_device_on_host.num_nodes, bvh_device_on_host.node_parents, bvh_device_on_host.node_counts, nullptr)
+        );
+#endif
         wp::bvh_destroy_host(bvh_host);
     } else if (constructor_type == BVH_CONSTRUCTOR_LBVH) {
         bvh_device_on_host.leaf_size = leaf_size;
@@ -1089,6 +1136,27 @@ void bvh_refit_device(BVH& bvh)
 {
     ContextGuard guard(bvh.context);
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // On AMD GPUs the bottom-up walk's per-node __threadfence() dominates on large trees; refit one depth level at a
+    // time there instead. Its launch count (fixed, so the refit stays capturable) costs more than the walk on small
+    // trees.
+    if (bvh.num_leaf_nodes >= 32768) {
+        int index_bits = 0;
+        while ((1ll << index_bits) < bvh.num_items)
+            index_bits++;
+        // the depth of a host-built tree, or the bound of the tree an in-place rebuild may have made of it; leaves are
+        // one level deeper than the internal nodes
+        const int max_depth = std::max(bvh.max_depth, (bvh.item_groups ? 64 : 30) + index_bits) + 1;
+        for (int depth = max_depth; depth >= 1; depth--) {
+            wp_launch_device(
+                WP_CURRENT_CONTEXT, refit_tree_at_depth, bvh.max_nodes,
+                (bvh.max_nodes, depth, bvh.node_counts, bvh.node_parents, bvh.primitive_indices, bvh.item_lowers,
+                 bvh.item_uppers, bvh.node_lowers, bvh.node_uppers)
+            );
+        }
+        return;
+    }
+#endif
     // clear child counters
     wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_counts, 0, sizeof(int) * bvh.max_nodes);
     wp_launch_device(
