@@ -231,6 +231,15 @@ def get_rocm_requirement(marker):
     if not match:
         raise Exception(f"{marker} does not record the ROCm version. Please run build_lib.py again.")
     major, minor = int(match[1]), int(match[2])
+    # the wheel's version names the ROCm it requires (e.g. 1.14.0+rocm10.2.0)
+    version = pathlib.Path("VERSION.md").read_text().strip()
+    label = re.search(r"\+rocm(\d+)\.(\d+)", version)
+    if not label or (int(label[1]), int(label[2])) != (major, minor):
+        raise Exception(
+            f"The library was built against ROCm {major}.{minor}, but the version {version} in VERSION.md names "
+            f"{'ROCm ' + label[1] + '.' + label[2] if label else 'no ROCm release'}. "
+            "Build against the ROCm the version names, or change the version."
+        )
     return f"rocm>={major}.{minor},<{major}.{minor + 1}"
 
 
