@@ -151,8 +151,8 @@ inline CUDA_CALLABLE void bitonic_sort_single_stage_full_thread_block(
 template <typename K, typename V>
 inline CUDA_CALLABLE void bitonic_sort_single_stage_full_warp(int k, unsigned int thread_id, int stride, K& key, V& val)
 {
-    auto s_key = __shfl_xor_sync(WP_TILE_FULL_MASK, key, stride);
-    auto s_val = __shfl_xor_sync(WP_TILE_FULL_MASK, val, stride);
+    auto s_key = __shfl_xor_sync(WP_TILE_SYNC_MASK, key, stride);
+    auto s_val = __shfl_xor_sync(WP_TILE_SYNC_MASK, val, stride);
     auto swap = (((thread_id & stride) != 0 ? key > s_key : key < s_key)) ^ ((thread_id & k) == 0);
     key = swap ? s_key : key;
     val = swap ? s_val : val;
@@ -479,7 +479,7 @@ template <typename T> inline CUDA_CALLABLE T warp_scan_inclusive(int lane, T val
 // Computes an inclusive cumulative sum
 #pragma unroll
     for (int i = 1; i <= 32; i *= 2) {
-        auto n = __shfl_up_sync(WP_TILE_FULL_MASK, value, i, 32);
+        auto n = __shfl_up_sync(WP_TILE_SYNC_MASK, value, i, 32);
 
         if (lane >= i)
             value = value + n;
@@ -537,7 +537,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, WP_TILE_FULL_MASK, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, WP_TILE_SYNC_MASK, contributes);
 
                 if (lane_id == 31)
                     shared_mem[warp_id][b] = sum_per_warp;
@@ -618,7 +618,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, WP_TILE_FULL_MASK, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, WP_TILE_SYNC_MASK, contributes);
                 if (lane_id == 31)
                     shared_mem[warp_id][b] = sum_per_warp;
 
@@ -639,7 +639,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
                 }
 
                 int warp_offset = __shfl_sync(
-                    WP_TILE_FULL_MASK, inclusive_scan - f, warp_id, WP_TILE_RADIX_SORT_GROUP_SIZE
+                    WP_TILE_SYNC_MASK, inclusive_scan - f, warp_id, WP_TILE_RADIX_SORT_GROUP_SIZE
                 );  //-f because warp_offset needs to be an exclusive scan
 
                 bool contributes = digit == b;

@@ -22,10 +22,14 @@
 #if defined(__HIP_DEVICE_COMPILE__)
 typedef unsigned long long tile_mask_t;
 #define WP_TILE_FULL_MASK (WP_TILE_WARP_SIZE == 64 ? ~0ull : 0xFFFFFFFFull)
+// mask passed to the warp functions: HIP checks in debug builds that it names exactly the executing lanes, which a
+// partial wavefront (a block narrower than 64 threads, or a branch on a 32-thread group) does not fill
+#define WP_TILE_SYNC_MASK __activemask()
 #define tile_ffs(mask) __ffsll(mask)
 #else
 typedef unsigned int tile_mask_t;
 #define WP_TILE_FULL_MASK 0xFFFFFFFF
+#define WP_TILE_SYNC_MASK 0xFFFFFFFF
 #define tile_ffs(mask) __ffs(mask)
 #endif
 
@@ -178,7 +182,7 @@ block_combine_thread_results(T thread_sum, bool thread_has_data, Op f, T* partia
     const int lane_index = threadIdx.x % WP_TILE_WARP_SIZE;
 
     // determine which threads have data
-    tile_mask_t mask = __ballot_sync(WP_TILE_FULL_MASK, thread_has_data);
+    tile_mask_t mask = __ballot_sync(WP_TILE_SYNC_MASK, thread_has_data);
     bool warp_is_active = mask != 0;
 
     // warp reduction
@@ -238,7 +242,7 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
     T block_sum {};
     if constexpr (warp_count == 1) {
         // fast path: single warp, just do warp reduction
-        tile_mask_t mask = __ballot_sync(WP_TILE_FULL_MASK, thread_has_data);
+        tile_mask_t mask = __ballot_sync(WP_TILE_SYNC_MASK, thread_has_data);
         if (thread_has_data)
             block_sum = warp_reduce(thread_sum, f, mask);
 
@@ -335,7 +339,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
 
                 // warp reduce this chunk (only valid lanes may call warp_reduce,
                 // because __shfl_down_sync requires all executing threads to be in the mask)
-                tile_mask_t mask = __ballot_sync(WP_TILE_FULL_MASK, valid);
+                tile_mask_t mask = __ballot_sync(WP_TILE_SYNC_MASK, valid);
                 T chunk_result;
                 if (valid)
                     chunk_result = warp_reduce(val, f, mask);
@@ -389,7 +393,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
             T block_sum {};
             if constexpr (warp_count == 1) {
                 // fast path: single warp, just do warp reduction
-                tile_mask_t mask = __ballot_sync(WP_TILE_FULL_MASK, thread_has_data);
+                tile_mask_t mask = __ballot_sync(WP_TILE_SYNC_MASK, thread_has_data);
                 if (thread_has_data)
                     block_sum = warp_reduce(thread_sum, f, mask);
 
@@ -460,7 +464,7 @@ CUDA_CALLABLE_DEVICE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
     }
 
     // determine which threads have valid data
-    tile_mask_t mask = __ballot_sync(WP_TILE_FULL_MASK, thread_has_data);
+    tile_mask_t mask = __ballot_sync(WP_TILE_SYNC_MASK, thread_has_data);
     bool warp_is_active = mask != 0;
 
     // warp reduction (only threads with valid data may participate,
@@ -708,7 +712,7 @@ template <typename TileA, typename TileB> CUDA_CALLABLE auto tile_dot(TileA& a, 
 
     ScalarT result {};
     if constexpr (warp_count == 1) {
-        tile_mask_t mask = __ballot_sync(WP_TILE_FULL_MASK, has_data);
+        tile_mask_t mask = __ballot_sync(WP_TILE_SYNC_MASK, has_data);
         if (has_data)
             result = warp_reduce(thread_sum, add_op, mask);
 

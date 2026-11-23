@@ -58,7 +58,7 @@ template <typename T, typename Op = OpAdd<T>> inline CUDA_CALLABLE T scan_warp_i
     Op op;
 #pragma unroll
     for (int i = 1; i < WP_TILE_WARP_SIZE; i *= 2) {
-        auto n = __shfl_up_sync(WP_TILE_FULL_MASK, value, i, WP_TILE_WARP_SIZE);
+        auto n = __shfl_up_sync(WP_TILE_SYNC_MASK, value, i, WP_TILE_WARP_SIZE);
 
         if (lane >= i)
             value = op(value, n);
@@ -77,7 +77,7 @@ inline CUDA_CALLABLE T scan_warp_exclusive(int lane, T value, T* inclusive_value
         *inclusive_value = inclusive;
 
     // Shift right by 1 to convert inclusive to exclusive
-    T exclusive = __shfl_up_sync(WP_TILE_FULL_MASK, inclusive, 1, WP_TILE_WARP_SIZE);
+    T exclusive = __shfl_up_sync(WP_TILE_SYNC_MASK, inclusive, 1, WP_TILE_WARP_SIZE);
 
     // Lane 0 gets the identity value
     if (lane == 0)
