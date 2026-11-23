@@ -1132,6 +1132,18 @@ void bvh_destroy_device(BVH& bvh)
     bvh.root = NULL;
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+int bvh_refit_max_depth(const BVH& bvh)
+{
+    int index_bits = 0;
+    while ((1ll << index_bits) < bvh.num_items)
+        index_bits++;
+    // the depth of a host-built tree, or the bound of the tree an in-place rebuild may have made of it; leaves are one
+    // level deeper than the internal nodes
+    return std::max(bvh.max_depth, (bvh.item_groups ? 64 : 30) + index_bits) + 1;
+}
+#endif
+
 void bvh_refit_device(BVH& bvh)
 {
     ContextGuard guard(bvh.context);
@@ -1141,13 +1153,7 @@ void bvh_refit_device(BVH& bvh)
     // time there instead. Its launch count (fixed, so the refit stays capturable) costs more than the walk on small
     // trees.
     if (bvh.num_leaf_nodes >= 32768) {
-        int index_bits = 0;
-        while ((1ll << index_bits) < bvh.num_items)
-            index_bits++;
-        // the depth of a host-built tree, or the bound of the tree an in-place rebuild may have made of it; leaves are
-        // one level deeper than the internal nodes
-        const int max_depth = std::max(bvh.max_depth, (bvh.item_groups ? 64 : 30) + index_bits) + 1;
-        for (int depth = max_depth; depth >= 1; depth--) {
+        for (int depth = bvh_refit_max_depth(bvh); depth >= 1; depth--) {
             wp_launch_device(
                 WP_CURRENT_CONTEXT, refit_tree_at_depth, bvh.max_nodes,
                 (bvh.max_nodes, depth, bvh.node_counts, bvh.node_parents, bvh.primitive_indices, bvh.item_lowers,

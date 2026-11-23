@@ -219,11 +219,89 @@ __global__ void bvh_refit_with_solid_angle_kernel(
     }
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// Refit of the nodes at one depth, deepest level first, giving bvh_refit_with_solid_angle_kernel's results: a leaf or
+// packed leaf takes its triangles' solid angle data unless its parent is a packed leaf; an internal node combines its
+// children's.
+__global__ void refit_tree_with_solid_angle_at_depth(
+    int num_nodes,
+    int depth,
+    const int* __restrict__ depths,
+    const int* __restrict__ parents,
+    BVHPackedNodeHalf* __restrict__ node_lowers,
+    BVHPackedNodeHalf* __restrict__ node_uppers,
+    const vec3* points,
+    const int* indices,
+    const int* primitive_indices,
+    SolidAngleProps* solid_angle_props
+)
+{
+    const int index = blockDim.x * blockIdx.x + threadIdx.x;
+    if (index >= num_nodes || depths[index] != depth)
+        return;
+
+    BVHPackedNodeHalf& lower = node_lowers[index];
+    BVHPackedNodeHalf& upper = node_uppers[index];
+    if (lower.b) {
+        const int parent = parents[index];
+        if (parent != -1 && node_lowers[parent].b)
+            return;
+
+        SolidAngleProps node_solid_angle_props;
+        const int start = lower.i;
+        const int end = upper.i;
+        for (int primitive_counter = start; primitive_counter < end; primitive_counter++) {
+            int primitive_index = primitive_indices[primitive_counter];
+            if (primitive_counter == start) {
+                precompute_triangle_solid_angle_props(
+                    points[indices[primitive_index * 3 + 0]], points[indices[primitive_index * 3 + 1]],
+                    points[indices[primitive_index * 3 + 2]], node_solid_angle_props
+                );
+            } else {
+                SolidAngleProps triangle_solid_angle_props;
+                precompute_triangle_solid_angle_props(
+                    points[indices[primitive_index * 3 + 0]], points[indices[primitive_index * 3 + 1]],
+                    points[indices[primitive_index * 3 + 2]], triangle_solid_angle_props
+                );
+                node_solid_angle_props
+                    = combine_precomputed_solid_angle_props(&node_solid_angle_props, &triangle_solid_angle_props);
+            }
+        }
+
+        (vec3&)lower = node_solid_angle_props.box.lower;
+        (vec3&)upper = node_solid_angle_props.box.upper;
+        solid_angle_props[index] = node_solid_angle_props;
+    } else {
+        const int left_child = lower.i;
+        const int right_child = upper.i;
+        (vec3&)lower = min((vec3&)node_lowers[left_child], (vec3&)node_lowers[right_child]);
+        (vec3&)upper = max((vec3&)node_uppers[left_child], (vec3&)node_uppers[right_child]);
+
+        SolidAngleProps* left_child_data = &solid_angle_props[left_child];
+        SolidAngleProps* right_child_data = (left_child != right_child) ? &solid_angle_props[right_child] : NULL;
+        combine_precomputed_solid_angle_props(solid_angle_props[index], left_child_data, right_child_data);
+    }
+}
+#endif
 
 void bvh_refit_with_solid_angle_device(BVH& bvh, Mesh& mesh)
 {
     ContextGuard guard(bvh.context);
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // as in bvh_refit_device: one depth level at a time on large trees, where the walk's __threadfence() dominates;
+    // the heavier solid angle work moves the break-even to about 65k triangles (LBVH trees count every item as a leaf)
+    if (bvh.num_items >= 65536) {
+        for (int depth = bvh_refit_max_depth(bvh); depth >= 1; depth--) {
+            wp_launch_device(
+                WP_CURRENT_CONTEXT, refit_tree_with_solid_angle_at_depth, bvh.max_nodes,
+                (bvh.max_nodes, depth, bvh.node_counts, bvh.node_parents, bvh.node_lowers, bvh.node_uppers, mesh.points,
+                 mesh.indices, bvh.primitive_indices, mesh.solid_angle_props)
+            );
+        }
+        return;
+    }
+#endif
     // clear child counters
     wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_counts, 0, sizeof(int) * bvh.max_nodes);
     wp_launch_device(

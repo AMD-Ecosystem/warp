@@ -619,6 +619,10 @@ void bvh_create_device(
 );
 void bvh_destroy_device(BVH& bvh);
 void bvh_refit_device(BVH& bvh);
+#if defined(__HIP_PLATFORM_AMD__)
+// the deepest level a depth-level refit of the device tree launches (depths stored in node_counts)
+int bvh_refit_max_depth(const BVH& bvh);
+#endif
 void cubql_bvh_create_device(
     void* context, vec3* lowers, vec3* uppers, int num_items, int leaf_size, CuBQLBVH& bvh_device_on_host
 );
