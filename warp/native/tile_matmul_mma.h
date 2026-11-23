@@ -91,9 +91,8 @@ template <> struct op<bfloat16> {
 
 #elif (defined(WP_TILE_WMMA) && WP_TILE_WMMA) || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)       \
     || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
-// 32-lane WMMA. The gfx11 and gfx12 fp16 layouts and the gfx11 bf16 layout are measured and on (gfx12 bf16
-// assumes the gfx12 fp16 layout); the gfx1250 path stays off unless WP_TILE_WMMA is defined to 1 (each WMMA
-// builtin exists on exactly one target family).
+// 32-lane WMMA. The gfx11 and gfx12 fp16 and bf16 layouts are measured and on; the gfx1250 path stays off unless
+// WP_TILE_WMMA is defined to 1 (each WMMA builtin exists on exactly one target family).
 #define WP_TILE_MMA 1
 constexpr int kWave = 32;
 
@@ -169,7 +168,7 @@ template <> struct op<half> {
 #endif
 
 #if __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12) && !defined(WP_NO_BFLOAT16)
-// gfx12 bf16 inputs (float32 output only): assumed to share the gfx12 fp16 layout
+// gfx12 bf16 inputs (float32 output only): the gfx12 fp16 layout (measured on gfx1201)
 template <> struct op<bfloat16> {
     static constexpr bool available = true;
     static constexpr int kpl = 8;
@@ -248,8 +247,8 @@ template <typename Op, typename LayoutA, typename LayoutB> constexpr bool amorti
     else if constexpr (Op::k_split)
         return true;
     else
-        return fragments < 16 || fragments / (WP_TILE_BLOCK_DIM / kWave) >= 4 || LayoutA::Stride::dim(1) != 1
-            || LayoutB::Stride::dim(1) != 1;
+        return fragments < 16 || (WP_TILE_BLOCK_DIM >= kWave && fragments >= 4 * (WP_TILE_BLOCK_DIM / kWave))
+            || LayoutA::Stride::dim(1) != 1 || LayoutB::Stride::dim(1) != 1;
 }
 
 template <
