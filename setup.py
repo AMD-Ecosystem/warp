@@ -229,6 +229,8 @@ def get_warp_libraries(platform):
                 if src != dst:
                     shutil.copyfile(src + ".rocm", dst + ".rocm")
                 libraries.append("bin/" + library.file + ".rocm")
+            elif src != dst and os.path.exists(dst + ".rocm"):
+                os.remove(dst + ".rocm")
 
     return libraries
 
