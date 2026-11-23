@@ -4575,8 +4575,11 @@ size_t wp_hip_compile_program(
     stored_options.push_back(verify_fp ? "-DWP_VERIFY_FP" : "-UWP_VERIFY_FP");
     stored_options.push_back("-DWP_ENABLE_MATHDX=0");
 
-    if (fast_math)
+    if (fast_math) {
         stored_options.push_back("-ffast-math");
+        // NVRTC's --use_fast_math keeps NaN and Inf semantics; Clang's -ffast-math would assume finite values
+        stored_options.push_back("-fno-finite-math-only");
+    }
 
     // NVRTC's default --fmad=true contracts across statements; Clang's HIP default does too and honors pragmas
     stored_options.push_back(fuse_fp ? "-ffp-contract=fast-honor-pragmas" : "-ffp-contract=off");
