@@ -39,6 +39,8 @@ template <> struct op<float32> {
     static inline CUDA_CALLABLE int row(int g, int r) { return 4 * g + r; }
 };
 
+// fp64 and bf16 MFMA need gfx90a-insts: gfx908 keeps the scalar path for those types
+#if __has_builtin(__builtin_amdgcn_mfma_f64_16x16x4f64)
 template <> struct op<float64> {
     static constexpr bool available = true;
     static constexpr int kpl = 1;
@@ -51,6 +53,7 @@ template <> struct op<float64> {
     }
     static inline CUDA_CALLABLE int row(int g, int r) { return g + 4 * r; }
 };
+#endif
 
 template <> struct op<half> {
     static constexpr bool available = true;
@@ -68,7 +71,7 @@ template <> struct op<half> {
 };
 
 
-#ifndef WP_NO_BFLOAT16
+#if !defined(WP_NO_BFLOAT16) && __has_builtin(__builtin_amdgcn_mfma_f32_16x16x16bf16_1k)
 // bf16 inputs; tile_matmul accepts them only with a float32 output tile
 template <> struct op<bfloat16> {
     static constexpr bool available = true;
