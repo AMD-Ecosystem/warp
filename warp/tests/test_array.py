@@ -1042,6 +1042,19 @@ def test_fill_struct(test, device):
     assert_np_equal(a4.numpy(), np.zeros(a4.shape, dtype=nptype))
 
 
+def test_fill_large(test, device):
+    # more than 2^32 elements, one GPU thread each (8.6 GB); HIP limits a grid to 2^32 - 1 threads per dimension
+    if device.free_memory < 12e9:
+        test.skipTest("Insufficient free memory")
+
+    # 65536 x 65537 = 2^32 + 65536 elements; the last row holds flat indices 2^32 - 1 to the end
+    a = wp.zeros((65536, 65537), dtype=wp.int16, device=device)
+    a.fill_(7)
+    for row in (0, 65535):
+        assert_np_equal(a[row].numpy(), np.full(65537, 7, dtype=np.int16))
+    del a
+
+
 def test_fill_slices(test, device):
     # test fill_ and zero_ for non-contiguous arrays
     # Note: we don't need to test the whole range of dtypes (vectors, matrices, structs) here
@@ -3983,6 +3996,7 @@ add_function_test(TestArray, "test_fill_vector", test_fill_vector, devices=devic
 add_function_test(TestArray, "test_fill_matrix", test_fill_matrix, devices=devices)
 add_function_test(TestArray, "test_fill_struct", test_fill_struct, devices=devices)
 add_function_test(TestArray, "test_fill_slices", test_fill_slices, devices=devices)
+add_function_test(TestArray, "test_fill_large", test_fill_large, devices=cuda_devices)
 add_function_test(TestArray, "test_full_scalar", test_full_scalar, devices=devices)
 add_function_test(TestArray, "test_full_vector", test_full_vector, devices=devices)
 add_function_test(TestArray, "test_full_matrix", test_full_matrix, devices=devices)

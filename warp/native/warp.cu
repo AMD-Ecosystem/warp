@@ -1295,8 +1295,7 @@ bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, siz
 
 __global__ void memset_kernel(int* dest, int value, size_t n)
 {
-    const size_t tid
-        = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    const size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < n) {
         dest[tid] = value;
@@ -1328,9 +1327,13 @@ bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stre
     } else if (n) {
         const unsigned int byte = value & 0xff;
         if ((reinterpret_cast<size_t>(dest) & 3) == 0 && (n & 3) == 0)
-            memset_kernel<<<(n / 4 + 255) / 256, 256, 0, cuda_stream>>>((int*)dest, int(byte * 0x01010101u), n / 4);
+            memset_kernel<<<wp_launch_grid((n / 4 + 255) / 256, 256), 256, 0, cuda_stream>>>(
+                (int*)dest, int(byte * 0x01010101u), n / 4
+            );
         else
-            memtile_value_kernel<<<(n + 255) / 256, 256, 0, cuda_stream>>>((uint8_t*)dest, uint8_t(byte), n);
+            memtile_value_kernel<<<wp_launch_grid((n + 255) / 256, 256), 256, 0, cuda_stream>>>(
+                (uint8_t*)dest, uint8_t(byte), n
+            );
         result = check_cuda(cudaGetLastError());
     }
 #else
@@ -1380,7 +1383,7 @@ template <size_t N> static FillValue<N> make_fill_value(const void* src, size_t 
 // fill memory buffer with a value: generic memtile kernel using memcpy for each element
 __global__ void memtile_kernel(void* dst, const void* src, size_t srcsize, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < n) {
         memcpy((int8_t*)dst + srcsize * tid, src, srcsize);
     }
@@ -1388,7 +1391,7 @@ __global__ void memtile_kernel(void* dst, const void* src, size_t srcsize, size_
 
 template <size_t N> __global__ void memtile_kernel_by_value(void* dst, FillValue<N> value, size_t srcsize, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < n) {
         memcpy((int8_t*)dst + srcsize * tid, value.bytes, srcsize);
     }
@@ -1420,7 +1423,7 @@ static bool launch_memtile_kernel_by_value(void* dst, const void* src, size_t sr
 // this should be faster than memtile_kernel, but requires proper alignment of dst
 template <typename T> __global__ void memtile_value_kernel(T* dst, T value, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < n) {
         dst[tid] = value;
     }
@@ -1478,7 +1481,7 @@ static __global__ void array_copy_1d_kernel(
     size_t elem_size
 )
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t i = WP_GRID_THREAD_INDEX;
     if (i < n) {
         size_t src_idx = src_indices ? src_indices[i] : i;
         size_t dst_idx = dst_indices ? dst_indices[i] : i;
@@ -1499,7 +1502,7 @@ static __global__ void array_copy_2d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t i = tid / n;
     size_t j = tid % n;
@@ -1525,7 +1528,7 @@ static __global__ void array_copy_3d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t i = tid / (n * o);
@@ -1556,7 +1559,7 @@ static __global__ void array_copy_4d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t p = shape[3];
@@ -1586,7 +1589,7 @@ static __global__ void array_copy_from_fabric_kernel(
     wp::fabricarray_t<void> src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < src.size) {
         size_t dst_idx = dst_indices ? dst_indices[tid] : tid;
@@ -1600,7 +1603,7 @@ static __global__ void array_copy_from_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < src.size) {
         size_t src_index = src.indices[tid];
@@ -1615,7 +1618,7 @@ static __global__ void array_copy_to_fabric_kernel(
     wp::fabricarray_t<void> dst, const void* src_data, size_t src_stride, const int* src_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_idx = src_indices ? src_indices[tid] : tid;
@@ -1633,7 +1636,7 @@ static __global__ void array_copy_to_fabric_indexed_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_idx = src_indices ? src_indices[tid] : tid;
@@ -1648,7 +1651,7 @@ static __global__ void array_copy_to_fabric_indexed_kernel(
 static __global__ void
 array_copy_fabric_to_fabric_kernel(wp::fabricarray_t<void> dst, wp::fabricarray_t<void> src, size_t elem_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
@@ -1662,7 +1665,7 @@ static __global__ void array_copy_fabric_to_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> dst, wp::fabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
@@ -1677,7 +1680,7 @@ static __global__ void array_copy_fabric_indexed_to_fabric_kernel(
     wp::fabricarray_t<void> dst, wp::indexedfabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_index = src.indices[tid];
@@ -1692,7 +1695,7 @@ static __global__ void array_copy_fabric_indexed_to_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> dst, wp::indexedfabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_index = src.indices[tid];
@@ -1960,7 +1963,7 @@ static __global__ void array_fill_1d_kernel_by_value(
     void* data, size_t n, size_t stride, const int* indices, FillValue<N> value, size_t value_size
 )
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t i = WP_GRID_THREAD_INDEX;
     if (i < n) {
         size_t idx = indices ? indices[i] : i;
         char* p = (char*)data + idx * stride;
@@ -1978,7 +1981,7 @@ static __global__ void array_fill_2d_kernel_by_value(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t i = tid / n;
     size_t j = tid % n;
@@ -2000,7 +2003,7 @@ static __global__ void array_fill_3d_kernel_by_value(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t i = tid / (n * o);
@@ -2025,7 +2028,7 @@ static __global__ void array_fill_4d_kernel_by_value(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t p = shape[3];
@@ -2047,7 +2050,7 @@ template <size_t N>
 static __global__ void
 array_fill_fabric_kernel_by_value(wp::fabricarray_t<void> fa, FillValue<N> value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < fa.size) {
         void* dst_ptr = fabricarray_element_ptr(fa, tid, value_size);
         memcpy(dst_ptr, value.bytes, value_size);
@@ -2058,7 +2061,7 @@ template <size_t N>
 static __global__ void
 array_fill_fabric_indexed_kernel_by_value(wp::indexedfabricarray_t<void> ifa, FillValue<N> value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < ifa.size) {
         size_t idx = size_t(ifa.indices[tid]);
         if (idx < ifa.fa.size) {
@@ -2179,7 +2182,7 @@ static bool launch_array_fill_by_value(
 static __global__ void
 array_fill_1d_kernel(void* data, size_t n, size_t stride, const int* indices, const void* value, size_t value_size)
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t i = WP_GRID_THREAD_INDEX;
     if (i < n) {
         size_t idx = indices ? indices[i] : i;
         char* p = (char*)data + idx * stride;
@@ -2196,7 +2199,7 @@ static __global__ void array_fill_2d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t i = tid / n;
     size_t j = tid % n;
@@ -2217,7 +2220,7 @@ static __global__ void array_fill_3d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t i = tid / (n * o);
@@ -2241,7 +2244,7 @@ static __global__ void array_fill_4d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t p = shape[3];
@@ -2261,7 +2264,7 @@ static __global__ void array_fill_4d_kernel(
 
 static __global__ void array_fill_fabric_kernel(wp::fabricarray_t<void> fa, const void* value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < fa.size) {
         void* dst_ptr = fabricarray_element_ptr(fa, tid, value_size);
         memcpy(dst_ptr, value, value_size);
@@ -2271,7 +2274,7 @@ static __global__ void array_fill_fabric_kernel(wp::fabricarray_t<void> fa, cons
 static __global__ void
 array_fill_fabric_indexed_kernel(wp::indexedfabricarray_t<void> ifa, const void* value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < ifa.size) {
         size_t idx = size_t(ifa.indices[tid]);
         if (idx < ifa.fa.size) {
