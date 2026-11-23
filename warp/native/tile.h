@@ -1152,7 +1152,12 @@ private:
 
     static inline CUDA_CALLABLE char* get_dynamic_smem_base()
     {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+        // CUDA starts dynamic shared memory 16-byte aligned; AMDGPU places it after the static shared variables
+        // at the declared alignment, and shared tiles are copied with 16-byte vector accesses
+        extern __shared__ char dynamic_smem_base[] __attribute__((aligned(16)));
+        return dynamic_smem_base;
+#elif defined(__CUDA_ARCH__)
         extern __shared__ char dynamic_smem_base[];
         return dynamic_smem_base;
 #elif defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
