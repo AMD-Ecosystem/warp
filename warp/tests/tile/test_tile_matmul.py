@@ -388,6 +388,11 @@ FRAGMENT_SHAPES = ((16, 16, 16), (48, 16, 32), (24, 16, 16), (17, 33, 15), (16, 
 FRAGMENT_BLOCK_DIMS = (16, 32, 48, 64, 96)
 
 
+def fragment_block_dims(device):
+    # cuBLASDx (MathDx on NVIDIA GPUs) needs at least 32 threads per block
+    return FRAGMENT_BLOCK_DIMS if device.is_hip else tuple(bd for bd in FRAGMENT_BLOCK_DIMS if bd >= 32)
+
+
 def test_tile_matmul_fragment_shapes(dtype):
     # GPU results against the CPU
     def test(test, device):
@@ -395,7 +400,7 @@ def test_tile_matmul_fragment_shapes(dtype):
         for M, N, K in FRAGMENT_SHAPES:
             mm = create_matmul_kernel(dtype, M, N, K)
             A, B = rng.uniform(-1, 1, (M, K)), rng.uniform(-1, 1, (K, N))
-            for block_dim in FRAGMENT_BLOCK_DIMS:
+            for block_dim in fragment_block_dims(wp.get_device(device)):
                 results = []
                 for dev in (device, "cpu"):
                     a = wp.array(A, dtype=dtype, device=dev, requires_grad=True)
@@ -430,7 +435,7 @@ def test_tile_matmul_fragment_shapes_bf16(test, device):
         mm = create_matmul_bf16_kernel(M, N, K)
         A = rng.uniform(-1, 1, (M, K)).astype(np.float32)
         B = rng.uniform(-1, 1, (K, N)).astype(np.float32)
-        for block_dim in FRAGMENT_BLOCK_DIMS:
+        for block_dim in fragment_block_dims(wp.get_device(device)):
             results = []
             for dev in (device, "cpu"):
                 a = wp.zeros((M, K), dtype=wp.bfloat16, device=dev)
