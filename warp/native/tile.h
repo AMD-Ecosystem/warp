@@ -51,7 +51,7 @@ struct alignas(16) float4 {
 #define WP_TILE_SYNC void
 #endif
 
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__) && !defined(__INTELLISENSE__)
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && !defined(__INTELLISENSE__)
 #if defined(__CUDACC_RTC__) || defined(__HIPCC__) || (defined(__clang__) && defined(__CUDA__))
 #define WP_PRAGMA_UNROLL _Pragma("unroll")
 #define WP_PRAGMA_NO_UNROLL _Pragma("unroll 1")
