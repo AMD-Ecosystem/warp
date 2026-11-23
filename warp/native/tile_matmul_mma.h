@@ -90,9 +90,10 @@ template <> struct op<bfloat16> {
 #endif
 
 #elif (defined(WP_TILE_WMMA) && WP_TILE_WMMA) || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)       \
-    || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
-// 32-lane WMMA. The gfx11 and gfx12 fp16 and bf16 layouts are measured and on; the gfx1250 path stays off unless
-// WP_TILE_WMMA is defined to 1 (each WMMA builtin exists on exactly one target family).
+    || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)                                                       \
+    || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x4_f32)
+// 32-lane WMMA. The gfx11 and gfx12 fp16 and bf16 layouts and the gfx1250 fp32 layout are measured and on (each WMMA
+// builtin exists on exactly one target family).
 #define WP_TILE_MMA 1
 constexpr int kWave = 32;
 
