@@ -247,11 +247,6 @@ def find_hip_clang(rocm_path) -> str:
     raise RuntimeError(f"Could not find the ROCm Clang compiler ({exe}) under {rocm_path}")
 
 
-def is_rocm_sdk_root(rocm_path) -> bool:
-    """Whether ``rocm_path`` is the root provided by the ROCm Python packages (``rocm-sdk path --root``)."""
-    return os.path.basename(os.path.normpath(rocm_path)) == "_rocm_sdk_devel"
-
-
 def get_hip_architectures(rocm_path, requested: str | None = None) -> list[str]:
     """Return the AMD GPU targets to build for.
 
@@ -938,9 +933,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     ld_inputs.append(quote(cu_out))
 
                 if rocm_path:
-                    # the ROCm Python packages preload the runtime (load_hip_runtime), so a build against them
-                    # records no path of the build machine
-                    rocm_rpath = "" if is_rocm_sdk_root(rocm_path) else f' -Wl,-rpath,"{rocm_path}/lib"'
+                    rocm_rpath = f' -Wl,-rpath,"{rocm_path}/lib"' if getattr(args, "rocm_rpath", True) else ""
                     ld_inputs.append(f'-L"{rocm_path}/lib"{rocm_rpath} -lamdhip64 -lhiprtc -lpthread -ldl -lrt')
                 elif args.use_dynamic_cuda:
                     ld_inputs.append(

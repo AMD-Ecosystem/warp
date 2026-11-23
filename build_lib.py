@@ -346,6 +346,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated AMD GPU targets for an AMD GPU build (e.g. gfx942,gfx1100). Defaults to every target supported by the ROCm installation",
     )
     group_build.add_argument(
+        "--rocm-rpath",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Record the ROCm library directory in the library's RUNPATH for an AMD GPU build. A wheel that depends "
+        "on the ROCm Python packages, which load the HIP runtime, is built with --no-rocm-rpath so that the library "
+        "names no path of the build machine",
+    )
+    group_build.add_argument(
         "--clang-build-toolchain",
         action=argparse.BooleanOptionalAction,
         default=False,
