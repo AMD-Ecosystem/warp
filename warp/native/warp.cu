@@ -164,7 +164,6 @@ struct DeviceInfo {
     int is_texture3d_hardware_supported = 1;
 #if WP_ENABLE_HIP
     char arch_name[256] = "";  // target name, e.g. gfx942:sramecc+:xnack-
-    int warp_size = 0;
 #endif
 };
 
@@ -319,10 +318,8 @@ int cuda_init()
                 );
 #if WP_ENABLE_HIP
                 hipDeviceProp_t props;
-                if (check_cuda(hipGetDeviceProperties(&props, device))) {
+                if (check_cuda(hipGetDeviceProperties(&props, device)))
                     snprintf(g_devices[i].arch_name, sizeof(g_devices[i].arch_name), "%s", props.gcnArchName);
-                    g_devices[i].warp_size = props.warpSize;
-                }
                 // AMD GPUs without image hardware cannot create texture arrays or objects
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].is_texture_hardware_supported, hipDeviceAttributeImageSupport, device
@@ -2525,17 +2522,6 @@ const char* wp_cuda_device_get_arch_name(int ordinal)
     (void)ordinal;
 #endif
     return "";
-}
-
-int wp_cuda_device_get_warp_size(int ordinal)
-{
-#if WP_ENABLE_HIP
-    if (ordinal >= 0 && ordinal < int(g_devices.size()))
-        return g_devices[ordinal].warp_size;
-    return 0;
-#else
-    return ordinal >= 0 && ordinal < int(g_devices.size()) ? 32 : 0;
-#endif
 }
 
 int wp_cuda_device_get_sm_count(int ordinal)
