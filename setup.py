@@ -11,6 +11,7 @@ import sys
 from typing import ClassVar, NamedTuple
 
 import setuptools
+from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
 # Parse --build-option arguments meant for the bdist_wheel command. We have to parse these
@@ -182,6 +183,16 @@ class WarpBDistWheel(bdist_wheel):
         shutil.rmtree("./warp_lang.egg-info", ignore_errors=True)
 
 
+class WarpBuildPy(build_py):
+    def run(self):
+        super().run()
+        # A ROCm marker's first line is the build machine's ROCm root, which only a source build without the ROCm
+        # Python packages reads; a wheel depends on those packages, so its copy keeps only the version line
+        for marker in pathlib.Path(self.build_lib, "warp", "bin").glob("*.rocm"):
+            lines = marker.read_text().splitlines()
+            marker.write_text("\n" + (lines[1] if len(lines) > 1 else "") + "\n", newline="\n")
+
+
 # Distributions are identified as non-pure (i.e. containing non-Python code, or binaries) if the
 # setuptools.setup() `ext_modules` parameter is not empty, but this assumes building extension
 # modules from source through the Python build. This class provides an override for prebuilt binaries:
@@ -279,6 +290,6 @@ setuptools.setup(
         ]
     },
     distclass=BinaryDistribution,
-    cmdclass={"bdist_wheel": WarpBDistWheel},
+    cmdclass={"bdist_wheel": WarpBDistWheel, "build_py": WarpBuildPy},
     license_files=license_files,
 )

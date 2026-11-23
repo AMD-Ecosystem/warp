@@ -247,6 +247,11 @@ def find_hip_clang(rocm_path) -> str:
     raise RuntimeError(f"Could not find the ROCm Clang compiler ({exe}) under {rocm_path}")
 
 
+def is_rocm_sdk_root(rocm_path) -> bool:
+    """Whether ``rocm_path`` is the root provided by the ROCm Python packages (``rocm-sdk path --root``)."""
+    return os.path.basename(os.path.normpath(rocm_path)) == "_rocm_sdk_devel"
+
+
 def get_hip_architectures(rocm_path, requested: str | None = None) -> list[str]:
     """Return the AMD GPU targets to build for.
 
@@ -592,6 +597,8 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         ]
         if args.fast_math:
             hip_opts.append("-ffast-math")
+        # __FILE__ names sources relative to the tree, not by the build machine's path
+        hip_opts.append(f'-fmacro-prefix-map="{os.path.dirname(warp_home)}{os.sep}="')
         # zstd-compress the device code bundles (one code object per target, largely alike)
         hip_opts.append("--offload-compress")
         # compile the targets of each source file in parallel, keeping the files compiled at once
@@ -875,6 +882,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         if args.sanitize:
             cpp_flags += f" -fsanitize={args.sanitize}"
 
+        if rocm_path:
+            cpp_flags += f' -fmacro-prefix-map="{os.path.dirname(warp_home)}/="'
+
         ld_inputs = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
@@ -928,9 +938,10 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     ld_inputs.append(quote(cu_out))
 
                 if rocm_path:
-                    ld_inputs.append(
-                        f'-L"{rocm_path}/lib" -Wl,-rpath,"{rocm_path}/lib" -lamdhip64 -lhiprtc -lpthread -ldl -lrt'
-                    )
+                    # the ROCm Python packages preload the runtime (load_hip_runtime), so a build against them
+                    # records no path of the build machine
+                    rocm_rpath = "" if is_rocm_sdk_root(rocm_path) else f' -Wl,-rpath,"{rocm_path}/lib"'
+                    ld_inputs.append(f'-L"{rocm_path}/lib"{rocm_rpath} -lamdhip64 -lhiprtc -lpthread -ldl -lrt')
                 elif args.use_dynamic_cuda:
                     ld_inputs.append(
                         f'-L"{cuda_home}/lib64" -L"{cuda_home}/lib" -lcudart -lnvrtc -lnvptxcompiler_static -lpthread -ldl -lrt'
