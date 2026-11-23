@@ -147,8 +147,12 @@ uint64_t wp_texture_software_object_create(
 
     wp::Texture* desc_device = (wp::Texture*)wp_alloc_device(context, sizeof(wp::Texture), "(native:texture)");
     if (desc_device) {
-        wp_memcpy_h2d(context, desc_device, &desc, sizeof(wp::Texture));
-        track(reinterpret_cast<uint64_t>(desc_device), true);
+        if (wp_memcpy_h2d(context, desc_device, &desc, sizeof(wp::Texture))) {
+            track(reinterpret_cast<uint64_t>(desc_device), true);
+        } else {
+            wp_free_device(context, desc_device);
+            desc_device = nullptr;
+        }
     }
 
     desc.data = host_texels;
