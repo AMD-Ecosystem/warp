@@ -382,15 +382,20 @@ def create_matmul_kernel(dtype, M, N, K):
     return mm
 
 
+# shapes that fill 16x16 fragments, a non-square one, ones that do not fit, and rows of 2 and 4 fragments
+FRAGMENT_SHAPES = ((16, 16, 16), (48, 16, 32), (24, 16, 16), (17, 33, 15), (16, 32, 16), (32, 64, 32))
+# blocks smaller than a 32- or 64-wide wavefront, whole wavefronts, and blocks that are not a whole number of either
+FRAGMENT_BLOCK_DIMS = (16, 32, 48, 64, 96)
+
+
 def test_tile_matmul_fragment_shapes(dtype):
-    # shapes that fill 16x16 fragments, a non-square one, and ones that do not fit; a block of a
-    # whole number of 64-thread groups and one that is not; GPU results against the CPU
+    # GPU results against the CPU
     def test(test, device):
         rng = np.random.default_rng(7)
-        for M, N, K in ((16, 16, 16), (48, 16, 32), (24, 16, 16), (17, 33, 15)):
+        for M, N, K in FRAGMENT_SHAPES:
             mm = create_matmul_kernel(dtype, M, N, K)
             A, B = rng.uniform(-1, 1, (M, K)), rng.uniform(-1, 1, (K, N))
-            for block_dim in (64, 96):
+            for block_dim in FRAGMENT_BLOCK_DIMS:
                 results = []
                 for dev in (device, "cpu"):
                     a = wp.array(A, dtype=dtype, device=dev, requires_grad=True)
@@ -406,6 +411,36 @@ def test_tile_matmul_fragment_shapes(dtype):
                     assert_np_equal(got, ref, tol=tol)
 
     return test
+
+
+def create_matmul_bf16_kernel(M, N, K):
+    @wp.kernel(module="unique", module_options={"enable_backward": False})
+    def mm(A: wp.array2d(dtype=wp.bfloat16), B: wp.array2d(dtype=wp.bfloat16), C: wp.array2d(dtype=wp.float32)):
+        c = wp.tile_zeros(shape=(M, N), dtype=wp.float32)
+        wp.tile_matmul(wp.tile_load(A, shape=(M, K)), wp.tile_load(B, shape=(K, N)), c)
+        wp.tile_store(C, c)
+
+    return mm
+
+
+def test_tile_matmul_fragment_shapes_bf16(test, device):
+    # bfloat16 inputs with a float32 output (forward only), GPU results against the CPU
+    rng = np.random.default_rng(7)
+    for M, N, K in FRAGMENT_SHAPES:
+        mm = create_matmul_bf16_kernel(M, N, K)
+        A = rng.uniform(-1, 1, (M, K)).astype(np.float32)
+        B = rng.uniform(-1, 1, (K, N)).astype(np.float32)
+        for block_dim in FRAGMENT_BLOCK_DIMS:
+            results = []
+            for dev in (device, "cpu"):
+                a = wp.zeros((M, K), dtype=wp.bfloat16, device=dev)
+                b = wp.zeros((K, N), dtype=wp.bfloat16, device=dev)
+                wp.launch(f32_to_bf16_kernel, dim=(M, K), inputs=[wp.array(A, device=dev), a], device=dev)
+                wp.launch(f32_to_bf16_kernel, dim=(K, N), inputs=[wp.array(B, device=dev), b], device=dev)
+                c = wp.zeros((M, N), dtype=wp.float32, device=dev)
+                wp.launch_tiled(mm, dim=[1], inputs=[a, b, c], block_dim=block_dim, device=dev)
+                results.append(c.numpy())
+            assert_np_equal(results[0], results[1], tol=1e-4)
 
 
 devices = get_test_devices()
@@ -460,6 +495,12 @@ for dtype in (wp.float16, wp.float32, wp.float64):
         test_tile_matmul_fragment_shapes(dtype),
         devices=get_cuda_test_devices(),
     )
+add_function_test(
+    TestTileMatmul,
+    "test_tile_matmul_fragment_shapes_bfloat16",
+    test_tile_matmul_fragment_shapes_bf16,
+    devices=[d for d in bf16_devices if d != "cpu" and wp.get_device(d).is_cuda],
+)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
