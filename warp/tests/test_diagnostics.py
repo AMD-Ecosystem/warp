@@ -108,8 +108,8 @@ class TestDiagnostics(unittest.TestCase):
             cuda_dev = devices[1]
             warp_dev = wp.get_device(cuda_dev["alias"])
             if warp_dev.is_hip:
-                # AMD target name with its feature flags, e.g. gfx942:sramecc+:xnack-
-                self.assertRegex(cuda_dev["arch"], r"^gfx[0-9a-f]+(:[a-z]+[+-])*$")
+                # AMD target name with its feature flags, e.g. gfx942:sramecc+:xnack- or gfx1250-strict
+                self.assertRegex(cuda_dev["arch"], r"^gfx[0-9a-f]+(-strict)?(:[a-z]+[+-])*$")
             else:
                 self.assertRegex(cuda_dev["arch"], r"^sm_\d+$")
             self.assertIsInstance(cuda_dev["sm_count"], int)
