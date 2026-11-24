@@ -594,7 +594,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             f'-include "{os.path.join(warp_home, "native", "hip_compat.h")}"',
         ]
         if args.fast_math:
-            hip_opts.append("-ffast-math")
+            # what nvcc's --use_fast_math enables (approximate functions and division, denormals flushed to zero);
+            # Clang's -ffast-math would also reassociate, ignore signed zeros and assume finite values
+            hip_opts.extend(["-fapprox-func", "-freciprocal-math", "-fgpu-flush-denormals-to-zero"])
         # __FILE__ names sources relative to the tree, not by the build machine's path
         hip_opts.append(f'-fmacro-prefix-map="{os.path.dirname(warp_home)}{os.sep}="')
         # zstd-compress the device code bundles (one code object per target, largely alike)
