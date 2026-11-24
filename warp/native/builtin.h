@@ -94,12 +94,6 @@ typedef uint64_t uint64;
 typedef const char* str;
 
 
-#if defined(__HIP_DEVICE_COMPILE__)
-// Round each fp16 result to half before it is used, as CUDA does (its conversions are cvt.rn instructions): with
-// contraction across statements, Clang would fuse a half product and the add that follows into one half fma.
-#pragma STDC FP_CONTRACT OFF
-#endif
-
 struct half;
 
 CUDA_CALLABLE half float_to_half(float x);
@@ -465,10 +459,6 @@ inline CUDA_CALLABLE half operator*(half a, double b) { return float_to_half(hal
 inline CUDA_CALLABLE half operator*(double a, half b) { return float_to_half(a * half_to_float(b)); }
 
 inline CUDA_CALLABLE half operator/(half a, half b) { return float_to_half(half_to_float(a) / half_to_float(b)); }
-
-#if defined(__HIP_DEVICE_COMPILE__)
-#pragma STDC FP_CONTRACT DEFAULT
-#endif
 
 
 #ifndef WP_NO_BFLOAT16

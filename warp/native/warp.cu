@@ -4572,8 +4572,12 @@ size_t wp_hip_compile_program(
         stored_options.push_back("-fgpu-flush-denormals-to-zero");
     }
 
-    // NVRTC's default --fmad=true contracts across statements; Clang's HIP default does too and honors pragmas
-    stored_options.push_back(fuse_fp ? "-ffp-contract=fast-honor-pragmas" : "-ffp-contract=off");
+    // Fuse multiply-adds within one expression only: contracting across statements lets the same expression,
+    // inlined in two places of one kernel, round differently on AMD GPUs. fuse_fp=False disables fusion;
+    // WP_FUSE_FP marks the one region that still contracts across statements (evaluate_node_solid_angle).
+    stored_options.push_back(fuse_fp ? "-ffp-contract=on" : "-ffp-contract=off");
+    if (fuse_fp)
+        stored_options.push_back("-DWP_FUSE_FP");
 
     std::vector<const char*> opts;
     for (const std::string& opt : stored_options)
