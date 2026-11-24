@@ -262,6 +262,9 @@ def get_hip_architectures(rocm_path, requested: str | None = None) -> list[str]:
         with open(dist_info_path) as f:
             targets = json.load(f).get("dist_amdgpu_targets", "")
         archs = [arch.strip() for arch in re.split(r"[;,]", targets) if arch.strip()]
+        # gfx1250 in strict mode is a separate ISA that a gfx1250 code object cannot serve, and the list omits it
+        if "gfx1250" in archs and "gfx1250-strict" not in archs:
+            archs.append("gfx1250-strict")
         if archs:
             return archs
 
