@@ -383,8 +383,21 @@ CUresult cuGraphicsResourceGetMappedPointer_f(CUdeviceptr* pDevPtr, size_t* pSiz
     return hipGraphicsResourceGetMappedPointer(pDevPtr, pSize, resource);
 }
 
+// HIP finds the GLX interop entry points with dlsym(RTLD_DEFAULT, ...), which does not see a libGL loaded with
+// RTLD_LOCAL (the default of Python's ctypes, which pyglet uses) or not loaded at all (GLFW loads libGLX itself), and
+// it caches a failed lookup for the life of the process. Load libGL with global scope before the first registration;
+// the handle is never closed. Without libGL.so.1 dlopen returns NULL and registration fails as before.
+static void make_gl_symbols_global()
+{
+#if !defined(_WIN32)
+    static std::once_flag once;
+    std::call_once(once, []() { dlopen("libGL.so.1", RTLD_LAZY | RTLD_GLOBAL); });
+#endif
+}
+
 CUresult cuGraphicsGLRegisterBuffer_f(CUgraphicsResource* pCudaResource, unsigned int buffer, unsigned int flags)
 {
+    make_gl_symbols_global();
     return hipGraphicsGLRegisterBuffer(pCudaResource, buffer, flags);
 }
 
@@ -392,6 +405,7 @@ CUresult cuGraphicsGLRegisterImage_f(
     CUgraphicsResource* pCudaResource, unsigned int image, unsigned int target, unsigned int flags
 )
 {
+    make_gl_symbols_global();
     return hipGraphicsGLRegisterImage(pCudaResource, image, target, flags);
 }
 
