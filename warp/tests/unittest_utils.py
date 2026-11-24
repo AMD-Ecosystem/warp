@@ -215,16 +215,22 @@ def is_multi_device_graph_supported(devices) -> bool:
     return not any(d.is_hip for d in _devices(devices))
 
 
-def skip_if_shared_memory_exceeded(test, device, dynamic_bytes: int, block_dim: int):
-    """Skip when a tile kernel's shared memory does not fit the device's per-block limit.
+def shared_memory_fits(device, dynamic_bytes: int, block_dim: int) -> bool:
+    """Return whether a tile kernel's shared memory fits the device's per-block limit.
 
     Besides the tiles, Warp's tile allocator keeps 4 bytes per thread, plus a few scalars, in static
     shared memory, so ``4 * block_dim + 1024`` bytes are added to ``dynamic_bytes``.
     """
-    needed = dynamic_bytes + 4 * block_dim + 1024
-    if device.is_cuda and needed > device.max_shared_memory_per_block:
+    device = wp.get_device(device)
+    return not device.is_cuda or dynamic_bytes + 4 * block_dim + 1024 <= device.max_shared_memory_per_block
+
+
+def skip_if_shared_memory_exceeded(test, device, dynamic_bytes: int, block_dim: int):
+    """Skip when a tile kernel's shared memory does not fit the device's per-block limit (see :func:`shared_memory_fits`)."""
+    if not shared_memory_fits(device, dynamic_bytes, block_dim):
         test.skipTest(
-            f"Needs {needed} bytes of shared memory per block, device has {device.max_shared_memory_per_block}"
+            f"Needs {dynamic_bytes + 4 * block_dim + 1024} bytes of shared memory per block, "
+            f"device has {wp.get_device(device).max_shared_memory_per_block}"
         )
 
 

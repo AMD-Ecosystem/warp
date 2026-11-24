@@ -402,6 +402,11 @@ def test_tile_matmul_fragment_shapes(dtype):
         rng = np.random.default_rng(7)
         shapes, block_dims = fragment_cases(wp.get_device(device))
         for M, N, K in shapes:
+            # the backward kernel keeps the three tiles and their adjoints in shared memory
+            if not shared_memory_fits(
+                device, 2 * wp.types.type_size_in_bytes(dtype) * (M * K + K * N + M * N), max(block_dims)
+            ):
+                continue
             mm = create_matmul_kernel(dtype, M, N, K)
             A, B = rng.uniform(-1, 1, (M, K)), rng.uniform(-1, 1, (K, N))
             for block_dim in block_dims:
