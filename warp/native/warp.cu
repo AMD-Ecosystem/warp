@@ -4565,9 +4565,11 @@ size_t wp_hip_compile_program(
     stored_options.push_back("-DWP_ENABLE_MATHDX=0");
 
     if (fast_math) {
-        stored_options.push_back("-ffast-math");
-        // NVRTC's --use_fast_math keeps NaN and Inf semantics; Clang's -ffast-math would assume finite values
-        stored_options.push_back("-fno-finite-math-only");
+        // what NVRTC's --use_fast_math enables (approximate functions and division, denormals flushed to zero);
+        // Clang's -ffast-math would also reassociate, ignore signed zeros and assume finite values
+        stored_options.push_back("-fapprox-func");
+        stored_options.push_back("-freciprocal-math");
+        stored_options.push_back("-fgpu-flush-denormals-to-zero");
     }
 
     // NVRTC's default --fmad=true contracts across statements; Clang's HIP default does too and honors pragmas
