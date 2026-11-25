@@ -108,6 +108,11 @@ template <typename T, int BlockSize> struct BlockIterator {
         return BlockIterator(ptr + offset * stride, stride);
     }
 
+    CUDA_CALLABLE BlockIterator operator-(difference_type offset) const
+    {
+        return BlockIterator(ptr - offset * stride, stride);
+    }
+
     CUDA_CALLABLE difference_type operator-(const BlockIterator& other) const { return (ptr - other.ptr) / stride; }
 
     CUDA_CALLABLE bool operator==(const BlockIterator& other) const { return ptr == other.ptr; }
@@ -594,7 +599,12 @@ CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
     int* selected_run_starts
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP's warp functions take a 64-bit mask of the lanes that execute them
+    const unsigned long long full_warp_mask = __activemask();
+#else
     constexpr unsigned int full_warp_mask = 0xffffffffu;
+#endif
 
     const int tid = threadIdx.x;
     const int lane = tid & (WP_TILE_WARP_SIZE - 1);
@@ -616,9 +626,15 @@ CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
             run_start = col >= 0 && col != BSR_COMPRESS_INVALID_COLUMN && prev_col != col;
         }
 
+#if defined(__HIP_PLATFORM_AMD__)
+        const unsigned long long keep_mask = __ballot_sync(full_warp_mask, run_start);
+        const int warp_total = __popcll(keep_mask);
+        const int lane_prefix = __popcll(keep_mask & ((1ull << lane) - 1ull));
+#else
         const unsigned int keep_mask = __ballot_sync(full_warp_mask, run_start);
         const int warp_total = __popc(keep_mask);
         const int lane_prefix = __popc(keep_mask & ((1u << lane) - 1u));
+#endif
 
         if (lane == WP_TILE_WARP_SIZE - 1) {
             warp_offsets[warp] = warp_total;
@@ -1069,7 +1085,13 @@ __global__ void bsr_compress_inplace_rows_indexed_kernel(
     const uint64_t prune_zero_mask
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    // CUDA starts dynamic shared memory 16-byte aligned; AMDGPU places it after the static shared variables at the
+    // declared alignment, and the values staged here may be 8 bytes wide
+    extern __shared__ int shared_ints[] __attribute__((aligned(16)));
+#else
     extern __shared__ int shared_ints[];
+#endif
 
     const int row = blockIdx.x;
     const int tid = threadIdx.x;
@@ -1470,6 +1492,18 @@ WP_API void wp_bsr_transpose_device(
     );
 }
 
+#if WP_ENABLE_HIP
+// HIP launches at most 2^32 - 1 threads per grid dimension, and a launch it rejects leaves an error that the next
+// hipCUB call would return without doing its work
+static bool bsr_hip_launch_fits(int blocks, int threads)
+{
+    if (uint64_t(blocks) * uint64_t(threads) <= 0xFFFFFFFFull)
+        return true;
+    fprintf(stderr, "Warp error: BSR compression of %d rows exceeds the GPU's grid size limit\n", blocks);
+    return false;
+}
+#endif
+
 template <typename T, bool CompressValues>
 void wp_bsr_compress_inplace_device_impl(
     int row_count,
@@ -1541,11 +1575,18 @@ void wp_bsr_compress_inplace_device_impl(
             assert(shared_bytes <= max_dynamic_shared_bytes);
 #endif
 
+#if WP_ENABLE_HIP
+            if (!bsr_hip_launch_fits(row_count, threads))
+                return;
+#endif
             begin_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream, context, "bsr_compress_inplace_rows_indexed_kernel");
             bsr_compress_inplace_rows_indexed_kernel<T, CompressValues><<<row_count, threads, shared_bytes, stream>>>(
                 row_count, block_size, shared_sort_capacity, shared_bytes, bsr_offsets, bsr_row_counts, out_row_counts,
                 bsr_columns, values_to_compress, values_for_pruning, scalar_zero_mask
             );
+#if WP_ENABLE_HIP
+            check_cuda(cudaGetLastError());
+#endif
 #if _DEBUG
             check_cuda(wp_cuda_context_check(WP_CURRENT_CONTEXT));
 #endif
@@ -1560,10 +1601,17 @@ void wp_bsr_compress_inplace_device_impl(
     int* row_counts = compact_row_counts->buffer();
 
     constexpr int threads = 128;
+#if WP_ENABLE_HIP
+    if (!bsr_hip_launch_fits(row_count, threads))
+        return;
+#endif
     begin_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream, context, "bsr_compress_inplace_compact_counts_kernel");
     bsr_compress_inplace_compact_counts_kernel<<<row_count, threads, 0, stream>>>(
         row_count, bsr_offsets, row_counts, bsr_columns
     );
+#if WP_ENABLE_HIP
+    check_cuda(cudaGetLastError());
+#endif
 #if _DEBUG
     check_cuda(wp_cuda_context_check(WP_CURRENT_CONTEXT));
 #endif
