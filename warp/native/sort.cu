@@ -14,6 +14,8 @@
 #include <cassert>
 #include <unordered_map>
 #if WP_ENABLE_HIP
+#include "temp_buffer.h"
+
 #include <type_traits>
 #endif
 
@@ -79,26 +81,48 @@ void radix_sort_release(void* context, void* stream)
 #if WP_ENABLE_HIP
 // rocPRIM sorts floating-point keys over their full width only. For a partial bit range, the keys are sorted by the
 // bit pattern a radix sort orders them by (negative values with every bit flipped, others with the sign bit set), as
-// unsigned integers over the same range, and decoded afterwards.
-template <typename Bits> __global__ void radix_sort_float_encode(Bits* keys, int n)
+// unsigned integers over the same range, and decoded afterwards. As in CUB, -0.0 sorts as +0.0 and every key keeps its
+// bits: zeros are encoded alike, so the stable sort keeps them in input order, and the sign of each is restored from
+// the signs of the input zeros in that order.
+template <typename Bits>
+__global__ void radix_sort_float_encode(Bits* keys, int n, int* zero_flags, uint8_t* zero_negative)
 {
     const int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < n) {
         const Bits sign = Bits(1) << (sizeof(Bits) * 8 - 1);
         const Bits key = keys[i];
-        keys[i] = (key & sign) ? Bits(~key) : Bits(key | sign);
+        const bool is_zero = Bits(key << 1) == 0;
+        zero_flags[i] = is_zero;
+        zero_negative[i] = is_zero && (key & sign);
+        keys[i] = is_zero ? sign : (key & sign) ? Bits(~key) : Bits(key | sign);
     }
 }
 
-template <typename Bits> __global__ void radix_sort_float_decode(Bits* keys, int n)
+template <typename Bits> __global__ void radix_sort_float_mark_zeros(const Bits* keys, int n, int* zero_flags)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < n)
+        zero_flags[i] = keys[i] == Bits(Bits(1) << (sizeof(Bits) * 8 - 1));
+}
+
+template <typename Bits>
+__global__ void radix_sort_float_decode(Bits* keys, int n, const int* zero_ranks, const uint8_t* zero_negative)
 {
     const int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < n) {
         const Bits sign = Bits(1) << (sizeof(Bits) * 8 - 1);
         const Bits key = keys[i];
-        keys[i] = (key & sign) ? Bits(key ^ sign) : Bits(~key);
+        if (key == sign)
+            keys[i] = zero_negative[zero_ranks[i]] ? sign : Bits(0);
+        else
+            keys[i] = (key & sign) ? Bits(key ^ sign) : Bits(~key);
     }
 }
+
+template <typename Bits, typename ValueType>
+void radix_sort_pairs_float_range_device(
+    void* context, Bits* keys, ValueType* values, int n, int begin_bit, int end_bit
+);
 #endif
 
 template <typename KeyType, typename ValueType>
@@ -110,14 +134,9 @@ void radix_sort_pairs_device(void* context, KeyType* keys, ValueType* values, in
     if constexpr (std::is_floating_point<KeyType>::value) {
         if (n > 0 && (begin_bit != 0 || end_bit != int(sizeof(KeyType) * 8))) {
             using Bits = std::conditional_t<sizeof(KeyType) == 4, uint32_t, uint64_t>;
-            Bits* bits = reinterpret_cast<Bits*>(keys);
-            cudaStream_t stream = static_cast<cudaStream_t>(wp_cuda_stream_get_current());
-            const int blocks = (n + 255) / 256;
-            radix_sort_float_encode<Bits><<<blocks, 256, 0, stream>>>(bits, n);
-            check_cuda(cudaGetLastError());
-            radix_sort_pairs_device<Bits, ValueType>(context, bits, values, n, begin_bit, end_bit);
-            radix_sort_float_decode<Bits><<<blocks, 256, 0, stream>>>(bits, n);
-            check_cuda(cudaGetLastError());
+            radix_sort_pairs_float_range_device<Bits, ValueType>(
+                context, reinterpret_cast<Bits*>(keys), values, n, begin_bit, end_bit
+            );
             return;
         }
     }
@@ -142,6 +161,57 @@ void radix_sort_pairs_device(void* context, KeyType* keys, ValueType* values, in
     if (d_values.Current() != values)
         wp_memcpy_d2d(WP_CURRENT_CONTEXT, values, d_values.Current(), sizeof(ValueType) * n);
 }
+
+#if WP_ENABLE_HIP
+template <typename Bits, typename ValueType>
+void radix_sort_pairs_float_range_device(
+    void* context, Bits* keys, ValueType* values, int n, int begin_bit, int end_bit
+)
+{
+    cudaStream_t stream = static_cast<cudaStream_t>(wp_cuda_stream_get_current());
+    const int blocks = (n + 255) / 256;
+
+    ScopedTemporary<int> zero_flags(WP_CURRENT_CONTEXT, n);
+    ScopedTemporary<int> zero_ranks(WP_CURRENT_CONTEXT, n);
+    ScopedTemporary<uint8_t> zero_negative(WP_CURRENT_CONTEXT, n);
+    ScopedTemporary<uint8_t> input_zero_negative(WP_CURRENT_CONTEXT, n);
+    ScopedTemporary<int> num_zeros(WP_CURRENT_CONTEXT, 1);
+
+    radix_sort_float_encode<Bits><<<blocks, 256, 0, stream>>>(keys, n, zero_flags.buffer(), zero_negative.buffer());
+    check_cuda(cudaGetLastError());
+
+    // the signs of the input zeros, in input order
+    size_t select_bytes = 0;
+    size_t scan_bytes = 0;
+    check_cuda(
+        cub::DeviceSelect::Flagged(
+            nullptr, select_bytes, zero_negative.buffer(), zero_flags.buffer(), input_zero_negative.buffer(),
+            num_zeros.buffer(), n, stream
+        )
+    );
+    check_cuda(cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, zero_flags.buffer(), zero_ranks.buffer(), n, stream));
+    ScopedTemporary<> scratch(WP_CURRENT_CONTEXT, select_bytes > scan_bytes ? select_bytes : scan_bytes);
+    check_cuda(
+        cub::DeviceSelect::Flagged(
+            scratch.buffer(), select_bytes, zero_negative.buffer(), zero_flags.buffer(), input_zero_negative.buffer(),
+            num_zeros.buffer(), n, stream
+        )
+    );
+
+    radix_sort_pairs_device<Bits, ValueType>(context, keys, values, n, begin_bit, end_bit);
+
+    // each output zero's rank among the output zeros, which are the input zeros in input order
+    radix_sort_float_mark_zeros<Bits><<<blocks, 256, 0, stream>>>(keys, n, zero_flags.buffer());
+    check_cuda(cudaGetLastError());
+    check_cuda(
+        cub::DeviceScan::ExclusiveSum(scratch.buffer(), scan_bytes, zero_flags.buffer(), zero_ranks.buffer(), n, stream)
+    );
+
+    radix_sort_float_decode<Bits>
+        <<<blocks, 256, 0, stream>>>(keys, n, zero_ranks.buffer(), input_zero_negative.buffer());
+    check_cuda(cudaGetLastError());
+}
+#endif
 
 template <typename KeyType>
 void radix_sort_pairs_device_dispatch_value(
