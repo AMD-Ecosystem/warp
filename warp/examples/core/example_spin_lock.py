@@ -76,4 +76,11 @@ def test_spinlock(device):
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()
-    test_spinlock(device="cuda")
+    device = wp.get_device("cuda")
+    if is_independent_thread_scheduling_supported(device):
+        test_spinlock(device=device)
+    else:
+        print(
+            f"Not running on {device} ({device.name}): threads of one warp do not make independent "
+            "forward progress on this GPU, so a spin lock contended inside a warp would never be released."
+        )

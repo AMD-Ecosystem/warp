@@ -504,17 +504,25 @@ namespace cuBQL {
       size_t     temp_storage_bytes = 0;
       PrimState *sortedPrimStates;
       _ALLOC(sortedPrimStates,numPrims,s,memResource);
+#ifdef __HIPCC__
+      // rocPRIM 4.8 (ROCm 10.2) mis-sorts 64-bit keys when end_bit is 64
+      // and begin_bit is not 0, for more than 1024 keys. Sorting all 64
+      // bits orders the states by nodeID (the high half) just the same.
+      const int sortBeginBit = 0;
+#else
+      const int sortBeginBit = 32;
+#endif
       auto rc =
       cub::DeviceRadixSort::SortKeys((void*&)d_temp_storage, temp_storage_bytes,
                                      (uint64_t*)primStates,
                                      (uint64_t*)sortedPrimStates,
-                                     numPrims,32,64,s);
+                                     numPrims,sortBeginBit,64,s);
       _ALLOC(d_temp_storage,temp_storage_bytes,s,memResource);
       rc =
       cub::DeviceRadixSort::SortKeys((void*&)d_temp_storage, temp_storage_bytes,
                                      (uint64_t*)primStates,
                                      (uint64_t*)sortedPrimStates,
-                                     numPrims,32,64,s);
+                                     numPrims,sortBeginBit,64,s);
       rc = rc; // ignore 'unused' warning
       CUBQL_CUDA_CALL(StreamSynchronize(s));
       _FREE(d_temp_storage,s,memResource);

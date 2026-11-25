@@ -4,6 +4,6 @@
 #ifndef WP_VERSION_H
 #define WP_VERSION_H
 
-#define WP_VERSION_STRING "1.15.0"
+#define WP_VERSION_STRING "1.15.0+rocm10.2.0"
 
 #endif  // WP_VERSION_H

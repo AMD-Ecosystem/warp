@@ -7,7 +7,7 @@
 
 #include "intersect.h"
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define BVH_SHARED_STACK 1
 #else
 #define BVH_SHARED_STACK 0
@@ -228,7 +228,7 @@ CUDA_CALLABLE inline void make_node(volatile BVHPackedNodeHalf* n, const vec3& b
     n->b = (unsigned int)(leaf ? 1 : 0);
 }
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 __device__ inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index)
 {
 #ifdef USE_LOAD4
@@ -597,6 +597,10 @@ void bvh_refit_device(BVH& bvh);
 // Copy a host-built BVH to the device. Reorders leaves to the front unless the
 // BVH is grouped or constructed by cuBQL (those layouts must be preserved).
 void copy_host_tree_to_device(void* context, BVH& bvh_host, BVH& bvh_device_on_host);
+#if defined(__HIP_PLATFORM_AMD__)
+// the deepest level a depth-level refit of the device tree launches (depths stored in node_counts)
+int bvh_refit_max_depth(const BVH& bvh);
+#endif
 void cubql_bvh_create_device(
     void* context, vec3* lowers, vec3* uppers, int num_items, int leaf_size, BVH& bvh_device_on_host
 );

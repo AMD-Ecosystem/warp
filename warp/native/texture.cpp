@@ -104,6 +104,7 @@ void wp_texture_destroy_host(uint64_t tex_handle)
 // ============================================================================
 
 #include "cuda_util.h"
+#include "texture_software.h"
 
 // Helper function to get CUDA array format from dtype
 static CUarray_format get_cuda_format(int dtype)
@@ -177,6 +178,16 @@ uint64_t wp_texture_create_device(
         return 0;
     }
 
+#if WP_ENABLE_HIP
+    if (num_mip_levels > 1) {
+        wp::set_error_string("Warp error: Mipmapped textures are not supported on AMD GPUs");
+        return 0;
+    }
+#endif
+
+    if (wp_texture_software_enabled(context, ndim))
+        return wp_texture_software_create(context, ndim, shape, num_channels, dtype);
+
     ContextGuard guard(context);
 
     size_t width = shape[0];
@@ -210,6 +221,8 @@ uint64_t wp_texture_create_device(
 
 void wp_texture_destroy_device(void* context, uint64_t array_handle, bool is_mipmapped)
 {
+    if (wp_texture_software_owns(array_handle))
+        return wp_texture_software_destroy(context, array_handle);
     ContextGuard guard(context);
     if (array_handle == 0) {
         return;
@@ -239,6 +252,25 @@ uint64_t wp_texture_get_mip_level_array_device(void* context, uint64_t mipmap_ar
     return reinterpret_cast<uint64_t>(level_array);
 }
 
+// MemoryType in texture.py carries the CUDA driver values (host 1, device 2, array 3);
+// HIP numbers its array type differently, so translate rather than cast
+static bool texture_memory_type(int warp_memory_type, CUmemorytype* memory_type)
+{
+    switch (warp_memory_type) {
+    case 1:
+        *memory_type = CU_MEMORYTYPE_HOST;
+        return true;
+    case 2:
+        *memory_type = CU_MEMORYTYPE_DEVICE;
+        return true;
+    case 3:
+        *memory_type = CU_MEMORYTYPE_ARRAY;
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool wp_texture_copy_device(
     void* context,
     unsigned width_bytes,
@@ -255,6 +287,11 @@ bool wp_texture_copy_device(
     void* stream
 )
 {
+    if (wp_texture_software_owns_copy(dst_memory_type, dst_handle, src_memory_type, src_handle))
+        return wp_texture_software_copy(
+            context, width_bytes, height, depth, dst_memory_type, dst_handle, dst_pitch, dst_height, src_memory_type,
+            src_handle, src_pitch, src_height, stream
+        );
     ContextGuard guard(context);
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
@@ -264,30 +301,34 @@ bool wp_texture_copy_device(
     copy_params.Height = height;
     copy_params.Depth = depth;
 
-    copy_params.dstMemoryType = static_cast<CUmemorytype>(dst_memory_type);
-    if (dst_memory_type == CU_MEMORYTYPE_HOST) {
-        copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
-    } else if (dst_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.dstDevice = static_cast<CUdeviceptr>(dst_handle);
-    } else if (dst_memory_type == CU_MEMORYTYPE_ARRAY) {
-        copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
-    } else {
+    CUmemorytype dst_type;
+    if (!texture_memory_type(dst_memory_type, &dst_type)) {
         wp::set_error_string("Invalid destination memory type %d", dst_memory_type);
         return false;
+    }
+    copy_params.dstMemoryType = dst_type;
+    if (dst_type == CU_MEMORYTYPE_HOST) {
+        copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
+    } else if (dst_type == CU_MEMORYTYPE_DEVICE) {
+        copy_params.dstDevice = (CUdeviceptr)dst_handle;
+    } else {
+        copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
     }
     copy_params.dstPitch = dst_pitch;
     copy_params.dstHeight = dst_height;
 
-    copy_params.srcMemoryType = static_cast<CUmemorytype>(src_memory_type);
-    if (src_memory_type == CU_MEMORYTYPE_HOST) {
-        copy_params.srcHost = reinterpret_cast<void*>(src_handle);
-    } else if (src_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.srcDevice = static_cast<CUdeviceptr>(src_handle);
-    } else if (src_memory_type == CU_MEMORYTYPE_ARRAY) {
-        copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
-    } else {
+    CUmemorytype src_type;
+    if (!texture_memory_type(src_memory_type, &src_type)) {
         wp::set_error_string("Invalid source memory type %d", src_memory_type);
         return false;
+    }
+    copy_params.srcMemoryType = src_type;
+    if (src_type == CU_MEMORYTYPE_HOST) {
+        copy_params.srcHost = reinterpret_cast<void*>(src_handle);
+    } else if (src_type == CU_MEMORYTYPE_DEVICE) {
+        copy_params.srcDevice = (CUdeviceptr)src_handle;
+    } else {
+        copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
     }
     copy_params.srcPitch = src_pitch;
     copy_params.srcHeight = src_height;
@@ -388,6 +429,11 @@ uint64_t wp_texture_object_create_device(
         return 0;
     }
 
+    if (wp_texture_software_owns(array_handle))
+        return wp_texture_software_object_create(
+            context, array_handle, ndim, filter_mode, mip_filter_mode, address_modes, use_normalized_coords
+        );
+
     ContextGuard guard(context);
 
     CUDA_RESOURCE_DESC res_desc = {};
@@ -425,11 +471,13 @@ uint64_t wp_texture_object_create_device(
     CUtexObject tex_object = 0;
     check_cu(cuTexObjectCreate_f(&tex_object, &res_desc, &tex_desc, nullptr));
 
-    return tex_object;
+    return (uint64_t)tex_object;
 }
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
 {
+    if (wp_texture_software_owns(tex_handle))
+        return wp_texture_software_object_destroy(context, tex_handle);
     ContextGuard guard(context);
 
     if (tex_handle != 0) {
@@ -448,7 +496,7 @@ uint64_t wp_surface_object_create_device(void* context, uint64_t array_handle)
     cudaSurfaceObject_t surface = 0;
     check_cuda(cudaCreateSurfaceObject(&surface, &desc));
 
-    return static_cast<uint64_t>(surface);
+    return (uint64_t)surface;
 }
 
 void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
@@ -457,7 +505,7 @@ void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
         return;
 
     ContextGuard guard(context);
-    check_cuda(cudaDestroySurfaceObject(static_cast<cudaSurfaceObject_t>(surface_handle)));
+    check_cuda(cudaDestroySurfaceObject((cudaSurfaceObject_t)surface_handle));
 }
 
 #else  // WP_ENABLE_CUDA

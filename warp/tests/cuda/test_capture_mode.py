@@ -53,14 +53,36 @@ def _load_cudart():
 CUDART = _load_cudart()
 
 
+def _load_hip_runtime():
+    """Bind ``hipFree`` from the HIP runtime that Warp's native library has loaded (AMD GPUs)."""
+    for name in ("libamdhip64.so.7", "libamdhip64.so", "amdhip64_7.dll"):
+        try:
+            lib = ctypes.CDLL(name)
+        except OSError:
+            continue
+        lib.hipFree.argtypes = [ctypes.c_void_p]
+        lib.hipFree.restype = ctypes.c_int
+        return lib
+    return None
+
+
+def _runtime_free_fn(device):
+    """Return the runtime's ``cudaFree``-like function for the device, or ``None``."""
+    if device.is_hip:
+        lib = _load_hip_runtime()
+        return lib.hipFree if lib is not None else None
+    return CUDART.cudaFree if CUDART is not None else None
+
+
 class TestCaptureMode(unittest.TestCase):
     pass
 
 
 def test_relaxed_allows_capture_unsafe_runtime_call(test, device):
     """``CaptureMode.RELAXED`` tolerates ``cudaFree(0)`` during capture."""
-    if CUDART is None:
-        test.skipTest("libcudart not available")
+    runtime_free = _runtime_free_fn(device)
+    if runtime_free is None:
+        test.skipTest("GPU runtime library not available")
 
     with wp.ScopedDevice(device):
         # Make sure the CUDA context is fully initialized before the capture
@@ -69,7 +91,7 @@ def test_relaxed_allows_capture_unsafe_runtime_call(test, device):
         wp.synchronize_device()
 
         with wp.ScopedCapture(capture_mode=wp.CaptureMode.RELAXED, force_module_load=False) as capture:
-            err = CUDART.cudaFree(0)
+            err = runtime_free(None)
             test.assertEqual(err, 0, f"cudaFree(0) failed with CUDA error {err} under RELAXED capture")
 
         test.assertIsNotNone(capture.graph)
@@ -123,15 +145,16 @@ def test_thread_local_rejects_capture_unsafe_runtime_call(test, device):
     from ``ScopedCapture.__exit__``) raises a ``RuntimeError``. We catch it
     to confirm that the stricter mode is indeed doing its job.
     """
-    if CUDART is None:
-        test.skipTest("libcudart not available")
+    runtime_free = _runtime_free_fn(device)
+    if runtime_free is None:
+        test.skipTest("GPU runtime library not available")
 
     with wp.ScopedDevice(device):
         wp.synchronize_device()
 
         with test.assertRaisesRegex(RuntimeError, "CUDA graph capture failed"):
             with wp.ScopedCapture(capture_mode=wp.CaptureMode.THREAD_LOCAL, force_module_load=False):
-                err = CUDART.cudaFree(0)
+                err = runtime_free(None)
                 # cudaFree during a strict capture returns a non-zero CUDA
                 # error (typically cudaErrorStreamCaptureUnsupported = 900).
                 test.assertNotEqual(err, 0, "cudaFree(0) unexpectedly succeeded under THREAD_LOCAL capture")

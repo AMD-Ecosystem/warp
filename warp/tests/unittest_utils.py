@@ -192,10 +192,105 @@ def get_test_devices_with_graph_capture_allocation(mode: str | None = None):
     return [d for d in get_test_devices(mode) if _is_graph_capture_allocation_supported(d)]
 
 
+MEMPOOL_ACCESS_NOT_REVOCABLE = (
+    "HIP cannot revoke memory pool peer access (hipMemPoolSetAccess with hipMemAccessFlagsProtNone fails)"
+)
+GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED = (
+    "HIP cannot instantiate a graph captured on a device other than 0 that copies between pinned host "
+    "memory and memory allocated during the capture"
+)
+MULTI_DEVICE_GRAPH_UNSUPPORTED = "HIP cannot instantiate a graph with kernel nodes on more than one device"
+
+
+def _devices(devices):
+    if devices is None:
+        return []
+    if isinstance(devices, (list, tuple)):
+        return [wp.get_device(d) for d in devices if d is not None]
+    return [wp.get_device(devices)]
+
+
+def is_mempool_access_revocable(devices) -> bool:
+    """Return whether memory pool peer access granted between ``devices`` can be revoked again.
+
+    HIP grants peer access to a device's memory pool but rejects revoking it: ``hipMemPoolSetAccess``
+    with ``hipMemAccessFlagsProtNone`` returns ``hipErrorInvalidDevice``. Tests that turn memory pool
+    peer access off, or restore it to off, skip with :data:`MEMPOOL_ACCESS_NOT_REVOCABLE` there.
+    ``devices`` is a device, a sequence of devices or ``None``.
+    """
+    return not any(d.is_hip for d in _devices(devices))
+
+
+def is_graph_host_copy_of_capture_allocation_supported(device) -> bool:
+    """Return whether a graph captured on ``device`` may copy between pinned host memory and capture allocations.
+
+    HIP fails to instantiate such a graph (``hipErrorNotSupported``) when it is captured on a device
+    other than device 0; tests that need it skip with
+    :data:`GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED` there.
+    """
+    return all(not d.is_hip or d.ordinal == 0 for d in _devices(device))
+
+
+def is_multi_device_graph_supported(devices) -> bool:
+    """Return whether one graph may hold kernel nodes for all of ``devices``.
+
+    HIP fails to instantiate a graph with kernel nodes on more than one device
+    (``hipErrorNotSupported``); tests that capture across devices skip with
+    :data:`MULTI_DEVICE_GRAPH_UNSUPPORTED` there.
+    """
+    return not any(d.is_hip for d in _devices(devices))
+
+
+def shared_memory_fits(device, dynamic_bytes: int, block_dim: int) -> bool:
+    """Return whether a tile kernel's shared memory fits the device's per-block limit.
+
+    Besides the tiles, Warp's tile allocator keeps 4 bytes per thread, plus a few scalars, in static
+    shared memory, so ``4 * block_dim + 1024`` bytes are added to ``dynamic_bytes``.
+    """
+    device = wp.get_device(device)
+    return not device.is_cuda or dynamic_bytes + 4 * block_dim + 1024 <= device.max_shared_memory_per_block
+
+
+def skip_if_shared_memory_exceeded(test, device, dynamic_bytes: int, block_dim: int):
+    """Skip when a tile kernel's shared memory does not fit the device's per-block limit (see :func:`shared_memory_fits`)."""
+    if not shared_memory_fits(device, dynamic_bytes, block_dim):
+        test.skipTest(
+            f"Needs {dynamic_bytes + 4 * block_dim + 1024} bytes of shared memory per block, "
+            f"device has {wp.get_device(device).max_shared_memory_per_block}"
+        )
+
+
+def is_stream_priority_scheduling_supported(device) -> bool:
+    """Return whether stream priorities affect scheduling; HIP maps them to normal priority."""
+    return not device.is_hip
+
+
+def is_independent_thread_scheduling_supported(device) -> bool:
+    """Return whether threads of one warp make independent forward progress on the device.
+
+    NVIDIA GPUs supported by Warp schedule the threads of a warp independently, so a thread
+    can spin on a lock held by another thread of its own warp. AMD GPUs give no such
+    guarantee within a wavefront: such a spin loop can hang. CPU devices run one thread at
+    a time and pass.
+    """
+    return not device.is_cuda or not device.is_hip
+
+
+def get_test_devices_with_independent_thread_scheduling(mode: str | None = None):
+    """Like :func:`get_test_devices`, but drops GPUs without independent thread scheduling within a warp.
+
+    Use this getter for tests whose kernels let threads of the same warp wait on each other,
+    such as a spin lock taken by every thread of a launch.
+    """
+    return [d for d in get_test_devices(mode) if is_independent_thread_scheduling_supported(d)]
+
+
 def is_cuda_graph_module_load_supported(device) -> bool:
     """Return whether modules can be loaded during CUDA graph capture."""
+    if not device.is_cuda or device.is_hip:
+        return True
     driver_version = wp.get_cuda_driver_version()
-    return not device.is_cuda or (driver_version is not None and driver_version >= (12, 3))
+    return driver_version is not None and driver_version >= (12, 3)
 
 
 def get_test_devices_with_cuda_graph_module_load(mode: str | None = None):
@@ -304,6 +399,9 @@ class CheckOutput:
 
     def __enter__(self):
         # wp.force_load()
+
+        # initialize Warp first, so that its greeting is not captured as output of the test
+        wp.init()
 
         self.capture = StdOutCapture()
         self.capture.begin()

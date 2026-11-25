@@ -391,6 +391,12 @@ CUDA_CALLABLE inline bool evaluate_node_solid_angle(
     const vec3& query_point, SolidAngleProps* current_data, float& solid_angle, const float accuracy_scale_sq
 )
 {
+#if defined(__HIP_DEVICE_COMPILE__) && defined(WP_FUSE_FP)
+    // Contracting across statements here keeps the inlined winding-number query from spilling registers heavily
+    // on some AMD GPUs.
+#pragma clang fp contract(fast)
+#endif
+
     SolidAngleProps& data = *current_data;
     float max_p_sq = data.max_p_dist_sq;
     vec3 q = query_point - data.average_p;

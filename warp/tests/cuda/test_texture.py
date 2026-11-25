@@ -2793,6 +2793,17 @@ def test_texture_mipmap_invalid_levels(test, device):
 # ============================================================================
 
 
+def test_texture_interop_requires_hardware(test, device):
+    """Textures sampled in software have no CUDA array, texture or surface object to hand out."""
+    tex = wp.Texture2D(np.zeros((4, 4), dtype=np.float32), surface_access=True, device=device)
+    test.assertGreater(tex.id, 0)
+    for name in ("cuda_array", "cuda_texture", "cuda_surface"):
+        with test.assertRaisesRegex(RuntimeError, "samples textures in software"):
+            getattr(tex, name)
+    with test.assertRaisesRegex(RuntimeError, "samples textures in software"):
+        wp.Texture2D(cuda_array=1, device=device)
+
+
 class TestTexture(unittest.TestCase):
     pass
 
@@ -2800,6 +2811,18 @@ class TestTexture(unittest.TestCase):
 # Register tests - textures work on both CPU and CUDA devices
 cuda_devices = get_selected_cuda_test_devices()
 all_devices = get_test_devices()
+# the CUDA interop handles exist only where texture hardware samples (some AMD GPUs sample in software)
+interop_cuda_devices = [d for d in cuda_devices if d.is_texture_hardware_supported]
+interop_devices = [d for d in all_devices if not d.is_cuda or d.is_texture_hardware_supported]
+interop3d_cuda_devices = [d for d in cuda_devices if d.is_texture3d_hardware_supported]
+interop3d_devices = [d for d in all_devices if not d.is_cuda or d.is_texture3d_hardware_supported]
+
+add_function_test(
+    TestTexture,
+    "test_texture_interop_requires_hardware",
+    test_texture_interop_requires_hardware,
+    devices=[d for d in cuda_devices if not d.is_texture_hardware_supported],
+)
 
 # Core texture tests - run on all devices (CPU + CUDA)
 add_function_test(TestTexture, "test_texture1d_1channel", test_texture1d_1channel, devices=all_devices)
@@ -2846,31 +2869,37 @@ add_function_test(
     devices=cuda_devices,
 )
 add_function_test(
-    TestTexture, "test_texture2d_cuda_interop_handles", test_texture2d_cuda_interop_handles, devices=cuda_devices
+    TestTexture,
+    "test_texture2d_cuda_interop_handles",
+    test_texture2d_cuda_interop_handles,
+    devices=interop_cuda_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture2d_cuda_array_wraps_non_mipmapped",
     test_texture2d_cuda_array_wraps_non_mipmapped,
-    devices=cuda_devices,
+    devices=interop_cuda_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture2d_mipmapped_cuda_array_current_limitation",
     test_texture2d_mipmapped_cuda_array_current_limitation,
-    devices=cuda_devices,
+    devices=interop_cuda_devices,
 )
 add_function_test(
-    TestTexture, "test_texture3d_cuda_interop_handles", test_texture3d_cuda_interop_handles, devices=cuda_devices
+    TestTexture,
+    "test_texture3d_cuda_interop_handles",
+    test_texture3d_cuda_interop_handles,
+    devices=interop3d_cuda_devices,
 )
 add_function_test(
-    TestTexture, "test_texture_id_device_independent", test_texture_id_device_independent, devices=all_devices
+    TestTexture, "test_texture_id_device_independent", test_texture_id_device_independent, devices=interop_devices
 )
 add_function_test(
     TestTexture,
     "test_texture_handle_properties_host_vs_cuda",
     test_texture_handle_properties_host_vs_cuda,
-    devices=all_devices,
+    devices=interop3d_devices,
 )
 add_function_test(
     TestTexture, "test_texture2d_cuda_array_copy_api", test_texture2d_cuda_array_copy_api, devices=cuda_devices
@@ -2918,31 +2947,31 @@ add_function_test(
     TestTexture,
     "test_texture2d_cuda_surface_property_graph_capture_stability",
     test_texture2d_cuda_surface_property_graph_capture_stability,
-    devices=cuda_devices,
+    devices=interop_cuda_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture2d_cuda_surface_property_api",
     test_texture2d_cuda_surface_property_api,
-    devices=cuda_devices,
+    devices=interop_cuda_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture3d_cuda_surface_property_api",
     test_texture3d_cuda_surface_property_api,
-    devices=cuda_devices,
+    devices=interop3d_cuda_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture2d_cuda_surface_property_requires_surface_access",
     test_texture2d_cuda_surface_property_requires_surface_access,
-    devices=cuda_devices,
+    devices=interop_cuda_devices,
 )
 add_function_test(
     TestTexture,
     "test_texture3d_cuda_surface_property_requires_surface_access",
     test_texture3d_cuda_surface_property_requires_surface_access,
-    devices=cuda_devices,
+    devices=interop3d_cuda_devices,
 )
 
 # Interpolation tests - run on all devices

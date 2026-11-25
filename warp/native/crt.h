@@ -16,7 +16,7 @@
 //   standard C library headers, and it avoids mismatched redefinitions.
 
 #ifndef WP_API
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 #if defined(_WIN32)
 #define WP_API __declspec(dllexport)
 #else
@@ -27,7 +27,7 @@
 #endif
 #endif  // WP_API
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 
 // Helper for implementing assert() macro
 extern "C" WP_API void _wp_assert(const char* message, const char* file, unsigned int line);
@@ -230,11 +230,28 @@ typedef unsigned long long uint64_t;
 
 #define M_PI 3.14159265358979323846
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC_RTC__)
 
-#if defined(__clang__)
+#if defined(__clang__) && !defined(__HIPCC_RTC__)
 // When compiling CUDA with barebones Clang we need to define its builtins and runtime functions ourselves.
+// hipRTC provides them in its built-in headers.
 #include "cuda_crt.h"
+#endif
+
+#if defined(__HIPCC_RTC__)
+// hipRTC has no <assert.h>; use the device assert handler of the HIP runtime headers
+#ifdef NDEBUG
+#define assert(expression) ((void)0)
+#elif defined(_WIN32)
+// on Windows the HIP headers declare no __assert_fail, only a _wassert that traps without a message
+#define assert(expression)                                                                                             \
+    ((expression) ? (void)0                                                                                            \
+                  : (printf("%s:%d: %s: Device-side assertion `%s' failed.\n", __FILE__, __LINE__, __func__,          \
+                            #expression),                                                                              \
+                     __builtin_trap()))
+#else
+#define assert(expression) ((expression) ? (void)0 : __assert_fail(#expression, __FILE__, __LINE__, __func__))
+#endif
 #endif
 
 #else
@@ -346,7 +363,7 @@ inline bool isinf(double x) { return _wp_isinf(x); }
 
 #endif  // WP_NO_CRT
 
-#if !defined(__CUDACC__)
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
 
 /*
  * From Cephes Library polevl.c
@@ -484,4 +501,4 @@ inline double erfcinv(double x) { return erfinv(1.0 - x); }
 
 inline float erfcinvf(float x) { return (float)erfcinv((double)x); }
 
-#endif  // !defined(__CUDACC__)
+#endif  // !defined(__CUDACC__) && !defined(__HIPCC__)

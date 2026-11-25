@@ -15,6 +15,7 @@ from warp.tests.unittest_utils import (
     assert_np_equal,
     get_cuda_test_devices_with_mempool,
     get_test_devices,
+    is_cuda_graph_module_load_supported,
 )
 
 
@@ -461,8 +462,7 @@ def test_kernel_creation(test, device):
 
 
 def test_graph_capture(test, device):
-    assert wp._src.context.runtime.driver_version is not None
-    if wp._src.context.runtime.driver_version < (12, 3):
+    if not is_cuda_graph_module_load_supported(device):
         test.skipTest("Module loading during CUDA graph capture is not supported on driver versions < 12.3")
     a_np = np.arange(10, dtype=np.float32)
     b_np = np.arange(1, 11, dtype=np.float32)

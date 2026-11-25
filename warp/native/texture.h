@@ -674,6 +674,24 @@ template <typename T> __device__ T tex3DLod(unsigned long long texObj, float x, 
 }
 #endif
 
+// Hardware sampling: NVIDIA GPUs, and AMD GPUs with image support, whose texture objects are
+// pointers stored in the 64-bit handle. AMD GPUs without image support use the software sampler
+// below on a Texture in device memory.
+#if defined(__HIP_DEVICE_COMPILE__)
+#if !defined(__HIP_NO_IMAGE_SUPPORT)
+#define WP_TEXTURE_HW_SAMPLING 1
+#define WP_TEXTURE_OBJECT(handle) reinterpret_cast<hipTextureObject_t>(handle)
+#endif
+#elif defined(__CUDA_ARCH__)
+#define WP_TEXTURE_HW_SAMPLING 1
+#define WP_TEXTURE_OBJECT(handle) (handle)
+#endif
+// gfx90a has image hardware but HIP refuses 3D linear filtering on it, so its 3D textures use the
+// software sampler too (keyed on the target name, as HIP's own check is; no feature macro exists)
+#if defined(WP_TEXTURE_HW_SAMPLING) && !defined(__gfx90a__)
+#define WP_TEXTURE_HW_SAMPLING_3D 1
+#endif
+
 // Helper to convert CUDA types to Warp types
 //
 // Each ``sample_*`` helper accepts a single ``lod`` argument. When ``lod`` equals
@@ -686,10 +704,10 @@ template <typename T> struct texture_sample_helper;
 template <> struct texture_sample_helper<float> {
     static CUDA_CALLABLE float sample_1d(const texture1d_t& tex, float u, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_HW_SAMPLING
         if (lod < 0.0f)
-            return tex1D<float>(tex.tex, u);
-        return tex1DLod<float>(tex.tex, u, lod);
+            return tex1D<float>(WP_TEXTURE_OBJECT(tex.tex), u);
+        return tex1DLod<float>(WP_TEXTURE_OBJECT(tex.tex), u, lod);
 #else
         if (tex.tex == 0)
             return 0.0f;
@@ -702,10 +720,10 @@ template <> struct texture_sample_helper<float> {
 
     static CUDA_CALLABLE float sample_2d(const texture2d_t& tex, float u, float v, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_HW_SAMPLING
         if (lod < 0.0f)
-            return tex2D<float>(tex.tex, u, v);
-        return tex2DLod<float>(tex.tex, u, v, lod);
+            return tex2D<float>(WP_TEXTURE_OBJECT(tex.tex), u, v);
+        return tex2DLod<float>(WP_TEXTURE_OBJECT(tex.tex), u, v, lod);
 #else
         if (tex.tex == 0)
             return 0.0f;
@@ -718,10 +736,10 @@ template <> struct texture_sample_helper<float> {
 
     static CUDA_CALLABLE float sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_HW_SAMPLING_3D
         if (lod < 0.0f)
-            return tex3D<float>(tex.tex, u, v, w);
-        return tex3DLod<float>(tex.tex, u, v, w, lod);
+            return tex3D<float>(WP_TEXTURE_OBJECT(tex.tex), u, v, w);
+        return tex3DLod<float>(WP_TEXTURE_OBJECT(tex.tex), u, v, w, lod);
 #else
         if (tex.tex == 0)
             return 0.0f;
@@ -738,8 +756,9 @@ template <> struct texture_sample_helper<float> {
 template <> struct texture_sample_helper<vec2f> {
     static CUDA_CALLABLE vec2f sample_1d(const texture1d_t& tex, float u, float lod)
     {
-#if defined(__CUDA_ARCH__)
-        float2 val = (lod < 0.0f) ? tex1D<float2>(tex.tex, u) : tex1DLod<float2>(tex.tex, u, lod);
+#if WP_TEXTURE_HW_SAMPLING
+        float2 val = (lod < 0.0f) ? tex1D<float2>(WP_TEXTURE_OBJECT(tex.tex), u)
+                                  : tex1DLod<float2>(WP_TEXTURE_OBJECT(tex.tex), u, lod);
         return vec2f(val.x, val.y);
 #else
         if (tex.tex == 0)
@@ -755,8 +774,9 @@ template <> struct texture_sample_helper<vec2f> {
 
     static CUDA_CALLABLE vec2f sample_2d(const texture2d_t& tex, float u, float v, float lod)
     {
-#if defined(__CUDA_ARCH__)
-        float2 val = (lod < 0.0f) ? tex2D<float2>(tex.tex, u, v) : tex2DLod<float2>(tex.tex, u, v, lod);
+#if WP_TEXTURE_HW_SAMPLING
+        float2 val = (lod < 0.0f) ? tex2D<float2>(WP_TEXTURE_OBJECT(tex.tex), u, v)
+                                  : tex2DLod<float2>(WP_TEXTURE_OBJECT(tex.tex), u, v, lod);
         return vec2f(val.x, val.y);
 #else
         if (tex.tex == 0)
@@ -772,8 +792,9 @@ template <> struct texture_sample_helper<vec2f> {
 
     static CUDA_CALLABLE vec2f sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
     {
-#if defined(__CUDA_ARCH__)
-        float2 val = (lod < 0.0f) ? tex3D<float2>(tex.tex, u, v, w) : tex3DLod<float2>(tex.tex, u, v, w, lod);
+#if WP_TEXTURE_HW_SAMPLING_3D
+        float2 val = (lod < 0.0f) ? tex3D<float2>(WP_TEXTURE_OBJECT(tex.tex), u, v, w)
+                                  : tex3DLod<float2>(WP_TEXTURE_OBJECT(tex.tex), u, v, w, lod);
         return vec2f(val.x, val.y);
 #else
         if (tex.tex == 0)
@@ -794,8 +815,9 @@ template <> struct texture_sample_helper<vec2f> {
 template <> struct texture_sample_helper<vec4f> {
     static CUDA_CALLABLE vec4f sample_1d(const texture1d_t& tex, float u, float lod)
     {
-#if defined(__CUDA_ARCH__)
-        float4 val = (lod < 0.0f) ? tex1D<float4>(tex.tex, u) : tex1DLod<float4>(tex.tex, u, lod);
+#if WP_TEXTURE_HW_SAMPLING
+        float4 val = (lod < 0.0f) ? tex1D<float4>(WP_TEXTURE_OBJECT(tex.tex), u)
+                                  : tex1DLod<float4>(WP_TEXTURE_OBJECT(tex.tex), u, lod);
         return vec4f(val.x, val.y, val.z, val.w);
 #else
         if (tex.tex == 0)
@@ -815,8 +837,9 @@ template <> struct texture_sample_helper<vec4f> {
 
     static CUDA_CALLABLE vec4f sample_2d(const texture2d_t& tex, float u, float v, float lod)
     {
-#if defined(__CUDA_ARCH__)
-        float4 val = (lod < 0.0f) ? tex2D<float4>(tex.tex, u, v) : tex2DLod<float4>(tex.tex, u, v, lod);
+#if WP_TEXTURE_HW_SAMPLING
+        float4 val = (lod < 0.0f) ? tex2D<float4>(WP_TEXTURE_OBJECT(tex.tex), u, v)
+                                  : tex2DLod<float4>(WP_TEXTURE_OBJECT(tex.tex), u, v, lod);
         return vec4f(val.x, val.y, val.z, val.w);
 #else
         if (tex.tex == 0)
@@ -837,8 +860,9 @@ template <> struct texture_sample_helper<vec4f> {
 
     static CUDA_CALLABLE vec4f sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
     {
-#if defined(__CUDA_ARCH__)
-        float4 val = (lod < 0.0f) ? tex3D<float4>(tex.tex, u, v, w) : tex3DLod<float4>(tex.tex, u, v, w, lod);
+#if WP_TEXTURE_HW_SAMPLING_3D
+        float4 val = (lod < 0.0f) ? tex3D<float4>(WP_TEXTURE_OBJECT(tex.tex), u, v, w)
+                                  : tex3DLod<float4>(WP_TEXTURE_OBJECT(tex.tex), u, v, w, lod);
         return vec4f(val.x, val.y, val.z, val.w);
 #else
         if (tex.tex == 0)

@@ -157,11 +157,7 @@ def test_capture_if_kernel():
 
 
 def test_capture_if(test, device):
-    if (
-        not wp.get_device(device).is_cuda
-        or wp._src.context.runtime.toolkit_version < (12, 4)
-        or wp._src.context.runtime.driver_version < (12, 4)
-    ):
+    if not wp.get_device(device).is_cuda or not wp.is_conditional_graph_supported():
         return
 
     def foo():

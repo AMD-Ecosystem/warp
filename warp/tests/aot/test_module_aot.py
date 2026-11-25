@@ -479,7 +479,7 @@ def test_aot_cache_skip(test, device):
 
         # First compile — produces binaries
         wp.compile_aot_module(module, device, module_dir=TEST_CACHE_DIR, strip_hash=True)
-        binaries = [f for f in TEST_CACHE_DIR.iterdir() if f.suffix in (".o", ".cubin", ".ptx")]
+        binaries = [f for f in TEST_CACHE_DIR.iterdir() if f.suffix in (".o", ".cubin", ".ptx", ".hsaco")]
         test.assertGreater(len(binaries), 0)
 
         # Set mtime to a known past time

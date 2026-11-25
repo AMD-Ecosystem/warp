@@ -408,6 +408,10 @@ __global__ void mark_packed_leaf_nodes(
     BVHPackedNodeHalf* __restrict__ lowers,
     BVHPackedNodeHalf* __restrict__ uppers,
     const int leaf_size
+#if defined(__HIP_PLATFORM_AMD__)
+    ,
+    const int* __restrict__ depths
+#endif
 )
 {
     int node_index = blockDim.x * blockIdx.x + threadIdx.x;
@@ -415,6 +419,9 @@ __global__ void mark_packed_leaf_nodes(
         // mark the node as leaf if its range is less than leaf_size or it is deeper than BVH_QUERY_STACK_SIZE
         // this will forever mute its child nodes so that they will never be accessed
 
+#if defined(__HIP_PLATFORM_AMD__)
+        const int depth = depths[node_index];
+#else
         // calculate depth
         int depth = 1;
         int parent = parents[node_index];
@@ -422,6 +429,7 @@ __global__ void mark_packed_leaf_nodes(
             parent = parents[parent];
             depth++;
         }
+#endif
 
         int left = range_lefts[node_index];
         // the LBVH constructor's range is defined as left <= i <= right
@@ -487,6 +495,229 @@ __global__ void compute_total_inv_edges(const vec3* total_lower, const vec3* tot
     total_inv_edges[0] = vec3(1.0f / edges[0], 1.0f / edges[1], 1.0f / edges[2]);
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// Length of the common prefix of sorted keys i and j, with equal keys told apart by their positions.
+static __device__ __forceinline__ int key_prefix(const uint64_t* __restrict__ keys, int n, uint64_t key_i, int i, int j)
+{
+    if (j < 0 || j >= n)
+        return -1;
+    const uint64_t diff = key_i ^ keys[j];
+    if (diff == 0)
+        return 64 + __clz((unsigned int)(i ^ j));
+    return __clzll(diff);
+}
+
+// Internal node i of the binary radix tree over the sorted keys (Karras 2012), one thread per internal node.
+__global__ void build_karras_topology(
+    int n,
+    int* root,
+    const uint64_t* __restrict__ keys,
+    int* __restrict__ range_lefts,
+    int* __restrict__ range_rights,
+    int* __restrict__ parents,
+    BVHPackedNodeHalf* __restrict__ lowers,
+    BVHPackedNodeHalf* __restrict__ uppers
+)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i == 0 && n == 1)
+        *root = 0;
+    if (i >= n - 1)
+        return;
+
+    const uint64_t key_i = keys[i];
+
+    // direction of the node's range, and its other end
+    const int d = key_prefix(keys, n, key_i, i, i + 1) >= key_prefix(keys, n, key_i, i, i - 1) ? 1 : -1;
+    const int prefix_min = key_prefix(keys, n, key_i, i, i - d);
+    int l_max = 2;
+    while (key_prefix(keys, n, key_i, i, i + l_max * d) > prefix_min)
+        l_max *= 2;
+    int l = 0;
+    for (int t = l_max / 2; t >= 1; t /= 2) {
+        if (key_prefix(keys, n, key_i, i, i + (l + t) * d) > prefix_min)
+            l += t;
+    }
+    const int first = min(i, i + l * d);
+    const int last = max(i, i + l * d);
+
+    // split position
+    const uint64_t key_first = keys[first];
+    const int prefix_node = key_prefix(keys, n, key_first, first, last);
+    int split = first;
+    int step = last - first;
+    do {
+        step = (step + 1) >> 1;
+        if (split + step < last && key_prefix(keys, n, key_first, first, split + step) > prefix_node)
+            split += step;
+    } while (step > 1);
+
+    const int node = n + i;
+    const int left_child = (split == first) ? first : n + split;
+    const int right_child = (split + 1 == last) ? last : n + split + 1;
+
+    lowers[node].i = left_child;
+    lowers[node].b = 0;
+    uppers[node].i = right_child;
+    uppers[node].b = 0;
+    parents[left_child] = node;
+    parents[right_child] = node;
+    range_lefts[node] = first;
+    range_rights[node] = last;
+
+    if (first == 0 && last == n - 1) {
+        *root = node;
+        parents[node] = -1;
+    }
+}
+
+// Depth of every node (the root is 1) and the largest depth.
+__global__ void
+compute_node_depths(int num_nodes, const int* __restrict__ parents, int* __restrict__ depths, int* max_depth)
+{
+    __shared__ int block_max[256];
+
+    const int index = blockDim.x * blockIdx.x + threadIdx.x;
+    int depth = 0;
+    if (index < num_nodes) {
+        depth = 1;
+        for (int parent = parents[index]; parent != -1; parent = parents[parent])
+            depth++;
+        depths[index] = depth;
+    }
+
+    block_max[threadIdx.x] = depth;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            block_max[threadIdx.x] = max(block_max[threadIdx.x], block_max[threadIdx.x + s]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && max_depth)
+        atomicMax(max_depth, block_max[0]);
+}
+
+// Bounds of the internal nodes at one depth from their children's.
+__global__ void refit_nodes_at_depth(
+    int n,
+    int depth,
+    const int* __restrict__ max_depth,
+    const int* __restrict__ depths,
+    BVHPackedNodeHalf* __restrict__ lowers,
+    BVHPackedNodeHalf* __restrict__ uppers
+)
+{
+    const int node = n + blockDim.x * blockIdx.x + threadIdx.x;
+    if (depth > *max_depth || node >= 2 * n - 1 || depths[node] != depth)
+        return;
+
+    const int left = lowers[node].i;
+    const int right = uppers[node].i;
+    const vec3 lower = min(
+        vec3(lowers[left].x, lowers[left].y, lowers[left].z), vec3(lowers[right].x, lowers[right].y, lowers[right].z)
+    );
+    const vec3 upper = max(
+        vec3(uppers[left].x, uppers[left].y, uppers[left].z), vec3(uppers[right].x, uppers[right].y, uppers[right].z)
+    );
+    make_node(lowers + node, lower, left, false);
+    make_node(uppers + node, upper, right, false);
+}
+
+// Refit of the nodes at one depth, deepest level first, giving the bottom-up bvh_refit_kernel's results: a leaf or
+// packed leaf takes its primitives' bounds unless its parent is a packed leaf; an internal node takes its children's.
+__global__ void refit_tree_at_depth(
+    int num_nodes,
+    int depth,
+    const int* __restrict__ depths,
+    const int* __restrict__ parents,
+    const int* __restrict__ primitive_indices,
+    const vec3* __restrict__ item_lowers,
+    const vec3* __restrict__ item_uppers,
+    BVHPackedNodeHalf* __restrict__ lowers,
+    BVHPackedNodeHalf* __restrict__ uppers
+)
+{
+    const int node = blockDim.x * blockIdx.x + threadIdx.x;
+    if (node >= num_nodes || depths[node] != depth)
+        return;
+
+    if (lowers[node].b) {
+        const int parent = parents[node];
+        if (parent != -1 && lowers[parent].b)
+            return;
+        bounds3 bound;
+        for (int primitive_counter = lowers[node].i; primitive_counter < uppers[node].i; primitive_counter++) {
+            const int primitive = primitive_indices[primitive_counter];
+            bound.add_bounds(item_lowers[primitive], item_uppers[primitive]);
+        }
+        (vec3&)lowers[node] = bound.lower;
+        (vec3&)uppers[node] = bound.upper;
+    } else {
+        const int left_child = lowers[node].i;
+        const int right_child = uppers[node].i;
+        (vec3&)lowers[node] = min((vec3&)lowers[left_child], (vec3&)lowers[right_child]);
+        (vec3&)uppers[node] = max((vec3&)uppers[left_child], (vec3&)uppers[right_child]);
+    }
+}
+
+// Total bounds in two passes (per-block bounds, then one block over those) instead of vec3 atomics on one address.
+__global__ void compute_block_bounds(
+    const vec3* item_lowers, const vec3* item_uppers, vec3* block_lowers, vec3* block_uppers, int num_items
+)
+{
+    typedef cub::BlockReduce<vec3, 256> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    vec3 lower = vec3(FLT_MAX);
+    vec3 upper = vec3(-FLT_MAX);
+    if (tid < num_items) {
+        lower = item_lowers[tid];
+        upper = item_uppers[tid];
+    }
+
+    vec3 block_upper = BlockReduce(temp_storage).Reduce(upper, Vec3Max);
+    __syncthreads();
+    vec3 block_lower = BlockReduce(temp_storage).Reduce(lower, Vec3Min);
+
+    if (threadIdx.x == 0) {
+        block_lowers[blockIdx.x] = block_lower;
+        block_uppers[blockIdx.x] = block_upper;
+    }
+}
+
+__global__ void reduce_block_bounds(
+    const vec3* block_lowers,
+    const vec3* block_uppers,
+    int num_blocks,
+    vec3* total_lower,
+    vec3* total_upper,
+    vec3* total_inv_edges
+)
+{
+    typedef cub::BlockReduce<vec3, 256> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    vec3 lower = vec3(FLT_MAX);
+    vec3 upper = vec3(-FLT_MAX);
+    for (int i = threadIdx.x; i < num_blocks; i += blockDim.x) {
+        lower = min(lower, block_lowers[i]);
+        upper = max(upper, block_uppers[i]);
+    }
+
+    vec3 block_upper = BlockReduce(temp_storage).Reduce(upper, Vec3Max);
+    __syncthreads();
+    vec3 block_lower = BlockReduce(temp_storage).Reduce(lower, Vec3Min);
+
+    if (threadIdx.x == 0) {
+        total_lower[0] = block_lower;
+        total_upper[0] = block_upper;
+        vec3 edges = block_upper - block_lower + vec3(0.0001f);
+        total_inv_edges[0] = vec3(1.0f / edges[0], 1.0f / edges[1], 1.0f / edges[2]);
+    }
+}
+#endif
+
 
 LinearBVHBuilderGPU::LinearBVHBuilderGPU()
     : indices(NULL)
@@ -499,19 +730,145 @@ LinearBVHBuilderGPU::LinearBVHBuilderGPU()
     , total_upper(NULL)
     , total_inv_edges(NULL)
 {
+#if !defined(__HIP_PLATFORM_AMD__)
     total_lower = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3), "(native:bvh)");
     total_upper = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3), "(native:bvh)");
     total_inv_edges = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3), "(native:bvh)");
+#endif
 }
 
 LinearBVHBuilderGPU::~LinearBVHBuilderGPU()
 {
+#if !defined(__HIP_PLATFORM_AMD__)
     wp_free_device(WP_CURRENT_CONTEXT, total_lower);
     wp_free_device(WP_CURRENT_CONTEXT, total_upper);
     wp_free_device(WP_CURRENT_CONTEXT, total_inv_edges);
+#endif
 }
 
 
+#if defined(__HIP_PLATFORM_AMD__)
+// On AMD GPUs the bottom-up build_hierarchy pass, with a __threadfence() and an atomic per node it climbs, takes most
+// of the build. HIP builds the topology top-down from the sorted keys instead, then fills the internal bounds one depth
+// level at a time; scratch memory is one allocation and the sort writes straight to the primitive indices.
+void LinearBVHBuilderGPU::build(
+    BVH& bvh, const vec3* item_lowers, const vec3* item_uppers, int num_items, bounds3* total_bounds, int* item_groups
+)
+{
+    // keys hold a 30-bit Morton code, and the group in the upper 32 bits when there are groups
+    const int key_bits = item_groups ? 64 : 30;
+    const int num_bounds_blocks = (num_items + 255) / 256;
+
+    size_t sort_temp_bytes = 0;
+    check_cuda(
+        cub::DeviceRadixSort::SortPairs(
+            nullptr, sort_temp_bytes, (uint64_t*)nullptr, (uint64_t*)nullptr, (int*)nullptr, (int*)nullptr, num_items,
+            0, key_bits
+        )
+    );
+
+    size_t pool_bytes = 0;
+    auto reserve = [&pool_bytes](size_t bytes) {
+        const size_t offset = pool_bytes;
+        pool_bytes += (bytes + 255) & ~size_t(255);
+        return offset;
+    };
+    const size_t indices_at = reserve(sizeof(int) * num_items);
+    const size_t keys_at = reserve(sizeof(uint64_t) * num_items * 2);  // keys, then the sorted keys
+    const size_t range_lefts_at = reserve(sizeof(int) * bvh.max_nodes);
+    const size_t range_rights_at = reserve(sizeof(int) * bvh.max_nodes);
+    const size_t max_depth_at = reserve(sizeof(int));
+    const size_t total_at = reserve(sizeof(vec3) * 3);
+    const size_t block_bounds_at = reserve(sizeof(vec3) * num_bounds_blocks * 2);
+    const size_t sort_temp_at = reserve(sort_temp_bytes);
+
+    char* pool = (char*)wp_alloc_device(WP_CURRENT_CONTEXT, pool_bytes, "(native:bvh)");
+    indices = (int*)(pool + indices_at);
+    keys = (uint64_t*)(pool + keys_at);
+    range_lefts = (int*)(pool + range_lefts_at);
+    range_rights = (int*)(pool + range_rights_at);
+    int* depths = bvh.node_counts;  // kept for refits
+    int* max_depth = (int*)(pool + max_depth_at);
+    total_lower = (vec3*)(pool + total_at);
+    total_upper = total_lower + 1;
+    total_inv_edges = total_lower + 2;
+    vec3* block_lowers = (vec3*)(pool + block_bounds_at);
+    vec3* block_uppers = block_lowers + num_bounds_blocks;
+
+    if (total_bounds) {
+        vec3 edges = (*total_bounds).edges();
+        edges += vec3(0.0001f);
+
+        vec3 inv_edges = vec3(1.0f / edges[0], 1.0f / edges[1], 1.0f / edges[2]);
+
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, total_lower, &total_bounds->lower[0], sizeof(vec3));
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, total_upper, &total_bounds->upper[0], sizeof(vec3));
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, total_inv_edges, &inv_edges[0], sizeof(vec3));
+    } else {
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, compute_block_bounds, num_items,
+            (item_lowers, item_uppers, block_lowers, block_uppers, num_items)
+        );
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, reduce_block_bounds, 1,
+            (block_lowers, block_uppers, num_bounds_blocks, total_lower, total_upper, total_inv_edges)
+        );
+    }
+
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, compute_morton_codes, num_items,
+        (item_lowers, item_uppers, num_items, total_lower, total_inv_edges, indices, keys, item_groups)
+    );
+
+    uint64_t* sorted_keys = keys + num_items;
+    check_cuda(
+        cub::DeviceRadixSort::SortPairs(
+            pool + sort_temp_at, sort_temp_bytes, keys, sorted_keys, indices, bvh.primitive_indices, num_items, 0,
+            key_bits, (cudaStream_t)wp_cuda_stream_get_current()
+        )
+    );
+
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, build_leaves, num_items,
+        (item_lowers, item_uppers, num_items, bvh.primitive_indices, range_lefts, range_rights, bvh.node_lowers,
+         bvh.node_uppers)
+    );
+
+    wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_parents, 0xFF, sizeof(int) * bvh.max_nodes);
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, build_karras_topology, num_items,
+        (num_items, bvh.root, sorted_keys, range_lefts, range_rights, bvh.node_parents, bvh.node_lowers,
+         bvh.node_uppers)
+    );
+
+    wp_memset_device(WP_CURRENT_CONTEXT, max_depth, 0, sizeof(int));
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, compute_node_depths, bvh.max_nodes, (bvh.max_nodes, bvh.node_parents, depths, max_depth)
+    );
+
+    // A child's common key prefix is longer than its parent's, so no internal node is deeper than the key bits plus
+    // the bits that tell equal keys apart. Launching that many levels keeps the build free of host synchronization
+    // (and capturable); levels below the deepest node return at once.
+    int index_bits = 0;
+    while ((1ll << index_bits) < num_items)
+        index_bits++;
+    bvh.max_depth = key_bits + index_bits;  // a bound on the internal depth, for bvh_refit_device
+    for (int depth = key_bits + index_bits; depth >= 1; depth--) {
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, refit_nodes_at_depth, num_items - 1,
+            (num_items, depth, max_depth, depths, bvh.node_lowers, bvh.node_uppers)
+        );
+    }
+
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, mark_packed_leaf_nodes, bvh.max_nodes,
+        (bvh.max_nodes, range_lefts, range_rights, bvh.node_parents, sorted_keys, bvh.node_lowers, bvh.node_uppers,
+         bvh.leaf_size, depths)
+    );
+
+    wp_free_device(WP_CURRENT_CONTEXT, pool);
+}
+#else
 void LinearBVHBuilderGPU::build(
     BVH& bvh, const vec3* item_lowers, const vec3* item_uppers, int num_items, bounds3* total_bounds, int* item_groups
 )
@@ -611,6 +968,7 @@ void LinearBVHBuilderGPU::build(
     wp_free_device(WP_CURRENT_CONTEXT, range_rights);
     wp_free_device(WP_CURRENT_CONTEXT, num_children);
 }
+#endif
 
 // buffer_size is the number of T, not the number of bytes
 template <typename T> T* make_device_buffer_of(void* context, T* host_buffer, size_t buffer_size)
@@ -708,6 +1066,16 @@ void bvh_create_device(
         // node_counts is not allocated for host tree
         bvh_device_on_host.node_counts
             = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes, "(native:bvh)");
+#if defined(__HIP_PLATFORM_AMD__)
+        // node depths for the refit; nodes past num_nodes are unused and get depth 0
+        wp_memset_device(
+            WP_CURRENT_CONTEXT, bvh_device_on_host.node_counts, 0, sizeof(int) * bvh_device_on_host.max_nodes
+        );
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, compute_node_depths, bvh_device_on_host.num_nodes,
+            (bvh_device_on_host.num_nodes, bvh_device_on_host.node_parents, bvh_device_on_host.node_counts, nullptr)
+        );
+#endif
         wp::bvh_destroy_host(bvh_host);
     } else if (constructor_type == BVH_CONSTRUCTOR_LBVH) {
         bvh_device_on_host.leaf_size = leaf_size;
@@ -769,6 +1137,18 @@ void bvh_destroy_device(BVH& bvh)
     bvh.root = NULL;
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+int bvh_refit_max_depth(const BVH& bvh)
+{
+    int index_bits = 0;
+    while ((1ll << index_bits) < bvh.num_items)
+        index_bits++;
+    // the depth of a host-built tree, or the bound of the tree an in-place rebuild may have made of it; leaves are one
+    // level deeper than the internal nodes
+    return std::max(bvh.max_depth, (bvh.item_groups ? 64 : 30) + index_bits) + 1;
+}
+#endif
+
 void bvh_refit_device(BVH& bvh)
 {
     ContextGuard guard(bvh.context);
@@ -778,6 +1158,21 @@ void bvh_refit_device(BVH& bvh)
         return;
     }
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // On AMD GPUs the bottom-up walk's per-node __threadfence() dominates on large trees; refit one depth level at a
+    // time there instead. Its launch count (fixed, so the refit stays capturable) costs more than the walk on small
+    // trees.
+    if (bvh.num_leaf_nodes >= 32768) {
+        for (int depth = bvh_refit_max_depth(bvh); depth >= 1; depth--) {
+            wp_launch_device(
+                WP_CURRENT_CONTEXT, refit_tree_at_depth, bvh.max_nodes,
+                (bvh.max_nodes, depth, bvh.node_counts, bvh.node_parents, bvh.primitive_indices, bvh.item_lowers,
+                 bvh.item_uppers, bvh.node_lowers, bvh.node_uppers)
+            );
+        }
+        return;
+    }
+#endif
     // clear child counters
     wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_counts, 0, sizeof(int) * bvh.max_nodes);
     wp_launch_device(

@@ -379,7 +379,7 @@ class TestLogger(unittest.TestCase):
                 warnings.simplefilter("ignore", DeprecationWarning)
                 warp.config.verbose = True
             _build_module.warp._src.context.runtime = SimpleNamespace(
-                core=SimpleNamespace(wp_cuda_compile_program=compile_cuda)
+                core=SimpleNamespace(wp_cuda_compile_program=compile_cuda), is_hip=False
             )
             with tempfile.TemporaryDirectory() as tmpdir:
                 cu_path = f"{tmpdir}/kernel.cu"

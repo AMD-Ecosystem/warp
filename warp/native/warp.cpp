@@ -151,6 +151,12 @@ int wp_is_error_output_enabled() { return int(wp::is_error_output_enabled()); }
 
 int wp_is_cuda_enabled() { return int(WP_ENABLE_CUDA); }
 
+#if WP_ENABLE_HIP
+int wp_is_hip_enabled() { return 1; }
+#else
+int wp_is_hip_enabled() { return 0; }
+#endif
+
 int wp_is_cuda_compatibility_enabled() { return int(WP_ENABLE_CUDA_COMPATIBILITY); }
 
 int wp_is_mathdx_enabled() { return int(WP_ENABLE_MATHDX); }
@@ -1070,6 +1076,7 @@ void wp_array_fill_device(void* context, void* arr, int arr_type, const void* va
 
 WP_API int wp_cuda_driver_version() { return 0; }
 WP_API int wp_cuda_toolkit_version() { return 0; }
+WP_API int wp_hip_runtime_version() { return 0; }
 
 WP_API bool wp_cuda_driver_is_initialized() { return false; }
 
@@ -1081,6 +1088,7 @@ WP_API void* wp_cuda_device_get_primary_context(int ordinal) { return NULL; }
 WP_API const char* wp_cuda_device_get_name(int ordinal) { return NULL; }
 WP_API int wp_cuda_device_get_arch(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_sm_count(int ordinal) { return 0; }
+WP_API const char* wp_cuda_device_get_arch_name(int ordinal) { return ""; }
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal) { return 0; }
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]) { }
 WP_API int wp_cuda_device_get_pci_domain_id(int ordinal) { return -1; }
@@ -1093,6 +1101,7 @@ WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal) { return
 WP_API int wp_cuda_device_get_managed_memory_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_pointer_get_memory_kind(void* context, void* ptr) { return WP_MEMORY_KIND_UNKNOWN; }
+WP_API int wp_cuda_device_is_texture_hardware_supported(int ordinal, int ndim) { return 0; }
 WP_API int wp_cuda_device_is_mempool_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_is_ipc_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold) { return 0; }
@@ -1229,6 +1238,24 @@ WP_API size_t wp_cuda_compile_program(
     char** ltoirs,
     size_t* ltoir_sizes,
     int* ltoir_input_types
+)
+{
+    return 0;
+}
+
+WP_API size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
 )
 {
     return 0;

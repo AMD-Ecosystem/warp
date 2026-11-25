@@ -9,7 +9,7 @@
 
 namespace wp {
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 struct mesh_query_aabb_thread_block_t {
     CUDA_CALLABLE mesh_query_aabb_thread_block_t()
@@ -59,7 +59,7 @@ using mesh_query_aabb_thread_block_t = mesh_query_aabb_t;
 #endif
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 CUDA_CALLABLE inline mesh_query_aabb_thread_block_t
 mesh_query_aabb_thread_block(uint64_t id, const vec3& lower, const vec3& upper)
@@ -325,7 +325,7 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
 
 
 // Tile-based interface
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 // CUDA implementation: uses thread-block parallel traversal
 template <int Length> CUDA_CALLABLE inline auto tile_mesh_query_aabb_next_impl(mesh_query_aabb_thread_block_t& query)

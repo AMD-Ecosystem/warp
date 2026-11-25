@@ -14,10 +14,10 @@
 #endif  // __clang__
 
 // Check if the CUDA toolkit is available
-#if WP_ENABLE_CUDA || defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+#if WP_ENABLE_CUDA || defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__) || (defined(__clang__) && defined(__CUDA__))
 
-// NVRTC has built-in float4; Clang CUDA JIT defines it in cuda_crt.h
-#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+// NVRTC and hipRTC have built-in float4; Clang CUDA JIT defines it in cuda_crt.h; HIP in its runtime header
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__) || defined(__HIP__) || (defined(__clang__) && defined(__CUDA__))
 // float4 already available
 #else
 // NVCC: Include vector_types.h to get float4
@@ -31,14 +31,28 @@ struct alignas(16) float4 {
 };
 #endif
 
-#if defined(__CUDA_ARCH__)
+// __shared__ variables and arrays of a possibly non-trivial type: nvcc leaves them unconstructed, while Clang
+// rejects their implicit initialization in HIP device code, so there they are declared as raw storage
+#if defined(__HIP_DEVICE_COMPILE__)
+#define WP_TILE_SHARED_ARRAY(T, name, count) \
+    __shared__ alignas(T) unsigned char name##_storage_[sizeof(T) * (count)]; \
+    T* const name = reinterpret_cast<T*>(name##_storage_)
+#define WP_TILE_SHARED_VAR(T, name) \
+    __shared__ alignas(T) unsigned char name##_storage_[sizeof(T)]; \
+    T& name = *reinterpret_cast<T*>(name##_storage_)
+#else
+#define WP_TILE_SHARED_ARRAY(T, name, count) __shared__ T name[count]
+#define WP_TILE_SHARED_VAR(T, name) __shared__ T name
+#endif
+
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define WP_TILE_SYNC __syncthreads
 #else
 #define WP_TILE_SYNC void
 #endif
 
-#if defined(__CUDA_ARCH__) && !defined(__INTELLISENSE__)
-#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && !defined(__INTELLISENSE__)
+#if defined(__CUDACC_RTC__) || defined(__HIPCC__) || (defined(__clang__) && defined(__CUDA__))
 #define WP_PRAGMA_UNROLL _Pragma("unroll")
 #define WP_PRAGMA_NO_UNROLL _Pragma("unroll 1")
 #else
@@ -64,7 +78,7 @@ template <> struct wp_is_null_func<int> {
     static constexpr bool value = true;
 };
 
-#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__) || (defined(__clang__) && defined(__CUDA__))
 #define WP_TILE_THREAD_IDX threadIdx.x
 #else
 #define WP_TILE_THREAD_IDX 0
@@ -537,9 +551,13 @@ template <typename T, typename Shape> struct tile_vectorized_check_t {
             reinterpret_cast<uint64_t>(global128) % sizeof(float4) == 0
             && "aligned=True but global address not 16-byte aligned"
         );
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         if (reinterpret_cast<uint64_t>(global128) % sizeof(float4) != 0)
+#if defined(__HIP_DEVICE_COMPILE__)
+            __builtin_trap();
+#else
             __trap();
+#endif
 #endif
 
 #ifndef NDEBUG
@@ -977,8 +995,8 @@ template <typename T, typename L> struct tile_register_t {
         const int thread = Layout::thread_from_linear(linear);
         const int reg = Layout::register_from_linear(linear);
 
-#if defined(__CUDA_ARCH__)
-        __shared__ Type scratch;
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+        WP_TILE_SHARED_VAR(Type, scratch);
 #else
         Type scratch;
 #endif
@@ -1139,7 +1157,7 @@ inline CUDA_CALLABLE int tile_align(int num_bytes)
 // On the CPU we use a fixed size block of stack memory for shared tile allocations.
 // We store a pointer to the current allocation storage either in a reserved register
 // (AArch64) or a static variable (x86-64).
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 class tile_shared_storage_t;
 #if defined(__aarch64__)
 // x28 is is the last callee-saved register on AArch64. This allows us to call externally
@@ -1160,7 +1178,7 @@ static tile_shared_storage_t* shared_tile_storage;
 // An instance of this class gets created at the start of a kernel.
 class tile_shared_storage_t {
 private:
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 #define WP_MAX_CPU_SHARED 256*1024
 #if defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
     tile_shared_storage_t* old_value;
@@ -1174,7 +1192,7 @@ private:
     // current use across dynamic function calls
     static inline CUDA_CALLABLE unsigned int* get_smem_base()
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         __shared__ unsigned int smem_base[WP_TILE_BLOCK_DIM];
         return smem_base;
 #elif defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
@@ -1187,7 +1205,12 @@ private:
 
     static inline CUDA_CALLABLE char* get_dynamic_smem_base()
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__HIP_DEVICE_COMPILE__)
+        // CUDA starts dynamic shared memory 16-byte aligned; AMDGPU places it after the static shared variables
+        // at the declared alignment, and shared tiles are copied with 16-byte vector accesses
+        extern __shared__ char dynamic_smem_base[] __attribute__((aligned(16)));
+        return dynamic_smem_base;
+#elif defined(__CUDA_ARCH__)
         extern __shared__ char dynamic_smem_base[];
         return dynamic_smem_base;
 #elif defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
@@ -1202,7 +1225,7 @@ public:
     // cppcheck-suppress uninitMemberVar
     inline CUDA_CALLABLE tile_shared_storage_t()
     {
-#if !defined(__CUDA_ARCH__) && defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) && defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
         // On the CPU save a pointer to this instance in a reserved register
         // or static variable so it can be accessed from anywhere within a kernel.
         old_value = shared_tile_storage;
@@ -1216,7 +1239,7 @@ public:
     {
         check();
 
-#if !defined(__CUDA_ARCH__) && defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) && defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
         shared_tile_storage = old_value;
 #endif
     }
@@ -1245,7 +1268,7 @@ public:
         // one entry per-thread so no need for synchronization
         smem_base[WP_TILE_THREAD_IDX] += tile_align(num_bytes);
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
         assert(smem_base[WP_TILE_THREAD_IDX] <= WP_MAX_CPU_SHARED);
 #endif
 
@@ -1837,7 +1860,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global& dest)
     {
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         if constexpr (Layout::Shape::N >= 2) {
             using Check = tile_vectorized_check_t<T, typename Layout::Shape>;
 
@@ -1996,7 +2019,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
         if (initialized)
             WP_TILE_SYNC();
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         if constexpr (Layout::Shape::N >= 2) {
             using Check = tile_vectorized_check_t<T, typename Layout::Shape>;
 
@@ -2236,8 +2259,8 @@ template <typename T, typename L> CUDA_CALLABLE void tile_register_t<T, L>::prin
 {
     // create a temporary shared tile so that
     // we can print it deterministically
-#if defined(__CUDA_ARCH__)
-    __shared__ T smem[L::Size];
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    WP_TILE_SHARED_ARRAY(T, smem, L::Size);
 #else
     T smem[L::Size];
 #endif
@@ -2587,11 +2610,11 @@ template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_full(T x
 // tile initialized from a specific thread's value (broadcasts value from thread_idx to all threads)
 template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_from_thread(T value, int thread_idx)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     assert(thread_idx >= 0 && thread_idx < blockDim.x);
 
     // Use a single shared memory element for the broadcast
-    __shared__ T scratch;
+    WP_TILE_SHARED_VAR(T, scratch);
 
     // Sync before writing to scratch (in case it was used by a previous operation)
     WP_TILE_SYNC();

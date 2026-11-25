@@ -50,6 +50,7 @@ def test_tile_shared_mem_large(test, device):
     DIM_N = 128
 
     BLOCK_DIM = 256
+    skip_if_shared_memory_exceeded(test, device, DIM_M * DIM_N * 4 * 2, BLOCK_DIM)
 
     # we disable backward kernel gen since 128k is not supported on most architectures
     @wp.kernel(enable_backward=False, module="unique")
@@ -130,6 +131,7 @@ def test_tile_shared_mem_func(test, device):
     SMALL_DIM_N = 64 // 4
 
     BLOCK_DIM = 256
+    skip_if_shared_memory_exceeded(test, device, DIM_M * DIM_N * 4 * 2 * 2, BLOCK_DIM)
 
     @wp.func
     def add_tile_small():

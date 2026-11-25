@@ -14,7 +14,9 @@
 #include <cstdlib>
 #include <fstream>
 
+#if !WP_ENABLE_HIP
 #include <nvPTXCompiler.h>
+#endif
 #include <nvrtc.h>
 #if WP_ENABLE_MATHDX
 #include <libcublasdx.h>
@@ -89,6 +91,7 @@ bool check_nvrtc_result(nvrtcResult result, const char* file, int line)
     return false;
 }
 
+#if !WP_ENABLE_HIP
 bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
 {
     if (result == NVPTXCOMPILE_SUCCESS)
@@ -125,6 +128,7 @@ bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
     fprintf(stderr, "Warp PTX compilation error %u: %s (%s:%d)\n", unsigned(result), error_string, file, line);
     return false;
 }
+#endif
 
 bool check_generic(int result, const char* file, int line)
 {
@@ -158,6 +162,11 @@ struct DeviceInfo {
     int is_ipc_supported = -1;
     int max_smem_bytes = 0;
     CUcontext primary_context = NULL;
+    int is_texture_hardware_supported = 1;
+    int is_texture3d_hardware_supported = 1;
+#if WP_ENABLE_HIP
+    char arch_name[256] = "";  // target name, e.g. gfx942:sramecc+:xnack-
+#endif
 };
 
 struct ContextInfo {
@@ -316,6 +325,25 @@ int cuda_init()
                 check_cu(
                     cuDeviceGetAttribute_f(&g_devices[i].sm_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device)
                 );
+#if WP_ENABLE_HIP
+                hipDeviceProp_t props;
+                if (check_cuda(hipGetDeviceProperties(&props, device)))
+                    snprintf(g_devices[i].arch_name, sizeof(g_devices[i].arch_name), "%s", props.gcnArchName);
+                // AMD GPUs without image hardware cannot create texture arrays or objects
+                check_cu(cuDeviceGetAttribute_f(
+                    &g_devices[i].is_texture_hardware_supported, hipDeviceAttributeImageSupport, device
+                ));
+                // HIP refuses 3D linear filtering on gfx90a by target name; texture.h selects the
+                // software sampler for its 3D textures by the same name, and the two must agree
+                g_devices[i].is_texture3d_hardware_supported
+                    = g_devices[i].is_texture_hardware_supported && strncmp(g_devices[i].arch_name, "gfx90a", 6) != 0;
+                // HIP has no IPC capability attribute; IPC is available on discrete GPUs on Linux
+#if defined(_WIN32)
+                g_devices[i].is_ipc_supported = 0;
+#else
+                g_devices[i].is_ipc_supported = props.integrated ? 0 : 1;
+#endif
+#endif
 #ifdef CUDA_VERSION
 #if CUDA_VERSION >= 12000
                 int device_attribute_integrated = 0;
@@ -448,6 +476,16 @@ static inline bool is_context_capturing(CUcontext context)
     return false;
 }
 
+// whether a graph capture can be paused and resumed (see wp_cuda_graph_pause_capture())
+static inline bool is_capture_pause_supported()
+{
+#if WP_ENABLE_HIP
+    return true;
+#else
+    return CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040;
+#endif
+}
+
 // helper function to copy a value to device memory in a graph-friendly way
 static bool capturable_tmp_alloc(void* context, const void* data, size_t size, void** devptr_ret, bool* free_devptr_ret)
 {
@@ -461,7 +499,7 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
-        if (CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040) {
+        if (is_capture_pause_supported()) {
             // pause the capture so that the alloc/memcpy won't be captured
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(WP_CURRENT_CONTEXT, stream, &graph))
@@ -888,6 +926,29 @@ void* wp_alloc_device_managed(void* context, size_t s, const char* tag)
 
     return ptr;
 }
+#if defined(__HIP_PLATFORM_AMD__)
+// Free on the current stream once the device's other streams known to Warp have finished their
+// queued work, the ordering a free on the legacy null stream gives (Warp's streams are blocking).
+static void free_async_after_device_streams(void* context, void* ptr)
+{
+    ContextInfo* context_info = get_context_info(context);
+    CUstream stream = context_info ? context_info->stream : NULL;
+    hipDevice_t device;
+    if (!stream || hipStreamGetDevice(stream, &device) != hipSuccess) {
+        check_cuda(cudaFreeAsync(ptr, NULL));
+        return;
+    }
+
+    for (const auto& kv : g_streams) {
+        hipDevice_t other_device;
+        if (kv.first != stream && hipStreamGetDevice(kv.first, &other_device) == hipSuccess && other_device == device) {
+            check_cu(cuEventRecord_f(kv.second.cached_event, kv.first));
+            check_cu(cuStreamWaitEvent_f(stream, kv.second.cached_event, CU_EVENT_WAIT_DEFAULT));
+        }
+    }
+    check_cuda(cudaFreeAsync(ptr, stream));
+}
+#endif
 
 void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
 {
@@ -912,7 +973,12 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             // cudaFreeAsync on the null stream does not block or trigger synchronization, but it postpones
             // the deallocation until a synchronization point is reached, so preceding work on this pointer
             // should safely complete.
+#if defined(__HIP_PLATFORM_AMD__)
+            // On HIP a free on the null stream keeps the host waiting for queued device work.
+            free_async_after_device_streams(context, ptr);
+#else
             check_cuda(cudaFreeAsync(ptr, NULL));
+#endif
         } else {
             // We must defer the free operation until graph capture completes.
             deferred_free(ptr, context, true);
@@ -1264,13 +1330,16 @@ bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, siz
 
 __global__ void memset_kernel(int* dest, int value, size_t n)
 {
-    const size_t tid
-        = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    const size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < n) {
         dest[tid] = value;
     }
 }
+
+#if WP_ENABLE_HIP && defined(_WIN32)
+template <typename T> __global__ void memtile_value_kernel(T* dst, T value, size_t n);
+#endif
 
 bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stream)
 {
@@ -1284,7 +1353,27 @@ bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stre
 
     begin_cuda_range(WP_TIMING_MEMSET, cuda_stream, context, "memset");
 
+#if WP_ENABLE_HIP && defined(_WIN32)
+    // On Windows the HIP runtime can fail to launch a graph whose memset node targets memory
+    // allocated in the same graph (hipErrorInvalidValue), so captured memsets use a kernel.
+    bool result = true;
+    if (!wp_cuda_stream_is_capturing(cuda_stream)) {
+        result = check_cuda(cudaMemsetAsync(dest, value, n, cuda_stream));
+    } else if (n) {
+        const unsigned int byte = value & 0xff;
+        if ((reinterpret_cast<size_t>(dest) & 3) == 0 && (n & 3) == 0)
+            memset_kernel<<<wp_launch_grid((n / 4 + 255) / 256, 256), 256, 0, cuda_stream>>>(
+                (int*)dest, int(byte * 0x01010101u), n / 4
+            );
+        else
+            memtile_value_kernel<<<wp_launch_grid((n + 255) / 256, 256), 256, 0, cuda_stream>>>(
+                (uint8_t*)dest, uint8_t(byte), n
+            );
+        result = check_cuda(cudaGetLastError());
+    }
+#else
     bool result = check_cuda(cudaMemsetAsync(dest, value, n, cuda_stream));
+#endif
 
     end_cuda_range(WP_TIMING_MEMSET, cuda_stream);
 
@@ -1325,7 +1414,7 @@ template <size_t N> static FillValue<N> make_fill_value(const void* src, size_t 
 // fill memory buffer with a value: generic memtile kernel using memcpy for each element
 __global__ void memtile_kernel(void* dst, const void* src, size_t srcsize, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < n) {
         memcpy((int8_t*)dst + srcsize * tid, src, srcsize);
     }
@@ -1333,7 +1422,7 @@ __global__ void memtile_kernel(void* dst, const void* src, size_t srcsize, size_
 
 template <size_t N> __global__ void memtile_kernel_by_value(void* dst, FillValue<N> value, size_t srcsize, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < n) {
         memcpy((int8_t*)dst + srcsize * tid, value.bytes, srcsize);
     }
@@ -1365,7 +1454,7 @@ static bool launch_memtile_kernel_by_value(void* dst, const void* src, size_t sr
 // this should be faster than memtile_kernel, but requires proper alignment of dst
 template <typename T> __global__ void memtile_value_kernel(T* dst, T value, size_t n)
 {
-    size_t tid = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < n) {
         dst[tid] = value;
     }
@@ -1446,7 +1535,7 @@ static __global__ void array_copy_1d_kernel(
     size_t elem_size
 )
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t i = WP_GRID_THREAD_INDEX;
     if (i < n) {
         size_t src_idx = src_indices ? src_indices[i] : i;
         size_t dst_idx = dst_indices ? dst_indices[i] : i;
@@ -1467,7 +1556,7 @@ static __global__ void array_copy_2d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t i = tid / n;
     size_t j = tid % n;
@@ -1493,7 +1582,7 @@ static __global__ void array_copy_3d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t i = tid / (n * o);
@@ -1524,7 +1613,7 @@ static __global__ void array_copy_4d_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t p = shape[3];
@@ -1554,7 +1643,7 @@ static __global__ void array_copy_from_fabric_kernel(
     wp::fabricarray_t<void> src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < src.size) {
         size_t dst_idx = dst_indices ? dst_indices[tid] : tid;
@@ -1568,7 +1657,7 @@ static __global__ void array_copy_from_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < src.size) {
         size_t src_index = src.indices[tid];
@@ -1583,7 +1672,7 @@ static __global__ void array_copy_to_fabric_kernel(
     wp::fabricarray_t<void> dst, const void* src_data, size_t src_stride, const int* src_indices, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_idx = src_indices ? src_indices[tid] : tid;
@@ -1601,7 +1690,7 @@ static __global__ void array_copy_to_fabric_indexed_kernel(
     size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_idx = src_indices ? src_indices[tid] : tid;
@@ -1616,7 +1705,7 @@ static __global__ void array_copy_to_fabric_indexed_kernel(
 static __global__ void
 array_copy_fabric_to_fabric_kernel(wp::fabricarray_t<void> dst, wp::fabricarray_t<void> src, size_t elem_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
@@ -1630,7 +1719,7 @@ static __global__ void array_copy_fabric_to_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> dst, wp::fabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         const void* src_ptr = fabricarray_element_ptr(src, tid, elem_size);
@@ -1645,7 +1734,7 @@ static __global__ void array_copy_fabric_indexed_to_fabric_kernel(
     wp::fabricarray_t<void> dst, wp::indexedfabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_index = src.indices[tid];
@@ -1660,7 +1749,7 @@ static __global__ void array_copy_fabric_indexed_to_fabric_indexed_kernel(
     wp::indexedfabricarray_t<void> dst, wp::indexedfabricarray_t<void> src, size_t elem_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
 
     if (tid < dst.size) {
         size_t src_index = src.indices[tid];
@@ -1928,7 +2017,7 @@ static __global__ void array_fill_1d_kernel_by_value(
     void* data, size_t n, size_t stride, const int* indices, FillValue<N> value, size_t value_size
 )
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t i = WP_GRID_THREAD_INDEX;
     if (i < n) {
         size_t idx = indices ? indices[i] : i;
         char* p = (char*)data + idx * stride;
@@ -1946,7 +2035,7 @@ static __global__ void array_fill_2d_kernel_by_value(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t i = tid / n;
     size_t j = tid % n;
@@ -1968,7 +2057,7 @@ static __global__ void array_fill_3d_kernel_by_value(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t i = tid / (n * o);
@@ -1993,7 +2082,7 @@ static __global__ void array_fill_4d_kernel_by_value(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t p = shape[3];
@@ -2015,7 +2104,7 @@ template <size_t N>
 static __global__ void
 array_fill_fabric_kernel_by_value(wp::fabricarray_t<void> fa, FillValue<N> value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < fa.size) {
         void* dst_ptr = fabricarray_element_ptr(fa, tid, value_size);
         memcpy(dst_ptr, value.bytes, value_size);
@@ -2026,7 +2115,7 @@ template <size_t N>
 static __global__ void
 array_fill_fabric_indexed_kernel_by_value(wp::indexedfabricarray_t<void> ifa, FillValue<N> value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < ifa.size) {
         size_t idx = size_t(ifa.indices[tid]);
         if (idx < ifa.fa.size) {
@@ -2147,7 +2236,7 @@ static bool launch_array_fill_by_value(
 static __global__ void
 array_fill_1d_kernel(void* data, size_t n, size_t stride, const int* indices, const void* value, size_t value_size)
 {
-    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t i = WP_GRID_THREAD_INDEX;
     if (i < n) {
         size_t idx = indices ? indices[i] : i;
         char* p = (char*)data + idx * stride;
@@ -2164,7 +2253,7 @@ static __global__ void array_fill_2d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t i = tid / n;
     size_t j = tid % n;
@@ -2185,7 +2274,7 @@ static __global__ void array_fill_3d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t i = tid / (n * o);
@@ -2209,7 +2298,7 @@ static __global__ void array_fill_4d_kernel(
     size_t value_size
 )
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     size_t n = shape[1];
     size_t o = shape[2];
     size_t p = shape[3];
@@ -2229,7 +2318,7 @@ static __global__ void array_fill_4d_kernel(
 
 static __global__ void array_fill_fabric_kernel(wp::fabricarray_t<void> fa, const void* value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < fa.size) {
         void* dst_ptr = fabricarray_element_ptr(fa, tid, value_size);
         memcpy(dst_ptr, value, value_size);
@@ -2239,7 +2328,7 @@ static __global__ void array_fill_fabric_kernel(wp::fabricarray_t<void> fa, cons
 static __global__ void
 array_fill_fabric_indexed_kernel(wp::indexedfabricarray_t<void> ifa, const void* value, size_t value_size)
 {
-    size_t tid = size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x);
+    size_t tid = WP_GRID_THREAD_INDEX;
     if (tid < ifa.size) {
         size_t idx = size_t(ifa.indices[tid]);
         if (idx < ifa.fa.size) {
@@ -2436,7 +2525,20 @@ int wp_cuda_driver_version()
         return 0;
 }
 
+#if WP_ENABLE_HIP
+// built without a CUDA Toolkit; see wp_hip_runtime_version()
+int wp_cuda_toolkit_version() { return 0; }
+
+int wp_hip_runtime_version()
+{
+    int version = 0;
+    return hipRuntimeGetVersion(&version) == hipSuccess ? version : 0;
+}
+#else
 int wp_cuda_toolkit_version() { return CUDA_VERSION; }
+
+int wp_hip_runtime_version() { return 0; }
+#endif
 
 int wp_nvrtc_version()
 {
@@ -2458,6 +2560,12 @@ const char* wp_libmathdx_version()
 
 bool wp_cuda_driver_is_initialized() { return is_cuda_driver_initialized(); }
 
+#if WP_ENABLE_HIP
+// hipRTC compiles for any target the ROCm compiler supports and has no architecture list
+int wp_nvrtc_supported_arch_count() { return 0; }
+
+void wp_nvrtc_supported_archs(int* archs) { (void)archs; }
+#else
 int wp_nvrtc_supported_arch_count()
 {
     int count;
@@ -2473,6 +2581,7 @@ void wp_nvrtc_supported_archs(int* archs)
         check_nvrtc(nvrtcGetSupportedArchs(archs));
     }
 }
+#endif
 
 int wp_cuda_device_get_count()
 {
@@ -2508,6 +2617,17 @@ int wp_cuda_device_get_arch(int ordinal)
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
         return g_devices[ordinal].arch;
     return 0;
+}
+
+const char* wp_cuda_device_get_arch_name(int ordinal)
+{
+#if WP_ENABLE_HIP
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].arch_name;
+#else
+    (void)ordinal;
+#endif
+    return "";
 }
 
 int wp_cuda_device_get_sm_count(int ordinal)
@@ -2629,6 +2749,14 @@ int wp_cuda_pointer_get_memory_kind(void* context, void* ptr)
         return WP_MEMORY_KIND_CUDA_MEMPOOL;
 
     return WP_MEMORY_KIND_CUDA_DEVICE;
+}
+
+int wp_cuda_device_is_texture_hardware_supported(int ordinal, int ndim)
+{
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return ndim == 3 ? g_devices[ordinal].is_texture3d_hardware_supported
+                         : g_devices[ordinal].is_texture_hardware_supported;
+    return 0;
 }
 
 int wp_cuda_device_is_mempool_supported(int ordinal)
@@ -3193,7 +3321,8 @@ void wp_cuda_ipc_get_event_handle(void* context, void* event, char* out_buffer)
 {
     ContextGuard guard(context);
 
-    CUipcEventHandle eventHandle;
+    // zeroed so that a failed query reads as an invalid (all-zero) handle
+    CUipcEventHandle eventHandle = {};
     check_cu(cuIpcGetEventHandle_f(&eventHandle, static_cast<CUevent>(event)));
     memcpy(out_buffer, eventHandle.reserved, CU_IPC_HANDLE_SIZE);
 }
@@ -3861,6 +3990,59 @@ int wp_cuda_graph_alloc_query(void* alloc_node, void* query_node)
 }
 
 // Support for conditional graph nodes available with CUDA 12.4+.
+// pausing and resuming a capture; HIP provides hipStreamBeginCaptureToGraph, but no conditional graph nodes
+#if CUDA_VERSION >= 12040 || WP_ENABLE_HIP
+
+bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+    if (!check_cuda(cudaStreamEndCapture(cuda_stream, (cudaGraph_t*)graph_ret)))
+        return false;
+    return true;
+}
+
+bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+    cudaGraph_t cuda_graph = static_cast<cudaGraph_t>(graph);
+
+    std::vector<cudaGraphNode_t> leaf_nodes;
+    if (!get_graph_leaf_nodes(cuda_graph, leaf_nodes))
+        return false;
+
+    // Resume with the same capture mode the user picked at begin time so a
+    // pause/resume cycle (driven by conditional/while graph nodes) does not
+    // silently downgrade Global/Relaxed captures to ThreadLocal. The stream
+    // must already be known to Warp with an active CaptureInfo at this
+    // point because the resume path is only reached after a matching pause
+    // on a Warp-managed capture; if either is missing something is badly
+    // out of sync, fail fast rather than guess a mode.
+    StreamInfo* stream_info = get_stream_info(cuda_stream);
+    if (!stream_info) {
+        wp::set_error_string("Warp error: resume_capture called on unknown stream");
+        return false;
+    }
+    CaptureInfo* capture = stream_info->capture;
+    if (!capture) {
+        wp::set_error_string("Warp error: resume_capture called on stream with no active capture");
+        return false;
+    }
+    cudaStreamCaptureMode resume_mode = capture->mode;
+
+    if (!check_cuda(cudaStreamBeginCaptureToGraph(
+            cuda_stream, cuda_graph, leaf_nodes.data(), nullptr, leaf_nodes.size(), resume_mode
+        )))
+        return false;
+
+    return true;
+}
+
+#endif
+
 #if CUDA_VERSION >= 12040
 
 // CUBIN or PTX data for compiled conditional modules, loaded on demand, keyed on device architecture
@@ -4005,54 +4187,6 @@ static CUfunction get_conditional_kernel(void* context, int arch, bool use_ptx, 
     }
 
     return kernel;
-}
-
-bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
-{
-    ContextGuard guard(context);
-
-    CUstream cuda_stream = static_cast<CUstream>(stream);
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, (cudaGraph_t*)graph_ret)))
-        return false;
-    return true;
-}
-
-bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
-{
-    ContextGuard guard(context);
-
-    CUstream cuda_stream = static_cast<CUstream>(stream);
-    cudaGraph_t cuda_graph = static_cast<cudaGraph_t>(graph);
-
-    std::vector<cudaGraphNode_t> leaf_nodes;
-    if (!get_graph_leaf_nodes(cuda_graph, leaf_nodes))
-        return false;
-
-    // Resume with the same capture mode the user picked at begin time so a
-    // pause/resume cycle (driven by conditional/while graph nodes) does not
-    // silently downgrade Global/Relaxed captures to ThreadLocal. The stream
-    // must already be known to Warp with an active CaptureInfo at this
-    // point because the resume path is only reached after a matching pause
-    // on a Warp-managed capture; if either is missing something is badly
-    // out of sync, fail fast rather than guess a mode.
-    StreamInfo* stream_info = get_stream_info(cuda_stream);
-    if (!stream_info) {
-        wp::set_error_string("Warp error: resume_capture called on unknown stream");
-        return false;
-    }
-    CaptureInfo* capture = stream_info->capture;
-    if (!capture) {
-        wp::set_error_string("Warp error: resume_capture called on stream with no active capture");
-        return false;
-    }
-    cudaStreamCaptureMode resume_mode = capture->mode;
-
-    if (!check_cuda(cudaStreamBeginCaptureToGraph(
-            cuda_stream, cuda_graph, leaf_nodes.data(), nullptr, leaf_nodes.size(), resume_mode
-        )))
-        return false;
-
-    return true;
 }
 
 // https://developer.nvidia.com/blog/constructing-cuda-graphs-with-dynamic-parameters/#combined_approach
@@ -4446,6 +4580,7 @@ bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use
 #else
 // stubs for conditional graph node API if CUDA toolkit is too old.
 
+#if !WP_ENABLE_HIP
 bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
 {
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
@@ -4457,6 +4592,7 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
     return false;
 }
+#endif
 
 bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret
@@ -4578,6 +4714,146 @@ bool check_nvjitlink_result(nvJitLinkHandle handle, nvJitLinkResult result, cons
 }
 #endif
 
+#if WP_ENABLE_HIP
+size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
+)
+{
+    const bool print_debug = (std::getenv("WARP_DEBUG") != nullptr);
+
+    std::vector<std::string> stored_options;
+    stored_options.push_back(std::string("--offload-arch=") + target);
+    stored_options.push_back(std::string("-I") + include_dir);
+    stored_options.push_back("-std=c++17");
+    stored_options.push_back("-O" + std::to_string(std::min(std::max(optimization_level, 0), 3)));
+
+    if (debug) {
+        stored_options.push_back("-D_DEBUG");
+        stored_options.push_back("-g");
+    } else {
+        stored_options.push_back("-DNDEBUG");
+        if (lineinfo)
+            stored_options.push_back("-gline-tables-only");
+    }
+
+    stored_options.push_back(verify_fp ? "-DWP_VERIFY_FP" : "-UWP_VERIFY_FP");
+    stored_options.push_back("-DWP_ENABLE_MATHDX=0");
+
+    if (fast_math) {
+        // what NVRTC's --use_fast_math enables (approximate functions and division, denormals flushed to zero);
+        // Clang's -ffast-math would also reassociate, ignore signed zeros and assume finite values
+        stored_options.push_back("-fapprox-func");
+        stored_options.push_back("-freciprocal-math");
+        stored_options.push_back("-fgpu-flush-denormals-to-zero");
+    }
+
+    // Fuse multiply-adds within one expression only: contracting across statements lets the same expression,
+    // inlined in two places of one kernel, round differently on AMD GPUs. fuse_fp=False disables fusion;
+    // WP_FUSE_FP marks the one region that still contracts across statements (evaluate_node_solid_angle).
+    stored_options.push_back(fuse_fp ? "-ffp-contract=on" : "-ffp-contract=off");
+    if (fuse_fp)
+        stored_options.push_back("-DWP_FUSE_FP");
+
+    std::vector<const char*> opts;
+    for (const std::string& opt : stored_options)
+        opts.push_back(opt.c_str());
+
+    // NVRTC compiles functions without an execution space qualifier for the device
+    // (--device-as-default-execution-space); Clang's pragma makes them host and device,
+    // which gives the same result in a device-only compile
+    //
+    // __CUDA_ARCH__ is defined (after hipRTC's own headers) so that user code which selects its device
+    // branch with `#if defined(__CUDA_ARCH__)` takes it; Warp's headers test __HIP_DEVICE_COMPILE__ first.
+    // The low value keeps numeric architecture tests in user code on their portable branches.
+    std::string full_src = std::string("#pragma clang force_cuda_host_device begin\n#define __CUDA_ARCH__ 1\n#line 1\n")
+        + src + "\n#pragma clang force_cuda_host_device end\n";
+
+    hiprtcProgram prog;
+    hiprtcResult res = hiprtcCreateProgram(&prog, full_src.c_str(), program_name, 0, NULL, NULL);
+    if (!check_nvrtc(res))
+        return size_t(res);
+
+    if (print_debug) {
+        printf("hipRTC options:\n");
+        for (auto o : opts)
+            printf("%s\n", o);
+    }
+
+    res = hiprtcCompileProgram(prog, int(opts.size()), opts.data());
+
+    if (!check_nvrtc(res) || verbose) {
+        size_t log_size;
+        if (check_nvrtc(hiprtcGetProgramLogSize(prog, &log_size)) && log_size > 1) {
+            std::vector<char> log(log_size);
+            if (check_nvrtc(hiprtcGetProgramLog(prog, log.data()))) {
+                if (res != HIPRTC_SUCCESS)
+                    fprintf(stderr, "%s", log.data());
+                else
+                    fprintf(stdout, "%s", log.data());
+            }
+        }
+
+        if (res != HIPRTC_SUCCESS) {
+            hiprtcDestroyProgram(&prog);
+            return size_t(res);
+        }
+    }
+
+    // save the code object
+    size_t output_size;
+    res = hiprtcGetCodeSize(prog, &output_size);
+    if (check_nvrtc(res)) {
+        std::vector<char> output(output_size);
+        res = hiprtcGetCode(prog, output.data());
+        if (check_nvrtc(res) && !write_file(output.data(), output.size(), output_path, "wb"))
+            res = hiprtcResult(-1);
+    }
+
+    check_nvrtc(hiprtcDestroyProgram(&prog));
+
+    return res;
+}
+
+size_t wp_cuda_compile_program(
+    const char* cuda_src,
+    const char* program_name,
+    int arch,
+    const char* arch_suffix,
+    const char* include_dir,
+    int num_cuda_include_dirs,
+    const char** cuda_include_dirs,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    bool compile_time_trace,
+    bool precompiled_headers,
+    const char* output_path,
+    const char* pch_dir,
+    size_t num_ltoirs,
+    char** ltoirs,
+    size_t* ltoir_sizes,
+    int* ltoir_input_types
+)
+{
+    fprintf(stderr, "Warp error: ROCm builds compile kernels with wp_hip_compile_program()\n");
+    return size_t(-1);
+}
+#else
 size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
@@ -4921,6 +5197,26 @@ size_t wp_cuda_compile_program(
     return res;
 }
 
+size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
+)
+{
+    fprintf(stderr, "Warp error: hipRTC compilation requires a ROCm build of Warp\n");
+    return size_t(-1);
+}
+#endif  // WP_ENABLE_HIP
+
 #if WP_ENABLE_MATHDX
 bool check_cufftdx_result(commondxStatusType result, const char* file, int line)
 {
@@ -5234,6 +5530,13 @@ void* wp_cuda_load_module(void* context, const char* path)
     int driver_cuda_version = 0;
     CUmodule module = NULL;
 
+#if WP_ENABLE_HIP
+    (void)driver_cuda_version;
+    if (load_ptx) {
+        fprintf(stderr, "Warp error: PTX modules cannot be loaded on AMD GPUs\n");
+        return NULL;
+    }
+#else
     if (load_ptx) {
         if (check_cu(cuDriverGetVersion_f(&driver_cuda_version)) && driver_cuda_version >= CUDA_VERSION) {
             // let the driver compile the PTX
@@ -5297,7 +5600,9 @@ void* wp_cuda_load_module(void* context, const char* path)
                 return NULL;
             }
         }
-    } else {
+    } else
+#endif
+    {
         // load CUBIN
         if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
             fprintf(stderr, "Warp CUDA error: Loading module failed\n");
@@ -5490,6 +5795,10 @@ size_t wp_cuda_launch_kernel(
         int natural_grid_dim = (dim + block_dim - 1) / block_dim;
         int grid_dim = natural_grid_dim;
         int cap = (max_blocks > 0) ? max_blocks : 2147483647;
+#if WP_ENABLE_HIP
+        // HIP rejects a grid of more than 2^32 - 1 threads in a dimension; kernels loop over the remaining elements
+        cap = int(std::min(unsigned(cap), 0xFFFFFFFFu / unsigned(block_dim)));
+#endif
         if (grid_dim < 0)
             grid_dim = cap;
         else if (grid_dim > cap)
@@ -5654,7 +5963,7 @@ void wp_cuda_graphics_device_ptr_and_size(void* context, void* resource, uint64_
     size_t bytes;
     check_cu(cuGraphicsResourceGetMappedPointer_f(&device_ptr, &bytes, *(CUgraphicsResource*)resource));
 
-    *ptr = device_ptr;
+    *ptr = (uint64_t)device_ptr;
     *size = bytes;
 }
 

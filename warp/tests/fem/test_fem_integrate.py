@@ -667,6 +667,9 @@ def test_padded_sparse_assembly(test, device):
 
 
 def test_capturability(test, device):
+    if not is_graph_host_copy_of_capture_allocation_supported(device):
+        test.skipTest(GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED)
+
     A = bsr_zeros(0, 0, block_type=wp.float32, device=device)
 
     def test_body():

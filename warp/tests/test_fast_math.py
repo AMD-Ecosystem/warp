@@ -36,12 +36,28 @@ def test_fast_math_disabled(test, device):
 def test_fast_math_cuda(test, device):
     # on CUDA with --fast-math enabled taking the pow()
     # of a negative number will result in a NaN
+    # (HIP's fast pow() keeps a negative base with an integer exponent)
+    expected = 4.0 if device.is_hip else wp.NAN
 
     wp.set_module_options({"fast_math": True})
     try:
-        wp.launch(test_pow, dim=1, inputs=[2.0, wp.NAN], device=device)
+        wp.launch(test_pow, dim=1, inputs=[2.0, expected], device=device)
     finally:
         wp.set_module_options({"fast_math": False})
+
+
+@wp.kernel(module="unique", module_options={"fast_math": True})
+def fast_math_nan_inf_kernel(x: wp.array(dtype=float), out: wp.array(dtype=int)):
+    i = wp.tid()
+    out[i] = int(wp.isnan(x[i])) + 2 * int(wp.isinf(x[i])) + 4 * int(wp.isfinite(x[i]))
+
+
+def test_fast_math_nan_inf(test, device):
+    # fast math approximates arithmetic but must keep NaN and Inf checks, as NVRTC's --use_fast_math does
+    x = wp.array([wp.NAN, wp.INF, -wp.INF, 1.0], dtype=float, device=device)
+    out = wp.zeros(4, dtype=int, device=device)
+    wp.launch(fast_math_nan_inf_kernel, dim=4, inputs=[x, out], device=device)
+    np.testing.assert_array_equal(out.numpy(), [1, 2, 2, 4])
 
 
 @wp.kernel
@@ -313,10 +329,15 @@ devices = get_test_devices()
 
 add_function_test(TestFastMath, "test_fast_math_cuda", test_fast_math_cuda, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_fast_math_disabled", test_fast_math_disabled, devices=devices)
+add_function_test(TestFastMath, "test_fast_math_nan_inf", test_fast_math_nan_inf, devices=devices)
 add_function_test(TestFastMath, "test_approx_div_div", test_approx_div_div, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_inverse", test_approx_div_inverse, devices=get_cuda_test_devices())
+# AMD GPUs compile to a code object and produce no PTX
 add_function_test(
-    TestFastMath, "test_approx_div_ptx_verification", test_approx_div_ptx_verification, devices=get_cuda_test_devices()
+    TestFastMath,
+    "test_approx_div_ptx_verification",
+    test_approx_div_ptx_verification,
+    devices=[d for d in get_cuda_test_devices() if not d.is_hip],
 )
 add_function_test(TestFastMath, "test_approx_div_compound", test_approx_div_compound, devices=get_cuda_test_devices())
 add_function_test(TestFastMath, "test_approx_div_backward", test_approx_div_backward, devices=get_cuda_test_devices())

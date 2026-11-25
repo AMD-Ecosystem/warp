@@ -17,7 +17,25 @@
 #define check_cu(code) (check_cu_result(code, __FUNCTION__, __FILE__, __LINE__))
 
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#if WP_ENABLE_HIP
+// HIP rejects a grid of more than 2^32 - 1 threads in a dimension, so a one-thread-per-element launch above that
+// continues in the grid's y dimension; kernels that can receive such a count take their index from WP_GRID_THREAD_INDEX
+inline dim3 wp_launch_grid(size_t num_blocks, unsigned int block_dim)
+{
+    const size_t max_blocks_x = 0xFFFFFFFFu / block_dim;
+    if (num_blocks <= max_blocks_x)
+        return dim3(unsigned(num_blocks));
+    return dim3(unsigned(max_blocks_x), unsigned((num_blocks + max_blocks_x - 1) / max_blocks_x));
+}
+#define WP_LAUNCH_GRID(num_blocks, block_dim) wp_launch_grid(num_blocks, block_dim)
+#define WP_GRID_THREAD_INDEX \
+    ((size_t(blockIdx.y) * size_t(gridDim.x) + size_t(blockIdx.x)) * size_t(blockDim.x) + size_t(threadIdx.x))
+#else
+#define WP_LAUNCH_GRID(num_blocks, block_dim) num_blocks
+#define WP_GRID_THREAD_INDEX (size_t(blockIdx.x) * size_t(blockDim.x) + size_t(threadIdx.x))
+#endif
+
 #if _DEBUG
 // helper for launching kernels (synchronize + error checking after each kernel)
 #define wp_launch_device(context, kernel, dim, args) { \
@@ -27,7 +45,7 @@
         const int num_threads = 256; \
         const int num_blocks = (dim+num_threads-1)/num_threads; \
         begin_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream, context, #kernel); \
-        kernel<<<num_blocks, 256, 0, stream>>>args; \
+        kernel<<<WP_LAUNCH_GRID(num_blocks, 256), 256, 0, stream>>>args; \
         check_cuda(wp_cuda_context_check(WP_CURRENT_CONTEXT)); \
         end_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream); }}
 #else
@@ -39,10 +57,10 @@
         const int num_threads = 256; \
         const int num_blocks = (dim+num_threads-1)/num_threads; \
         begin_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream, context, #kernel); \
-        kernel<<<num_blocks, 256, 0, stream>>>args; \
+        kernel<<<WP_LAUNCH_GRID(num_blocks, 256), 256, 0, stream>>>args; \
         end_cuda_range(WP_TIMING_KERNEL_BUILTIN, stream); }}
 #endif  // _DEBUG
-#endif  // defined(__CUDACC__)
+#endif  // defined(__CUDACC__) || defined(__HIPCC__)
 
 
 CUresult cuDriverGetVersion_f(int* version);

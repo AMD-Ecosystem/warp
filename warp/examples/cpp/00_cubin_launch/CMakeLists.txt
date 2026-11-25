@@ -2,16 +2,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.20)
-project(warp_cubin_launch CUDA CXX)
+option(WARP_USE_HIP "Build for AMD GPUs with HIP instead of CUDA" OFF)
+if(WARP_USE_HIP)
+    set(WARP_GPU_LANGUAGE HIP)
+else()
+    set(WARP_GPU_LANGUAGE CUDA)
+endif()
+project(warp_cubin_launch ${WARP_GPU_LANGUAGE} CXX)
 
 # Enable testing support
 enable_testing()
 
 # Find CUDA
-find_package(CUDAToolkit REQUIRED)
+if(NOT WARP_USE_HIP)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
-# Find CUBIN file (must exist before configuration)
-file(GLOB CUBIN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/generated/wp___main__.sm*.cubin")
+# Find CUBIN file (must exist before configuration); on AMD GPUs a code object (.hsaco)
+if(WARP_USE_HIP)
+    file(GLOB CUBIN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/generated/wp___main__.gfx*.hsaco")
+else()
+    file(GLOB CUBIN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/generated/wp___main__.sm*.cubin")
+endif()
 if(NOT CUBIN_FILES)
     message(FATAL_ERROR 
         "No CUBIN file found in ${CMAKE_CURRENT_SOURCE_DIR}/generated/\n"
@@ -41,6 +53,7 @@ set(KERNEL_NAME "saxpy_cuda_kernel_forward")
 
 # Add executable (named after example directory for consistency with Makefile)
 add_executable(00_cubin_launch main.cu)
+set_source_files_properties(main.cu PROPERTIES LANGUAGE ${WARP_GPU_LANGUAGE})
 
 # Set C++ standard (no CUDA architecture needed - host-only code)
 target_compile_features(00_cubin_launch PRIVATE cxx_std_17)
@@ -53,8 +66,10 @@ target_compile_definitions(00_cubin_launch PRIVATE
     KERNEL_NAME="${KERNEL_NAME}"
 )
 
-# Link CUDA driver library
-target_link_libraries(00_cubin_launch CUDA::cuda_driver)
+# Link CUDA driver library (the HIP runtime is linked implicitly)
+if(NOT WARP_USE_HIP)
+    target_link_libraries(00_cubin_launch CUDA::cuda_driver)
+endif()
 
 message(STATUS "Warp include: ${WARP_INCLUDE}")
 message(STATUS "CUBIN file: ${CUBIN_FILE}")

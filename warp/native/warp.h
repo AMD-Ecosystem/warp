@@ -43,6 +43,8 @@ WP_API int wp_is_error_output_enabled();
 
 // whether Warp was compiled with CUDA support
 WP_API int wp_is_cuda_enabled();
+// whether the GPU support Warp was compiled with is HIP (AMD GPUs) rather than CUDA
+WP_API int wp_is_hip_enabled();
 // whether Warp was compiled with enhanced CUDA compatibility
 WP_API int wp_is_cuda_compatibility_enabled();
 // whether Warp was compiled with MathDx support
@@ -522,6 +524,7 @@ WP_API void wp_bsr_compress_inplace_device(
 
 WP_API int wp_cuda_driver_version();  // CUDA driver version
 WP_API int wp_cuda_toolkit_version();  // CUDA Toolkit version used to build Warp
+WP_API int wp_hip_runtime_version();  // version of the HIP runtime loaded in the process, 0 for CUDA builds
 WP_API const char* wp_version();  // Warp native library version string
 WP_API bool wp_cuda_driver_is_initialized();
 
@@ -540,6 +543,7 @@ WP_API void* wp_cuda_device_get_primary_context(int ordinal);
 WP_API const char* wp_cuda_device_get_name(int ordinal);
 WP_API int wp_cuda_device_get_arch(int ordinal);
 WP_API int wp_cuda_device_get_sm_count(int ordinal);
+WP_API const char* wp_cuda_device_get_arch_name(int ordinal);  // AMD target name, empty for CUDA devices
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal);
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]);
 WP_API int wp_cuda_device_get_pci_domain_id(int ordinal);
@@ -552,6 +556,7 @@ WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal);
 WP_API int wp_cuda_device_get_managed_memory_supported(int ordinal);
 WP_API int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal);
 WP_API int wp_cuda_pointer_get_memory_kind(void* context, void* ptr);
+WP_API int wp_cuda_device_is_texture_hardware_supported(int ordinal, int ndim);
 WP_API int wp_cuda_device_is_mempool_supported(int ordinal);
 WP_API int wp_cuda_device_is_ipc_supported(int ordinal);
 WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold);
@@ -673,6 +678,21 @@ WP_API size_t wp_cuda_compile_program(
     char** ltoirs,
     size_t* ltoir_sizes,
     int* ltoir_input_types
+);
+// compile a kernel module with hipRTC for an AMD GPU target (e.g. "gfx942:sramecc+:xnack-"); ROCm builds only
+WP_API size_t wp_hip_compile_program(
+    const char* src,
+    const char* program_name,
+    const char* target,
+    const char* include_dir,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    const char* output_path
 );
 WP_API bool wp_cuda_compile_fft(
     const char* ltoir_output_path,

@@ -11,10 +11,15 @@ SEPARATOR="========================================"
 
 # Parse command-line arguments
 CLEANUP=false
+HIP=false
 for arg in "$@"; do
     case "$arg" in
         --cleanup)
             CLEANUP=true
+            shift
+            ;;
+        --hip)
+            HIP=true
             shift
             ;;
         --help|-h)
@@ -22,6 +27,7 @@ for arg in "$@"; do
             echo ""
             echo "OPTIONS:"
             echo "  --cleanup    Remove build/ and generated/ directories after tests pass"
+            echo "  --hip        Build for AMD GPUs with HIP instead of CUDA"
             echo "  --help       Show this help message"
             exit 0
             ;;
@@ -39,7 +45,7 @@ echo "$SEPARATOR"
 echo ""
 
 # Check for required commands
-if ! command -v nvcc &> /dev/null; then
+if [[ "$HIP" = false ]] && ! command -v nvcc &> /dev/null; then
     echo "ERROR: Required command 'nvcc' not found in PATH" >&2
     exit 1
 fi
@@ -60,7 +66,9 @@ else
 fi
 
 echo "✓ Found required dependencies:"
-echo "  - nvcc: $(nvcc --version | grep release | awk '{print $5}' | cut -d',' -f1)"
+if [[ "$HIP" = false ]]; then
+    echo "  - nvcc: $(nvcc --version | grep release | awk '{print $5}' | cut -d',' -f1)"
+fi
 echo "  - Python: ${PYTHON_VERSION}"
 echo "  - cmake: $(cmake --version | head -1)"
 echo ""
@@ -120,7 +128,7 @@ echo "$SEPARATOR"
 echo "Running CMake configuration..."
 echo "$SEPARATOR"
 cd "${BUILD_DIR}"
-cmake -DWARP_NATIVE_DIR="${WARP_NATIVE_DIR}" ..
+cmake -DWARP_NATIVE_DIR="${WARP_NATIVE_DIR}" -DWARP_USE_HIP="${HIP}" ..
 echo ""
 
 # Build all targets

@@ -5,11 +5,13 @@ import argparse
 import os
 import pathlib
 import platform
+import re
 import shutil
 import sys
 from typing import ClassVar, NamedTuple
 
 import setuptools
+from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
 # Parse --build-option arguments meant for the bdist_wheel command. We have to parse these
@@ -181,12 +183,34 @@ class WarpBDistWheel(bdist_wheel):
         shutil.rmtree("./warp_lang.egg-info", ignore_errors=True)
 
 
+class WarpBuildPy(build_py):
+    def run(self):
+        super().run()
+        # A ROCm marker's first line is the build machine's ROCm root, which only a source build without the ROCm
+        # Python packages reads; a wheel depends on those packages, so its copy keeps only the version line
+        for marker in pathlib.Path(self.build_lib, "warp", "bin").glob("*.rocm"):
+            lines = marker.read_text().splitlines()
+            marker.write_text("\n" + (lines[1] if len(lines) > 1 else "") + "\n", newline="\n")
+
+
 # Distributions are identified as non-pure (i.e. containing non-Python code, or binaries) if the
 # setuptools.setup() `ext_modules` parameter is not empty, but this assumes building extension
 # modules from source through the Python build. This class provides an override for prebuilt binaries:
 class BinaryDistribution(setuptools.Distribution):
     def has_ext_modules(self):
         return True
+
+    def parse_config_files(self, *args, **kwargs):
+        super().parse_config_files(*args, **kwargs)
+        # pyproject.toml declares the dependencies every wheel has
+        if extra_requirements:
+            self.install_requires = [*self.install_requires, *extra_requirements]
+            self.metadata.install_requires = self.install_requires
+        if rocm_wheel:
+            # PyPI has no ROCm classifier; a ROCm wheel only drops the CUDA ones
+            self.metadata.classifiers = [
+                c for c in self.metadata.classifiers if not c.startswith("Environment :: GPU :: NVIDIA CUDA")
+            ]
 
 
 def get_warp_libraries(platform):
@@ -200,11 +224,55 @@ def get_warp_libraries(platform):
 
             libraries.append("bin/" + library.file)
 
+            # A ROCm build leaves a marker next to the library that the loader checks
+            if os.path.exists(src + ".rocm"):
+                if src != dst:
+                    shutil.copyfile(src + ".rocm", dst + ".rocm")
+                libraries.append("bin/" + library.file + ".rocm")
+            elif src != dst and os.path.exists(dst + ".rocm"):
+                os.remove(dst + ".rocm")
+
     return libraries
 
 
+# Returns the requirement on the ROCm Python packages for the ROCm minor version recorded in a
+# ROCm build's marker (the ROCm root on the first line, its version on the second)
+def get_rocm_requirement(marker):
+    with open(marker) as f:
+        lines = f.read().splitlines()
+    match = re.match(r"(\d+)\.(\d+)", lines[1].strip() if len(lines) > 1 else "")
+    if not match:
+        raise Exception(f"{marker} does not record the ROCm version. Please run build_lib.py again.")
+    major, minor = int(match[1]), int(match[2])
+    # the wheel's version names the ROCm it requires (e.g. 1.14.0+rocm10.2.0)
+    version = pathlib.Path("VERSION.md").read_text().strip()
+    label = re.search(r"\+rocm(\d+)\.(\d+)", version)
+    if not label or (int(label[1]), int(label[2])) != (major, minor):
+        raise Exception(
+            f"The library was built against ROCm {major}.{minor}, but the version {version} in VERSION.md names "
+            f"{'ROCm ' + label[1] + '.' + label[2] if label else 'no ROCm release'}. "
+            "Build against the ROCm the version names, or change the version."
+        )
+    return f"rocm>={major}.{minor},<{major}.{minor + 1}"
+
+
+license_files = ["LICENSE.md", "licenses/*.txt"]
+extra_requirements = []
+rocm_wheel = False
+
 if wheel_platform is not None:
     warp_binary_libraries = get_warp_libraries(wheel_platform)
+    rocm_markers = [lib for lib in warp_binary_libraries if lib.endswith(".rocm")]
+    rocm_wheel = bool(rocm_markers)
+    if rocm_markers:
+        # A ROCm wheel depends on the ROCm runtime packages and contains no NVIDIA software
+        extra_requirements.append(get_rocm_requirement("warp/" + rocm_markers[0]))
+        nvidia_licenses = ("cuda-LICENSE.txt", "libmathdx-LICENSE.txt", "nvrtc-LICENSE.txt")
+        license_files = ["LICENSE.md"] + [
+            path.as_posix()
+            for path in sorted(pathlib.Path("licenses").glob("*.txt"))
+            if path.name not in nvidia_licenses
+        ]
 else:
     warp_binary_libraries = []  # Not needed during egg_info command
 
@@ -224,6 +292,6 @@ setuptools.setup(
         ]
     },
     distclass=BinaryDistribution,
-    cmdclass={"bdist_wheel": WarpBDistWheel},
-    license_files=["LICENSE.md", "licenses/*.txt"],
+    cmdclass={"bdist_wheel": WarpBDistWheel, "build_py": WarpBuildPy},
+    license_files=license_files,
 )

@@ -46,6 +46,7 @@ namespace cuBQL {
     DeviceMemoryResource()
     {}
     void malloc(void** ptr, size_t size, cudaStream_t s) override {
+      CUBQL_CUDA_CALL(StreamSynchronize(s));
       CUBQL_CUDA_CALL(Malloc(ptr, size));
     }
     void free(void* ptr, cudaStream_t s) override
@@ -54,7 +55,10 @@ namespace cuBQL {
     }
   };
   
-#if CUDART_VERSION >= 11020
+// hipMallocAsync and the hipMemPool API are available on ROCm; on the HIP
+// toolchain CUDART_VERSION is undefined (0), so select the async path
+// explicitly there. The CUDA arm keeps its >= 11020 floor unchanged.
+#if defined(__HIPCC__) || CUDART_VERSION >= 11020
   /* Allocator that uses cudaMallocAsync to allocate memory. This can
      be much faster than cudaMalloc because it doesn't require a
      device sync for each malloc; but .. CAREFUL: to get memory to be

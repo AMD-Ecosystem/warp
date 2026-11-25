@@ -16,6 +16,8 @@ import numpy as np
 import warp as wp
 from warp._src.utils import check_p2p
 from warp.tests.unittest_utils import (
+    GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED,
+    MEMPOOL_ACCESS_NOT_REVOCABLE,
     add_function_test,
     assert_np_equal,
     get_cuda_device_pair_with_mempool_access_support,
@@ -24,6 +26,8 @@ from warp.tests.unittest_utils import (
     get_test_devices,
     get_test_devices_with_cuda_graph_module_load,
     get_test_devices_with_graph_capture_allocation_and_cuda_graph_module_load,
+    is_graph_host_copy_of_capture_allocation_supported,
+    is_mempool_access_revocable,
 )
 
 
@@ -350,6 +354,10 @@ def test_graph_launch_array_access_mode_checked_peer_access_cuda_capture(test, _
     "Requires devices with mempool access and CUDA graph module-load support",
 )
 @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+@unittest.skipUnless(
+    is_mempool_access_revocable(get_cuda_device_pair_with_mempool_access_support(graph_module_load_devices)),
+    MEMPOOL_ACCESS_NOT_REVOCABLE,
+)
 def test_graph_launch_array_access_mode_checked_mempool_access_cuda_capture(test, _):
     target_device, peer_device = get_cuda_device_pair_with_mempool_access_support(graph_module_load_devices)
     n = 64
@@ -534,6 +542,8 @@ def test_cuda_graph_alloc_retained_release(test, device):
 
 
 def test_cuda_graph_alloc_transient_stream(test, device):
+    if not is_graph_host_copy_of_capture_allocation_supported(device):
+        test.skipTest(GRAPH_HOST_COPY_OF_CAPTURE_ALLOCATION_UNSUPPORTED)
 
     def foo(n, num_launches):
         # use temporary side stream

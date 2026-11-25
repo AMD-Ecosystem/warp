@@ -362,6 +362,8 @@ def test_event_external(test, device):
         a = wp.zeros(n, dtype=float)
         b = wp.zeros(n, dtype=float)
         c = wp.zeros(n, dtype=float)
+        # the graphs run on other streams, which are not ordered after the zero fills
+        wp.synchronize_device()
 
         with wp.ScopedCapture() as capture1:
             wp.launch(inc, dim=n, inputs=[a])
@@ -421,6 +423,8 @@ def test_stream_priority_timings(test, device):
 
     if stream_lo.priority == stream_hi.priority:
         test.skipTest("Device must support stream priorities.")
+    if not is_stream_priority_scheduling_supported(device):
+        test.skipTest("HIP maps stream priorities to normal priority, so priority has no scheduling effect.")
 
     # Create some events
     start_lo_event = wp.Event(device, enable_timing=True)
@@ -512,6 +516,35 @@ def test_graph_destroy_during_capture(test, device):
         assert_np_equal(a.numpy(), np.full(n, 2, dtype=np.float32))
 
 
+@wp.kernel
+def write_late(a: wp.array[float], iters: int):
+    tid = wp.tid()
+    v = float(tid)
+    for _ in range(iters):
+        v = wp.sin(v) + 1.0
+    a[tid] = 1.0 + 0.0 * v
+
+
+def test_stream_free_waits_for_other_streams(test, device):
+    # An array freed while a kernel on another stream is still writing it must not be handed to a new allocation
+    # before that kernel finishes, or the late writes land in the new array. Two cases: the array is allocated on
+    # the writing stream, or on the freeing stream and written on the other one.
+    n = 1024 * 1024
+    with wp.ScopedDevice(device), wp.ScopedMempool(device, True):
+        writer = wp.Stream()
+        freer = wp.Stream()
+        for alloc_stream in (writer, freer):
+            for _ in range(3):
+                with wp.ScopedStream(alloc_stream):
+                    a = wp.empty(n, dtype=float)
+                wp.launch(write_late, dim=n, inputs=[a, 20000], stream=writer)
+                with wp.ScopedStream(freer):
+                    del a
+                    b = wp.zeros(n, dtype=float)
+                wp.synchronize_device()
+                test.assertEqual(np.count_nonzero(b.numpy()), 0)
+
+
 def test_stream_synchronize_cpu(test, _):
     with wp.ScopedDevice("cpu"):
         # this should not raise an exception (like wp.synchronize_device())
@@ -564,6 +597,7 @@ class TestStreams(unittest.TestCase):
 
     @unittest.skipUnless(len(wp.get_cuda_devices()) > 1, "Requires at least two CUDA devices")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(is_multi_device_graph_supported(wp.get_cuda_devices()[:2]), MULTI_DEVICE_GRAPH_UNSUPPORTED)
     def test_stream_arg_graph_mgpu(self):
         wp.load_module(device="cuda:0")
         wp.load_module(device="cuda:1")
@@ -614,6 +648,7 @@ class TestStreams(unittest.TestCase):
 
     @unittest.skipUnless(len(wp.get_cuda_devices()) > 1, "Requires at least two CUDA devices")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
+    @unittest.skipUnless(is_multi_device_graph_supported(wp.get_cuda_devices()[:2]), MULTI_DEVICE_GRAPH_UNSUPPORTED)
     def test_stream_scope_graph_mgpu(self):
         wp.load_module(device="cuda:0")
         wp.load_module(device="cuda:1")
@@ -699,6 +734,12 @@ add_function_test(TestStreams, "test_event_elapsed_time_graph", test_event_elaps
 add_function_test(TestStreams, "test_event_external", test_event_external, devices=devices)
 
 add_function_test(TestStreams, "test_graph_destroy_during_capture", test_graph_destroy_during_capture, devices=devices)
+add_function_test(
+    TestStreams,
+    "test_stream_free_waits_for_other_streams",
+    test_stream_free_waits_for_other_streams,
+    devices=get_selected_cuda_test_devices_with_mempool(),
+)
 
 add_function_test(TestStreams, "test_stream_synchronize_cpu", test_stream_synchronize_cpu, devices=None)
 add_function_test(TestStreams, "test_synchronize_during_capture", test_synchronize_during_capture, devices=devices)

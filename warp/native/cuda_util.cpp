@@ -15,9 +15,664 @@
 #include <dlfcn.h>
 #endif
 
+#include <mutex>
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#if WP_ENABLE_HIP
+
+#include <hip/hip_gl_interop.h>
+
+// HIP has no separately loaded driver library: the driver-style entry points are part of the HIP
+// runtime that warp.so links. The cu*_f wrappers below call it directly.
+//
+// HIP also has no driver-API contexts (the hipCtx API is deprecated). A Warp context is a handle
+// to a device: each device has a primary context handle, created at initialization, and
+// cuCtxCreate_f makes additional handles that share the device.
+
+struct WpHipContext {
+    hipDevice_t device;
+    bool is_primary;
+};
+
+static std::vector<WpHipContext*> g_hip_primary_contexts;
+
+// the context handle made current on this thread, if it is not a primary context
+static thread_local CUcontext g_hip_current_context = NULL;
+static thread_local std::vector<CUcontext> g_hip_context_stack;
+
+// used by check_cu_result(), which ignores the result
+static void get_error_string(hipError_t result, const char** pstr) { (void)hipDrvGetErrorString(result, pstr); }
+static void (*pfn_cuGetErrorString)(hipError_t, const char**) = get_error_string;
+
+// The CUDA driver API reports a failure only through its return value. A failed HIP runtime call also leaves the error
+// as HIP's per-thread last error, which the next hipCUB/rocPRIM call returns without doing its work, so the wrappers
+// below pass the result of every HIP call they make through this function. hipErrorNotReady (a stream or event query
+// that has not completed) sets no last error, so clearing then could only discard an earlier one.
+static hipError_t hip_driver_result(hipError_t result)
+{
+    if (result != hipSuccess && result != hipErrorNotReady)
+        (void)hipGetLastError();
+    return result;
+}
+
+static bool cuda_driver_initialized = false;
+
+bool ContextGuard::always_restore = false;
+
+CudaTimingState* g_cuda_timing_state = NULL;
+
+static CUcontext get_primary_context(hipDevice_t device)
+{
+    if (device < 0 || device >= int(g_hip_primary_contexts.size()))
+        return NULL;
+    return g_hip_primary_contexts[device];
+}
+
+bool init_cuda_driver()
+{
+    hipError_t result = hipInit(0);
+    if (result != hipSuccess) {
+        fprintf(
+            stderr,
+            "Warp CUDA warning: Could not initialize the HIP runtime (%s). GPU execution will not be available.\n",
+            hipGetErrorString(result)
+        );
+        return false;
+    }
+
+    int device_count = 0;
+    if (!check_cu(hipGetDeviceCount(&device_count)))
+        return false;
+
+    for (int i = 0; i < device_count; i++)
+        g_hip_primary_contexts.push_back(new WpHipContext { i, true });
+
+    cuda_driver_initialized = true;
+    return true;
+}
+
+CUresult cuDriverGetVersion_f(int* version) { return hip_driver_result(hipDriverGetVersion(version)); }
+
+CUresult cuGetErrorName_f(CUresult result, const char** pstr)
+{
+    return hip_driver_result(hipDrvGetErrorName(result, pstr));
+}
+
+CUresult cuGetErrorString_f(CUresult result, const char** pstr)
+{
+    return hip_driver_result(hipDrvGetErrorString(result, pstr));
+}
+
+CUresult cuInit_f(unsigned int flags) { return hip_driver_result(hipInit(flags)); }
+
+CUresult cuDeviceGet_f(CUdevice* dev, int ordinal) { return hip_driver_result(hipDeviceGet(dev, ordinal)); }
+
+CUresult cuDeviceGetCount_f(int* count)
+{
+    if (cuda_driver_initialized)
+        return hip_driver_result(hipGetDeviceCount(count));
+
+    // allow calling this function even if HIP is not available
+    if (count)
+        *count = 0;
+
+    return hipSuccess;
+}
+
+CUresult cuDeviceGetName_f(char* name, int len, CUdevice dev)
+{
+    return hip_driver_result(hipDeviceGetName(name, len, dev));
+}
+
+CUresult cuDeviceGetAttribute_f(int* value, CUdevice_attribute attrib, CUdevice dev)
+{
+    return hip_driver_result(hipDeviceGetAttribute(value, attrib, dev));
+}
+
+CUresult cuDeviceGetUuid_f(CUuuid* uuid, CUdevice dev) { return hip_driver_result(hipDeviceGetUuid(uuid, dev)); }
+
+CUresult cuDevicePrimaryCtxRetain_f(CUcontext* ctx, CUdevice dev)
+{
+    *ctx = get_primary_context(dev);
+    return *ctx ? hipSuccess : hipErrorInvalidDevice;
+}
+
+CUresult cuDevicePrimaryCtxRelease_f(CUdevice dev)
+{
+    return get_primary_context(dev) ? hipSuccess : hipErrorInvalidDevice;
+}
+
+CUresult cuDeviceCanAccessPeer_f(int* can_access, CUdevice dev, CUdevice peer_dev)
+{
+    return hip_driver_result(hipDeviceCanAccessPeer(can_access, dev, peer_dev));
+}
+
+CUresult cuMemGetInfo_f(size_t* free, size_t* total) { return hip_driver_result(hipMemGetInfo(free, total)); }
+
+CUresult cuCtxGetCurrent_f(CUcontext* ctx)
+{
+    hipDevice_t device;
+    hipError_t result = hip_driver_result(hipGetDevice(&device));
+    if (result != hipSuccess)
+        return result;
+
+    // the HIP runtime always has a current device, which other HIP code (e.g. PyTorch) may have set
+    if (g_hip_current_context && g_hip_current_context->device == device)
+        *ctx = g_hip_current_context;
+    else
+        *ctx = get_primary_context(device);
+
+    return hipSuccess;
+}
+
+CUresult cuCtxSetCurrent_f(CUcontext ctx)
+{
+    if (ctx) {
+        hipError_t result = hip_driver_result(hipSetDevice(ctx->device));
+        if (result != hipSuccess)
+            return result;
+    }
+    g_hip_current_context = (ctx && !ctx->is_primary) ? ctx : NULL;
+    return hipSuccess;
+}
+
+CUresult cuCtxPushCurrent_f(CUcontext ctx)
+{
+    CUcontext prev_ctx = NULL;
+    hipError_t result = cuCtxGetCurrent_f(&prev_ctx);
+    if (result != hipSuccess)
+        return result;
+    g_hip_context_stack.push_back(prev_ctx);
+    return cuCtxSetCurrent_f(ctx);
+}
+
+CUresult cuCtxPopCurrent_f(CUcontext* ctx)
+{
+    if (g_hip_context_stack.empty())
+        return hipErrorInvalidContext;
+
+    if (ctx) {
+        hipError_t result = cuCtxGetCurrent_f(ctx);
+        if (result != hipSuccess)
+            return result;
+    }
+
+    CUcontext prev_ctx = g_hip_context_stack.back();
+    g_hip_context_stack.pop_back();
+    return cuCtxSetCurrent_f(prev_ctx);
+}
+
+CUresult cuCtxSynchronize_f() { return hip_driver_result(hipDeviceSynchronize()); }
+
+CUresult cuCtxGetDevice_f(CUdevice* dev) { return hip_driver_result(hipGetDevice(dev)); }
+
+CUresult cuCtxCreate_f(CUcontext* ctx, unsigned int flags, CUdevice dev)
+{
+    (void)flags;
+    if (!get_primary_context(dev))
+        return hipErrorInvalidDevice;
+    *ctx = new WpHipContext { dev, false };
+    return cuCtxSetCurrent_f(*ctx);
+}
+
+CUresult cuCtxDestroy_f(CUcontext ctx)
+{
+    if (!ctx)
+        return hipErrorInvalidContext;
+    if (ctx == g_hip_current_context)
+        g_hip_current_context = NULL;
+    if (!ctx->is_primary)
+        delete ctx;
+    return hipSuccess;
+}
+
+CUresult cuCtxEnablePeerAccess_f(CUcontext peer_ctx, unsigned int flags)
+{
+    return hip_driver_result(hipDeviceEnablePeerAccess(peer_ctx->device, flags));
+}
+
+CUresult cuCtxDisablePeerAccess_f(CUcontext peer_ctx)
+{
+    return hip_driver_result(hipDeviceDisablePeerAccess(peer_ctx->device));
+}
+
+CUresult cuStreamCreate_f(CUstream* stream, unsigned int flags)
+{
+    return hip_driver_result(hipStreamCreateWithFlags(stream, flags));
+}
+
+CUresult cuStreamDestroy_f(CUstream stream) { return hip_driver_result(hipStreamDestroy(stream)); }
+
+CUresult cuStreamQuery_f(CUstream stream) { return hip_driver_result(hipStreamQuery(stream)); }
+
+CUresult cuStreamSynchronize_f(CUstream stream) { return hip_driver_result(hipStreamSynchronize(stream)); }
+
+CUresult cuStreamWaitEvent_f(CUstream stream, CUevent event, unsigned int flags)
+{
+    return hip_driver_result(hipStreamWaitEvent(stream, event, flags));
+}
+
+CUresult cuStreamGetCtx_f(CUstream stream, CUcontext* pctx)
+{
+    hipDevice_t device;
+    hipError_t result = hip_driver_result(hipStreamGetDevice(stream, &device));
+    if (result != hipSuccess)
+        return result;
+
+    // a stream belongs to its device; report the current context when it is on that device
+    CUcontext current = NULL;
+    if (cuCtxGetCurrent_f(&current) == hipSuccess && current && current->device == device)
+        *pctx = current;
+    else
+        *pctx = get_primary_context(device);
+
+    return hipSuccess;
+}
+
+CUresult cuStreamGetCaptureInfo_f(
+    CUstream stream,
+    CUstreamCaptureStatus* captureStatus_out,
+    cuuint64_t* id_out,
+    CUgraph* graph_out,
+    const CUgraphNode** dependencies_out,
+    size_t* numDependencies_out
+)
+{
+    static_assert(sizeof(cuuint64_t) == sizeof(unsigned long long), "unexpected capture id size");
+    return hip_driver_result(hipStreamGetCaptureInfo_v2(
+        stream, captureStatus_out, reinterpret_cast<unsigned long long*>(id_out), graph_out, dependencies_out,
+        numDependencies_out
+    ));
+}
+
+CUresult cuStreamUpdateCaptureDependencies_f(
+    CUstream stream, CUgraphNode* dependencies, size_t numDependencies, unsigned int flags
+)
+{
+    return hip_driver_result(hipStreamUpdateCaptureDependencies(stream, dependencies, numDependencies, flags));
+}
+
+CUresult cuStreamCreateWithPriority_f(CUstream* phStream, unsigned int flags, int priority)
+{
+    return hip_driver_result(hipStreamCreateWithPriority(phStream, flags, priority));
+}
+
+CUresult cuStreamGetPriority_f(CUstream hStream, int* priority)
+{
+    return hip_driver_result(hipStreamGetPriority(hStream, priority));
+}
+
+CUresult cuEventCreate_f(CUevent* event, unsigned int flags)
+{
+    return hip_driver_result(hipEventCreateWithFlags(event, flags));
+}
+
+CUresult cuEventDestroy_f(CUevent event) { return hip_driver_result(hipEventDestroy(event)); }
+
+CUresult cuEventQuery_f(CUevent event) { return hip_driver_result(hipEventQuery(event)); }
+
+CUresult cuEventRecord_f(CUevent event, CUstream stream) { return hip_driver_result(hipEventRecord(event, stream)); }
+
+CUresult cuEventRecordWithFlags_f(CUevent event, CUstream stream, unsigned int flags)
+{
+    return hip_driver_result(hipEventRecordWithFlags(event, stream, flags));
+}
+
+CUresult cuEventSynchronize_f(CUevent event) { return hip_driver_result(hipEventSynchronize(event)); }
+
+CUresult cuGraphNodeGetDependentNodes_f(CUgraphNode hNode, CUgraphNode* dependentNodes, size_t* numDependentNodes)
+{
+    return hip_driver_result(hipGraphNodeGetDependentNodes(hNode, dependentNodes, numDependentNodes));
+}
+
+CUresult cuGraphNodeGetType_f(CUgraphNode hNode, CUgraphNodeType* type)
+{
+    return hip_driver_result(hipGraphNodeGetType(hNode, type));
+}
+
+CUresult cuModuleLoadDataEx_f(
+    CUmodule* module, const void* image, unsigned int numOptions, CUjit_option* options, void** optionValues
+)
+{
+    return hip_driver_result(hipModuleLoadDataEx(module, image, numOptions, options, optionValues));
+}
+
+CUresult cuModuleUnload_f(CUmodule hmod) { return hip_driver_result(hipModuleUnload(hmod)); }
+
+CUresult cuModuleGetFunction_f(CUfunction* hfunc, CUmodule hmod, const char* name)
+{
+    return hip_driver_result(hipModuleGetFunction(hfunc, hmod, name));
+}
+
+CUresult cuLaunchKernel_f(
+    CUfunction f,
+    unsigned int gridDimX,
+    unsigned int gridDimY,
+    unsigned int gridDimZ,
+    unsigned int blockDimX,
+    unsigned int blockDimY,
+    unsigned int blockDimZ,
+    unsigned int sharedMemBytes,
+    CUstream hStream,
+    void** kernelParams,
+    void** extra
+)
+{
+    return hip_driver_result(hipModuleLaunchKernel(
+        f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra
+    ));
+}
+
+CUresult cuOccupancyMaxPotentialBlockSize_f(
+    int* minGridSize,
+    int* blockSize,
+    CUfunction func,
+    CUoccupancyB2DSize blockSizeToDynamicSMemSize,
+    size_t dynamicSMemSize,
+    int blockSizeLimit
+)
+{
+    // HIP has no variant taking a block-size-to-shared-memory callback
+    if (blockSizeToDynamicSMemSize)
+        return hipErrorNotSupported;
+
+    // hipModuleOccupancyMaxPotentialBlockSize does not honour the kernel's own maximum block size
+    // (__launch_bounds__), so pass it as the limit
+    int max_threads = 0;
+    hipError_t result
+        = hip_driver_result(hipFuncGetAttribute(&max_threads, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, func));
+    if (result != hipSuccess)
+        return result;
+    if (blockSizeLimit <= 0 || blockSizeLimit > max_threads)
+        blockSizeLimit = max_threads;
+
+    return hip_driver_result(
+        hipModuleOccupancyMaxPotentialBlockSize(minGridSize, blockSize, func, dynamicSMemSize, blockSizeLimit)
+    );
+}
+
+CUresult cuMemcpyPeerAsync_f(
+    CUdeviceptr dst_ptr, CUcontext dst_ctx, CUdeviceptr src_ptr, CUcontext src_ctx, size_t n, CUstream stream
+)
+{
+    return hip_driver_result(hipMemcpyPeerAsync(dst_ptr, dst_ctx->device, src_ptr, src_ctx->device, n, stream));
+}
+
+CUresult cuPointerGetAttribute_f(void* data, CUpointer_attribute attribute, CUdeviceptr ptr)
+{
+    return hip_driver_result(hipPointerGetAttribute(data, attribute, ptr));
+}
+
+CUresult cuGraphicsMapResources_f(unsigned int count, CUgraphicsResource* resources, CUstream stream)
+{
+    return hip_driver_result(hipGraphicsMapResources(int(count), resources, stream));
+}
+
+CUresult cuGraphicsUnmapResources_f(unsigned int count, CUgraphicsResource* resources, CUstream hStream)
+{
+    return hip_driver_result(hipGraphicsUnmapResources(int(count), resources, hStream));
+}
+
+CUresult cuGraphicsResourceGetMappedPointer_f(CUdeviceptr* pDevPtr, size_t* pSize, CUgraphicsResource resource)
+{
+    return hip_driver_result(hipGraphicsResourceGetMappedPointer(pDevPtr, pSize, resource));
+}
+
+// HIP finds the GLX interop entry points with dlsym(RTLD_DEFAULT, ...), which does not see a libGL loaded with
+// RTLD_LOCAL (the default of Python's ctypes, which pyglet uses) or not loaded at all (GLFW loads libGLX itself), and
+// it caches a failed lookup for the life of the process. Load libGL with global scope before the first registration;
+// the handle is never closed. Without libGL.so.1 dlopen returns NULL and registration fails as before.
+static void make_gl_symbols_global()
+{
+#if !defined(_WIN32)
+    static std::once_flag once;
+    std::call_once(once, []() { dlopen("libGL.so.1", RTLD_LAZY | RTLD_GLOBAL); });
+#endif
+}
+
+CUresult cuGraphicsGLRegisterBuffer_f(CUgraphicsResource* pCudaResource, unsigned int buffer, unsigned int flags)
+{
+    make_gl_symbols_global();
+    return hip_driver_result(hipGraphicsGLRegisterBuffer(pCudaResource, buffer, flags));
+}
+
+CUresult cuGraphicsGLRegisterImage_f(
+    CUgraphicsResource* pCudaResource, unsigned int image, unsigned int target, unsigned int flags
+)
+{
+    make_gl_symbols_global();
+    return hip_driver_result(hipGraphicsGLRegisterImage(pCudaResource, image, target, flags));
+}
+
+CUresult cuGraphicsSubResourceGetMappedArray_f(
+    CUarray* pArray, CUgraphicsResource resource, unsigned int arrayIndex, unsigned int mipLevel
+)
+{
+    return hip_driver_result(hipGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel));
+}
+
+CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource)
+{
+    return hip_driver_result(hipGraphicsUnregisterResource(resource));
+}
+
+CUresult cuModuleGetGlobal_f(CUdeviceptr* dptr, size_t* bytes, CUmodule hmod, const char* name)
+{
+    return hip_driver_result(hipModuleGetGlobal(dptr, bytes, hmod, name));
+}
+
+CUresult cuFuncSetAttribute_f(CUfunction hfunc, CUfunction_attribute attrib, int value)
+{
+    // AMD GPUs have no opt-in for dynamic shared memory: a kernel may use up to the
+    // per-block limit, shared with its static shared memory, without configuration
+    if (attrib == CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES) {
+        hipDevice_t device;
+        int max_smem_bytes = 0;
+        int static_smem_bytes = 0;
+        hipError_t result = hip_driver_result(hipGetDevice(&device));
+        if (result == hipSuccess)
+            result = hip_driver_result(
+                hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeMaxSharedMemoryPerBlock, device)
+            );
+        if (result == hipSuccess)
+            result = hip_driver_result(
+                hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, hfunc)
+            );
+        if (result != hipSuccess)
+            return result;
+        return value <= max_smem_bytes - static_smem_bytes ? hipSuccess : hipErrorInvalidValue;
+    }
+
+    return hipErrorNotSupported;
+}
+
+CUresult cuIpcGetEventHandle_f(CUipcEventHandle* pHandle, CUevent event)
+{
+    return hip_driver_result(hipIpcGetEventHandle(pHandle, event));
+}
+
+CUresult cuIpcOpenEventHandle_f(CUevent* phEvent, CUipcEventHandle handle)
+{
+    return hip_driver_result(hipIpcOpenEventHandle(phEvent, handle));
+}
+
+CUresult cuIpcGetMemHandle_f(CUipcMemHandle* pHandle, CUdeviceptr dptr)
+{
+    return hip_driver_result(hipIpcGetMemHandle(pHandle, dptr));
+}
+
+CUresult cuIpcOpenMemHandle_f(CUdeviceptr* pdptr, CUipcMemHandle handle, unsigned int flags)
+{
+    return hip_driver_result(hipIpcOpenMemHandle(pdptr, handle, flags));
+}
+
+CUresult cuIpcCloseMemHandle_f(CUdeviceptr dptr) { return hip_driver_result(hipIpcCloseMemHandle(dptr)); }
+
+// Texture functions
+// Bytes per array element, recorded at creation: the 3D copy needs it and HIP's descriptor
+// query is not permitted while a stream is capturing
+static std::mutex g_array_element_size_mutex;
+static std::unordered_map<hipArray_t, size_t> g_array_element_size;
+
+static size_t hip_array_format_size(hipArray_Format format, unsigned int num_channels)
+{
+    switch (format) {
+    case HIP_AD_FORMAT_UNSIGNED_INT8:
+    case HIP_AD_FORMAT_SIGNED_INT8:
+        return num_channels;
+    case HIP_AD_FORMAT_UNSIGNED_INT16:
+    case HIP_AD_FORMAT_SIGNED_INT16:
+    case HIP_AD_FORMAT_HALF:
+        return 2 * num_channels;
+    default:
+        return 4 * num_channels;
+    }
+}
+
+static void record_array_element_size(hipArray_t array, hipArray_Format format, unsigned int num_channels)
+{
+    std::lock_guard<std::mutex> lock(g_array_element_size_mutex);
+    g_array_element_size[array] = hip_array_format_size(format, num_channels);
+}
+
+static size_t hip_array_element_size(hipArray_t array)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_array_element_size_mutex);
+        auto it = g_array_element_size.find(array);
+        if (it != g_array_element_size.end())
+            return it->second;
+    }
+    // not created or described through these wrappers; the query fails during a capture
+    HIP_ARRAY3D_DESCRIPTOR desc;
+    if (hip_driver_result(hipArray3DGetDescriptor(&desc, array)) != hipSuccess)
+        return 0;
+    return hip_array_format_size(desc.Format, desc.NumChannels);
+}
+
+CUresult cuArrayCreate_f(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
+{
+    hipError_t result = hip_driver_result(hipArrayCreate(pHandle, pAllocateArray));
+    if (result == hipSuccess)
+        record_array_element_size(*pHandle, pAllocateArray->Format, pAllocateArray->NumChannels);
+    return result;
+}
+
+CUresult cuArrayDestroy_f(CUarray hArray)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_array_element_size_mutex);
+        g_array_element_size.erase(hArray);
+    }
+    return hip_driver_result(hipArrayDestroy(hArray));
+}
+
+CUresult cuArray3DCreate_f(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray)
+{
+    hipError_t result = hip_driver_result(hipArray3DCreate(pHandle, pAllocateArray));
+    if (result == hipSuccess)
+        record_array_element_size(*pHandle, pAllocateArray->Format, pAllocateArray->NumChannels);
+    return result;
+}
+
+CUresult cuArray3DGetDescriptor_f(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
+{
+    // a texture wrapping an external array queries it here, outside any capture
+    hipError_t result = hip_driver_result(hipArray3DGetDescriptor(pArrayDescriptor, hArray));
+    if (result == hipSuccess)
+        record_array_element_size(hArray, pArrayDescriptor->Format, pArrayDescriptor->NumChannels);
+    return result;
+}
+
+CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy) { return hip_driver_result(hipMemcpyParam2D(pCopy)); }
+
+CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
+{
+    return hip_driver_result(hipMemcpyParam2DAsync(pCopy, hStream));
+}
+
+CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy) { return hip_driver_result(hipDrvMemcpy3D(pCopy)); }
+
+static hipPitchedPtr
+hip_linear_side(hipMemoryType type, const void* host, hipDeviceptr_t device, size_t pitch, size_t width, size_t height)
+{
+    void* ptr = type == hipMemoryTypeHost ? const_cast<void*>(host) : reinterpret_cast<void*>(device);
+    return make_hipPitchedPtr(ptr, pitch, width, height);
+}
+
+// Warp's 3D copies (texture uploads and readbacks) have an array on at least one side and no
+// offsets. They go through the runtime-API hipMemcpy3DAsync because hipDrvMemcpy3DAsync on a
+// capturing stream copies at once and records no graph node.
+CUresult cuMemcpy3DAsync_f(const CUDA_MEMCPY3D* pCopy, CUstream hStream)
+{
+    bool has_offsets = pCopy->srcXInBytes || pCopy->srcY || pCopy->srcZ || pCopy->srcLOD || pCopy->dstXInBytes
+        || pCopy->dstY || pCopy->dstZ || pCopy->dstLOD;
+    hipArray_t array = pCopy->dstMemoryType == hipMemoryTypeArray ? pCopy->dstArray
+        : pCopy->srcMemoryType == hipMemoryTypeArray              ? pCopy->srcArray
+                                                                  : nullptr;
+    if (!array || has_offsets)
+        return hip_driver_result(hipDrvMemcpy3DAsync(pCopy, hStream));
+
+    size_t element_size = hip_array_element_size(array);
+    if (element_size == 0)
+        return hipErrorInvalidValue;
+
+    size_t height = pCopy->Height ? pCopy->Height : 1;
+    size_t depth = pCopy->Depth ? pCopy->Depth : 1;
+
+    hipMemcpy3DParms params = {};
+    params.extent = make_hipExtent(pCopy->WidthInBytes / element_size, height, depth);
+    if (pCopy->srcMemoryType == hipMemoryTypeArray)
+        params.srcArray = pCopy->srcArray;
+    else
+        params.srcPtr = hip_linear_side(
+            pCopy->srcMemoryType, pCopy->srcHost, pCopy->srcDevice, pCopy->srcPitch, params.extent.width,
+            pCopy->srcHeight ? pCopy->srcHeight : height
+        );
+    if (pCopy->dstMemoryType == hipMemoryTypeArray)
+        params.dstArray = pCopy->dstArray;
+    else
+        params.dstPtr = hip_linear_side(
+            pCopy->dstMemoryType, pCopy->dstHost, pCopy->dstDevice, pCopy->dstPitch, params.extent.width,
+            pCopy->dstHeight ? pCopy->dstHeight : height
+        );
+    if (pCopy->srcMemoryType == hipMemoryTypeHost)
+        params.kind = hipMemcpyHostToDevice;
+    else if (pCopy->dstMemoryType == hipMemoryTypeHost)
+        params.kind = hipMemcpyDeviceToHost;
+    else
+        params.kind = hipMemcpyDeviceToDevice;
+
+    hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+    hipError_t result = hip_driver_result(hipStreamIsCapturing(hStream, &status));
+    if (result == hipSuccess)
+        result = hip_driver_result(hipMemcpy3DAsync(&params, hStream));
+
+    // CUDA stages pageable host memory before cuMemcpy3DAsync returns, so callers free or
+    // reuse the buffer at once; HIP's 3D copies still access it afterwards
+    if (result == hipSuccess && status == hipStreamCaptureStatusNone
+        && (pCopy->srcMemoryType == hipMemoryTypeHost || pCopy->dstMemoryType == hipMemoryTypeHost))
+        result = hip_driver_result(hipStreamSynchronize(hStream));
+
+    return result;
+}
+
+CUresult cuTexObjectCreate_f(
+    CUtexObject* pTexObject,
+    const CUDA_RESOURCE_DESC* pResDesc,
+    const CUDA_TEXTURE_DESC* pTexDesc,
+    const CUDA_RESOURCE_VIEW_DESC* pResViewDesc
+)
+{
+    return hip_driver_result(hipTexObjectCreate(pTexObject, pResDesc, pTexDesc, pResViewDesc));
+}
+
+CUresult cuTexObjectDestroy_f(CUtexObject texObject) { return hip_driver_result(hipTexObjectDestroy(texObject)); }
+
+#else
 
 // the minimum CUDA version required from the driver
 #define WP_CUDA_DRIVER_VERSION 12000
@@ -321,6 +976,8 @@ bool init_cuda_driver()
     return cuda_driver_initialized;
 }
 
+#endif  // WP_ENABLE_HIP
+
 bool is_cuda_driver_initialized() { return cuda_driver_initialized; }
 
 bool check_cuda_result(cudaError_t code, const char* func, const char* file, int line)
@@ -571,6 +1228,8 @@ GraphAllocQueryResult graph_alloc_query(cudaGraphNode_t alloc_node, cudaGraphNod
     // free is independent of the query node, potentially causing use-after-free errors
     return GRAPH_ALLOC_QUERY_RESULT_USE_AFTER_FREE;
 }
+
+#if !WP_ENABLE_HIP
 
 #define DRIVER_ENTRY_POINT_ERROR driver_entry_point_error(__FUNCTION__)
 
@@ -1066,5 +1725,6 @@ CUresult cuMipmappedArrayGetLevel_f(CUarray* pLevelArray, CUmipmappedArray hMipm
     return pfn_cuMipmappedArrayGetLevel ? pfn_cuMipmappedArrayGetLevel(pLevelArray, hMipmappedArray, level)
                                         : DRIVER_ENTRY_POINT_ERROR;
 }
+#endif  // !WP_ENABLE_HIP
 
 #endif  // WP_ENABLE_CUDA

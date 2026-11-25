@@ -5,6 +5,8 @@ import multiprocessing as mp
 import sys
 import unittest
 
+import numpy as np
+
 import warp as wp
 from warp.tests.unittest_utils import *
 
@@ -47,6 +49,14 @@ def test_ipc_event_missing_interprocess_flag(test, device):
         output = capture.end()
 
     test.assertRegex(output, r"Warp UserWarning: IPC event handle appears to be invalid.")
+
+    # the failed call must not affect the next library algorithm on the device, as with the CUDA driver API
+    n = 100000
+    keys_np = np.random.default_rng(1).integers(0, 1 << 30, n, dtype=np.int32)
+    keys = wp.array(np.concatenate([keys_np, np.zeros(n, dtype=np.int32)]), device=device)
+    values = wp.array(np.arange(2 * n, dtype=np.int32), device=device)
+    wp.utils.radix_sort_pairs(keys, values, n)
+    assert_np_equal(keys.numpy()[:n], np.sort(keys_np))
 
 
 @wp.kernel

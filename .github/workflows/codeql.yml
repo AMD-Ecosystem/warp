@@ -5,8 +5,6 @@ name: "CodeQL"
 
 on:
   push:
-    tags:
-      - v*
     branches:
       - main
       - release-*

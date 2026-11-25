@@ -69,7 +69,10 @@ if __name__ == "__main__":
     print("Generating Warp differentiable kernel...")
     device = wp.get_device()
     print(f"Target device: {device.name}")
-    print(f"Target architecture: sm_{device.get_cuda_compile_arch()}")
+    if device.is_hip:
+        print(f"Target architecture: {device.arch_name}")
+    else:
+        print(f"Target architecture: sm_{device.get_cuda_compile_arch()}")
 
     # Compile module: generates .cu source (for C++ inclusion) and .ptx/.cubin (unused)
     # strip_hash=True: Predictable kernel names without hash suffix

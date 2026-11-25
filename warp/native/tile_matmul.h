@@ -17,6 +17,7 @@
 #pragma once
 
 #include "tile.h"
+#include "tile_matmul_mma.h"
 
 #ifdef __clang__
 // disable warnings related to C++17 extensions on CPU JIT builds
@@ -182,6 +183,11 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
     using ElemB = typename remove_reference<decltype(B.ptr[0])>::type;
     using ElemC = typename remove_reference<decltype(C.ptr[0])>::type;
 
+#if defined(WP_TILE_MMA)
+    if constexpr (tile_mma::supported<LayoutA, LayoutB, LayoutC, ElemA, ElemB, ElemC, T>())
+        return tile_mma::matmul<Accumulate, LayoutA, LayoutB, LayoutC>(A, B, C, alpha, beta);
+#endif
+
     // Direct pointer access with __restrict__ to enable compiler optimizations
     const ElemA* __restrict__ a_ptr = A.ptr;
     const ElemB* __restrict__ b_ptr = B.ptr;
@@ -346,7 +352,7 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul(
+CUDA_CALLABLE TileC& tile_matmul(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -367,7 +373,7 @@ TileC& tile_matmul(
     T alphaT = T(alpha);
     T betaT = T(beta);
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_matmul<false, typename TileA::Layout, typename TileB::Layout, typename TileC::Layout>(
         A.data, B.data, C.data, alphaT, betaT
     );
@@ -396,7 +402,7 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul_acc(
+CUDA_CALLABLE TileC& tile_matmul_acc(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -417,7 +423,7 @@ TileC& tile_matmul_acc(
     T alphaT = T(alpha);
     T betaT = T(beta);
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_matmul<true, typename TileA::Layout, typename TileB::Layout, typename TileC::Layout>(
         A.data, B.data, C.data, alphaT, betaT
     );
@@ -449,7 +455,7 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul_acc(
+CUDA_CALLABLE void adj_tile_matmul_acc(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,
@@ -477,7 +483,7 @@ void adj_tile_matmul_acc(
     T_B alpha_B = T_B(alpha);
     T_B beta_B = T_B(1.0);
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
     auto At = tile_transpose(A);
     auto Bt = tile_transpose(B);
 
@@ -529,7 +535,7 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul(
+CUDA_CALLABLE void adj_tile_matmul(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,
@@ -558,7 +564,7 @@ void adj_tile_matmul(
     T_B alpha_B = T_B(alpha);
     T_B beta_B = T_B(1.0);
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
     auto At = tile_transpose(A);
     auto Bt = tile_transpose(B);
 

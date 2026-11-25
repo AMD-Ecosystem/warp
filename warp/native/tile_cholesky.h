@@ -160,9 +160,9 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut&
     // Lower: Out(row, col), Upper: Out(col, row)
     auto idx = [](int row, int col) { return Upper ? tile_coord(col, row) : tile_coord(row, col); };
 
-#if defined(__CUDA_ARCH__)
-    __shared__ T W1[n * n];
-    __shared__ T W2[n * n];
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    WP_TILE_SHARED_ARRAY(T, W1, n * n);
+    WP_TILE_SHARED_ARRAY(T, W2, n * n);
 #else
     T W1[n * n];
     T W2[n * n];
@@ -273,7 +273,7 @@ CUDA_CALLABLE TileOut& tile_cholesky_impl(Fwd fun_forward, TileA& A, TileOut& Ou
 
     Out = A;
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_cholesky_impl<Upper>(A, Out);
 #else
     if constexpr (wp_is_null_func<Fwd>::value) {
@@ -323,7 +323,7 @@ adj_tile_cholesky_impl(BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileOut& 
     using T = typename TileA::Type;
     constexpr int n = TileA::Layout::Shape::dim(1);
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
 
     // CPU (block_dim == 1) or GPU-without-mathdx: cooperative scalar adjoint.
     // Leading sync mirrors the libmathdx branch below: be defensive against
@@ -340,8 +340,8 @@ adj_tile_cholesky_impl(BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileOut& 
         WP_TILE_SYNC();
         partitioned_gemm::cooperative_scalar_cholesky_adj<Upper>(adj_A, adj_Out, Out);
     } else {
-        __shared__ T W1[n * n];
-        __shared__ T W2[n * n];
+        WP_TILE_SHARED_ARRAY(T, W1, n * n);
+        WP_TILE_SHARED_ARRAY(T, W2, n * n);
 
         T alpha_one = T(1);
         T beta_zero = T(0);
@@ -410,7 +410,7 @@ CUDA_CALLABLE void tile_cholesky_inplace_impl(Fwd fun_forward, TileA& A)
     static_assert(TileA::Layout::Shape::N == 2, "Expected TileA::Layout::Shape::N == 2");
     static_assert(TileA::Layout::Shape::dim(0) == TileA::Layout::Shape::dim(1), "Expected TileA to be square");
 
-#if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
+#if (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_cholesky_impl<Upper>(A, A);
 #else
     if constexpr (wp_is_null_func<Fwd>::value) {

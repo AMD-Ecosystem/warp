@@ -779,6 +779,7 @@ def test_tile_reduce_axis_tier1(test, device, block_dim=TILE_DIM):
 
 
 def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
+    skip_if_shared_memory_exceeded(test, device, 2 * 8 * 8 * 128 * 4, block_dim)
     # 2D sum: axis=0, size 200 (forward and backward)
     x = wp.ones((200, 32), dtype=float, requires_grad=True, device=device)
     y = wp.zeros(32, dtype=float, requires_grad=True, device=device)

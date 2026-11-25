@@ -337,7 +337,8 @@ namespace cuBQL {
       }
     }
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    // device pass: use the toolchain's __int_as_float/__float_as_int builtins
 #else
     inline float __int_as_float(int i) { return (const float &)i; }
     inline int __float_as_int(float f) { return (const int &)f; }

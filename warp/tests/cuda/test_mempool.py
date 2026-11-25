@@ -149,6 +149,9 @@ def test_mempool_access_self(test, device):
 
 
 @unittest.skipUnless(get_cuda_device_pair_with_mempool_access_support(), "Requires devices with mempool access support")
+@unittest.skipUnless(
+    is_mempool_access_revocable(get_cuda_device_pair_with_mempool_access_support()), MEMPOOL_ACCESS_NOT_REVOCABLE
+)
 def test_mempool_access(test, _):
     target_device, peer_device = get_cuda_device_pair_with_mempool_access_support()
 
