@@ -63,10 +63,9 @@ def intersect_ray_aabb(start, rcp_dir, lower, upper):
         return 0
 
 
-def test_bvh(test, type, device, leaf_size, constructor=None):
+def test_bvh(test, type, device, leaf_size, constructor=None, num_bounds=100):
     rng = np.random.default_rng(123)
 
-    num_bounds = 100
     lowers = rng.random(size=(num_bounds, 3)) * 5.0
     uppers = lowers + rng.random(size=(num_bounds, 3)) * 5.0
 
@@ -136,6 +135,14 @@ def test_bvh_cubql_constructor(test, device):
     for leaf_size in [1, 2, 4]:
         test_bvh(test, "AABB", device, leaf_size, constructor="cubql")
         test_bvh(test, "ray", device, leaf_size, constructor="cubql")
+
+
+def test_bvh_cubql_constructor_large(test, device):
+    if not wp.is_cubql_available():
+        test.skipTest("cuBQL is not available")
+
+    # enough nodes for the refit paths that only large trees take
+    test_bvh(test, "AABB", device, 1, constructor="cubql", num_bounds=20000)
 
 
 def test_bvh_ray_query_inside_and_outside_bounds(test, device):
@@ -838,6 +845,7 @@ class TestBvh(unittest.TestCase):
 add_function_test(TestBvh, "test_bvh_aabb", test_bvh_query_aabb, devices=devices)
 add_function_test(TestBvh, "test_bvh_ray", test_bvh_query_ray, devices=devices)
 add_function_test(TestBvh, "test_bvh_cubql_constructor", test_bvh_cubql_constructor, devices=devices)
+add_function_test(TestBvh, "test_bvh_cubql_constructor_large", test_bvh_cubql_constructor_large, devices=devices)
 add_function_test(
     TestBvh,
     "test_bvh_ray_query_inside_and_outside_bounds",

@@ -1161,8 +1161,8 @@ void bvh_refit_device(BVH& bvh)
 #if defined(__HIP_PLATFORM_AMD__)
     // On AMD GPUs the bottom-up walk's per-node __threadfence() dominates on large trees; refit one depth level at a
     // time there instead. Its launch count (fixed, so the refit stays capturable) costs more than the walk on small
-    // trees.
-    if (bvh.num_leaf_nodes >= 32768) {
+    // trees. cuBQL trees keep no node depths, so they take the walk.
+    if (bvh.num_leaf_nodes >= 32768 && bvh.constructor_type != BVH_CONSTRUCTOR_CUBQL) {
         for (int depth = bvh_refit_max_depth(bvh); depth >= 1; depth--) {
             wp_launch_device(
                 WP_CURRENT_CONTEXT, refit_tree_at_depth, bvh.max_nodes,
