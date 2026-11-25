@@ -271,6 +271,9 @@ def test_graph_fill_drives_capture_while(test, device):
     # End-to-end pattern from mujoco_warp's solver: fill_ initializes a
     # capture_while counter at the top of the graph. Each replay must reset
     # the counter so the body runs the expected number of iterations.
+    if device.is_cuda and not wp.is_conditional_graph_supported():
+        test.skipTest("Conditional graph nodes are not supported on this device")
+
     counter = wp.empty(1, dtype=wp.int32, device=device)
     out = wp.zeros(1, dtype=wp.int32, device=device)
 
