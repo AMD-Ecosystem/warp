@@ -218,12 +218,17 @@ def test_radix_sort_pairs_bit_range(test, device):
         assert_np_equal(values.numpy()[:8], np.array((1, 5, 2, 6, 3, 7, 4, 8)))
 
 
-def _radix_sort_bits(keys, bit_width):
-    """Return the unsigned bit pattern a radix sort orders integer or floating-point keys by."""
+def _radix_sort_bits(keys, bit_width, negative_zero_is_zero=False):
+    """Return the unsigned bit pattern a radix sort orders integer or floating-point keys by.
+
+    With ``negative_zero_is_zero``, -0.0 is ordered as +0.0, as CUB does on CUDA devices.
+    """
     bits_type = np.uint32 if bit_width == 32 else np.uint64
     bits = keys.view(bits_type).copy()
     sign = bits_type(1) << bits_type(bit_width - 1)
     if np.issubdtype(keys.dtype, np.floating):
+        if negative_zero_is_zero:
+            bits[bits == sign] = 0
         # negative values with every bit flipped, others with the sign bit set
         bits = np.where((bits & sign) != 0, ~bits, bits | sign)
     elif np.issubdtype(keys.dtype, np.signedinteger):
@@ -268,13 +273,15 @@ def test_radix_sort_pairs_bit_range_to_key_width(test, device):
 
 
 def test_radix_sort_pairs_float_bit_range(test, device):
-    # Floating-point keys over partial bit ranges, ending below and at the key width, against a stable
-    # sort on the selected bits of the keys' radix encoding.
+    # Floating-point keys over bit ranges ending below and at the key width, against a stable sort on the
+    # selected bits of the keys' radix encoding. On CUDA devices -0.0 sorts as +0.0 and keeps its bits, as in
+    # CUB; Warp's CPU sort orders -0.0 before +0.0.
     rng = np.random.default_rng(44)
 
     for key_type, np_type, bit_width in ((wp.float32, np.float32, 32), (wp.float64, np.float64, 64)):
         bits_type = np.uint32 if bit_width == 32 else np.uint64
         ranges = (
+            (0, bit_width),
             (1, bit_width),
             (bit_width // 2, bit_width),
             (bit_width - 1, bit_width),
@@ -286,7 +293,9 @@ def test_radix_sort_pairs_float_bit_range(test, device):
             keys = (rng.standard_normal(count) * 10.0 ** rng.integers(-6, 6, count)).astype(np_type)
             keys[rng.integers(0, count, count // 8)] = keys[0]
             keys[:4] = (0.0, -0.0, np.inf, -np.inf)
-            bits = _radix_sort_bits(keys, bit_width)
+            # zeros of both signs spread through the input
+            keys[rng.choice(np.arange(4, count), 64, replace=False)] = np.tile(np.array((-0.0, 0.0), dtype=np_type), 32)
+            bits = _radix_sort_bits(keys, bit_width, negative_zero_is_zero=device.is_cuda)
 
             for begin_bit, end_bit in ranges:
                 with test.subTest(key_type=key_type, count=count, begin_bit=begin_bit, end_bit=end_bit):
