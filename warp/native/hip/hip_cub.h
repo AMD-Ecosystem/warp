@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "rocprim_radix_sort_fix.h"
+
 #include "../hip_compat.h"
 #include <hipcub/hipcub.hpp>
 
