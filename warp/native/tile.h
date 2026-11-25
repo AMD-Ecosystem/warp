@@ -368,8 +368,16 @@ template <int... V> using tile_shape_t = tile_tuple_t<V...>;
 template <int... V> using tile_stride_t = tile_tuple_t<V...>;
 
 #ifndef NDEBUG
+// printf and assert expand to a large amount of code on AMD GPUs; keep the checks out of line there so that a debug
+// build does not inline that code at every tile access
+#if defined(__HIP_DEVICE_COMPILE__)
+#define WP_TILE_CHECK_NOINLINE __attribute__((noinline))
+#else
+#define WP_TILE_CHECK_NOINLINE
+#endif
+
 template <typename Shape, typename Coord>
-inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* storage)
+WP_TILE_CHECK_NOINLINE inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* storage)
 {
     WP_PRAGMA_UNROLL
     for (int d = 0; d < Shape::N; ++d) {
@@ -390,7 +398,8 @@ inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* st
     return true;
 }
 
-template <int Size> inline CUDA_CALLABLE bool tile_check_linear_bounds(int linear, const char* storage)
+template <int Size>
+WP_TILE_CHECK_NOINLINE inline CUDA_CALLABLE bool tile_check_linear_bounds(int linear, const char* storage)
 {
     if (linear < 0 || linear >= Size) {
         printf("Warp tile index out of bounds in %s tile: linear index %d is outside [0, %d)\n", storage, linear, Size);
