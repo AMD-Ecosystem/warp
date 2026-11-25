@@ -104,7 +104,9 @@ void wp_texture_destroy_host(uint64_t tex_handle)
 // ============================================================================
 
 #include "cuda_util.h"
+#if WP_ENABLE_HIP
 #include "texture_software.h"
+#endif
 
 // Helper function to get CUDA array format from dtype
 static CUarray_format get_cuda_format(int dtype)
@@ -178,8 +180,10 @@ uint64_t wp_texture_create_device(
         return 0;
     }
 
+#if WP_ENABLE_HIP
     if (wp_texture_software_enabled(context, ndim))
         return wp_texture_software_create(context, ndim, shape, num_channels, dtype, num_mip_levels);
+#endif
 
     ContextGuard guard(context);
 
@@ -226,8 +230,10 @@ uint64_t wp_texture_create_device(
 
 void wp_texture_destroy_device(void* context, uint64_t array_handle, bool is_mipmapped)
 {
+#if WP_ENABLE_HIP
     if (wp_texture_software_owns(array_handle))
         return wp_texture_software_destroy(context, array_handle);
+#endif
     ContextGuard guard(context);
     if (array_handle == 0) {
         return;
@@ -246,8 +252,10 @@ uint64_t wp_texture_get_mip_level_array_device(void* context, uint64_t mipmap_ar
         return 0;
     }
 
+#if WP_ENABLE_HIP
     if (wp_texture_software_owns(mipmap_array_handle))
         return wp_texture_software_get_mip_level(mipmap_array_handle, level);
+#endif
 
     ContextGuard guard(context);
 
@@ -295,11 +303,13 @@ bool wp_texture_copy_device(
     void* stream
 )
 {
+#if WP_ENABLE_HIP
     if (wp_texture_software_owns_copy(dst_memory_type, dst_handle, src_memory_type, src_handle))
         return wp_texture_software_copy(
             context, width_bytes, height, depth, dst_memory_type, dst_handle, dst_pitch, dst_height, src_memory_type,
             src_handle, src_pitch, src_height, stream
         );
+#endif
     ContextGuard guard(context);
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
@@ -437,10 +447,12 @@ uint64_t wp_texture_object_create_device(
         return 0;
     }
 
+#if WP_ENABLE_HIP
     if (wp_texture_software_owns(array_handle))
         return wp_texture_software_object_create(
             context, array_handle, ndim, filter_mode, mip_filter_mode, address_modes, use_normalized_coords
         );
+#endif
 
     ContextGuard guard(context);
 
@@ -484,8 +496,10 @@ uint64_t wp_texture_object_create_device(
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
 {
+#if WP_ENABLE_HIP
     if (wp_texture_software_owns(tex_handle))
         return wp_texture_software_object_destroy(context, tex_handle);
+#endif
     ContextGuard guard(context);
 
     if (tex_handle != 0) {

@@ -10,7 +10,7 @@
 #include <mutex>
 #include <unordered_set>
 
-#if WP_ENABLE_CUDA
+#if WP_ENABLE_CUDA && WP_ENABLE_HIP
 
 namespace {
 
@@ -240,4 +240,4 @@ void wp_texture_software_object_destroy(void* context, uint64_t tex_handle)
     wp_free_device(context, reinterpret_cast<void*>(tex_handle & ~uint64_t(1)));
 }
 
-#endif  // WP_ENABLE_CUDA
+#endif  // WP_ENABLE_CUDA && WP_ENABLE_HIP
