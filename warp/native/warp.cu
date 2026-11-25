@@ -4749,6 +4749,10 @@ size_t wp_hip_compile_program(
 
     stored_options.push_back(verify_fp ? "-DWP_VERIFY_FP" : "-UWP_VERIFY_FP");
     stored_options.push_back("-DWP_ENABLE_MATHDX=0");
+#if defined(_WIN32)
+    // mipmapped textures may be sampled in software on GPUs with image support (see texture.cpp)
+    stored_options.push_back("-DWP_TEXTURE_SOFTWARE_FALLBACK=1");
+#endif
 
     if (fast_math) {
         // what NVRTC's --use_fast_math enables (approximate functions and division, denormals flushed to zero);

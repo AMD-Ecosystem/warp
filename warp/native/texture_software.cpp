@@ -6,6 +6,7 @@
 #include "texture.h"
 #include "texture_software.h"
 
+#include <algorithm>
 #include <mutex>
 #include <unordered_set>
 
@@ -13,7 +14,8 @@
 
 namespace {
 
-// Texel storage that stands in for a CUDA array
+// Texel storage that stands in for a CUDA array, or for a mipmapped array and its levels. The levels of a
+// mipmapped array are stored one after another in a single allocation, in the layout of the CPU Texture.
 struct SoftwareTextureArray {
     void* texels;
     int width;
@@ -21,6 +23,9 @@ struct SoftwareTextureArray {
     int depth;
     int num_channels;
     int dtype;
+    int num_mip_levels;
+    SoftwareTextureArray* levels[WP_TEXTURE_MAX_MIP_LEVELS];  // views of each level (mipmapped arrays only)
+    bool is_level;  // a view of one level, owned by its mipmapped array
 };
 
 // Memory types as texture.py passes them (the CUDA driver's values)
@@ -37,6 +42,16 @@ void track(uint64_t handle, bool add)
         g_handles.insert(handle);
     else
         g_handles.erase(handle);
+}
+
+// shape of a mip level: each sampled dimension halves per level, down to 1
+int level_dim(int dim, int level) { return dim > 0 ? std::max(1, dim >> level) : 0; }
+
+size_t level_bytes(const SoftwareTextureArray* array, int level)
+{
+    return size_t(level_dim(array->width, level)) * std::max(1, level_dim(array->height, level))
+        * std::max(1, level_dim(array->depth, level)) * array->num_channels
+        * wp::get_texture_bytes_per_channel(array->dtype);
 }
 
 }  // namespace
@@ -58,7 +73,8 @@ bool wp_texture_software_owns_copy(int dst_memory_type, uint64_t dst_handle, int
         || (src_memory_type == kArray && wp_texture_software_owns(src_handle));
 }
 
-uint64_t wp_texture_software_create(void* context, int ndim, int* shape, int num_channels, int dtype)
+uint64_t
+wp_texture_software_create(void* context, int ndim, int* shape, int num_channels, int dtype, int num_mip_levels)
 {
     SoftwareTextureArray* array = new SoftwareTextureArray();
     array->width = shape[0];
@@ -66,14 +82,35 @@ uint64_t wp_texture_software_create(void* context, int ndim, int* shape, int num
     array->depth = ndim > 2 ? shape[2] : 0;
     array->num_channels = num_channels;
     array->dtype = dtype;
+    array->num_mip_levels = num_mip_levels;
 
-    size_t bytes = size_t(array->width) * (array->height ? array->height : 1) * (array->depth ? array->depth : 1)
-        * num_channels * wp::get_texture_bytes_per_channel(dtype);
+    size_t bytes = 0;
+    for (int level = 0; level < num_mip_levels; ++level)
+        bytes += level_bytes(array, level);
+
     array->texels = wp_alloc_device(context, bytes, "(native:texture)");
     if (!array->texels) {
         delete array;
         return 0;
     }
+
+    if (num_mip_levels > 1) {
+        size_t offset = 0;
+        for (int level = 0; level < num_mip_levels; ++level) {
+            SoftwareTextureArray* view = new SoftwareTextureArray(*array);
+            view->texels = static_cast<char*>(array->texels) + offset;
+            view->width = level_dim(array->width, level);
+            view->height = level_dim(array->height, level);
+            view->depth = level_dim(array->depth, level);
+            view->num_mip_levels = 1;
+            std::fill(std::begin(view->levels), std::end(view->levels), nullptr);
+            view->is_level = true;
+            array->levels[level] = view;
+            track(reinterpret_cast<uint64_t>(view), true);
+            offset += level_bytes(array, level);
+        }
+    }
+
     track(reinterpret_cast<uint64_t>(array), true);
     return reinterpret_cast<uint64_t>(array);
 }
@@ -82,8 +119,24 @@ void wp_texture_software_destroy(void* context, uint64_t array_handle)
 {
     SoftwareTextureArray* array = reinterpret_cast<SoftwareTextureArray*>(array_handle);
     track(array_handle, false);
+    for (int level = 0; level < WP_TEXTURE_MAX_MIP_LEVELS; ++level) {
+        if (array->levels[level]) {
+            track(reinterpret_cast<uint64_t>(array->levels[level]), false);
+            delete array->levels[level];
+        }
+    }
     wp_free_device(context, array->texels);
     delete array;
+}
+
+uint64_t wp_texture_software_get_mip_level(uint64_t array_handle, int level)
+{
+    const SoftwareTextureArray* array = reinterpret_cast<const SoftwareTextureArray*>(array_handle);
+    if (level < 0 || level >= array->num_mip_levels || !array->levels[level]) {
+        wp::set_error_string("Warp error: Invalid mip level %d", level);
+        return 0;
+    }
+    return reinterpret_cast<uint64_t>(array->levels[level]);
 }
 
 bool wp_texture_software_copy(
@@ -140,35 +193,51 @@ uint64_t wp_texture_software_object_create(
 )
 {
     const SoftwareTextureArray* array = reinterpret_cast<const SoftwareTextureArray*>(array_handle);
+    const int num_mip_levels = array->num_mip_levels;
 
-    // the sampler's view of the texture, a single level pointing at the device texels
+    int widths[WP_TEXTURE_MAX_MIP_LEVELS];
+    int heights[WP_TEXTURE_MAX_MIP_LEVELS];
+    int depths[WP_TEXTURE_MAX_MIP_LEVELS];
+    for (int level = 0; level < num_mip_levels; ++level) {
+        widths[level] = level_dim(array->width, level);
+        heights[level] = level_dim(array->height, level);
+        depths[level] = level_dim(array->depth, level);
+    }
+
+    // the sampler's view of the texture, with the level pointers at the device texels (the CPU Texture lays the
+    // levels out the same way, so its offsets locate them)
     wp::Texture desc(
-        ndim, 1, &array->width, &array->height, &array->depth, array->num_channels, array->dtype, filter_mode,
-        mip_filter_mode, address_modes[0], ndim > 1 ? address_modes[1] : 0, ndim > 2 ? address_modes[2] : 0,
-        use_normalized_coords
+        ndim, num_mip_levels, widths, heights, depths, array->num_channels, array->dtype, filter_mode, mip_filter_mode,
+        address_modes[0], ndim > 1 ? address_modes[1] : 0, ndim > 2 ? address_modes[2] : 0, use_normalized_coords
     );
     void* host_texels = desc.data;
     desc.data = array->texels;
-    desc.mip_data[0] = array->texels;
+    for (int level = 0; level < num_mip_levels; ++level)
+        desc.mip_data[level] = static_cast<char*>(array->texels) + desc.mip_offsets[level];
 
     wp::Texture* desc_device = (wp::Texture*)wp_alloc_device(context, sizeof(wp::Texture), "(native:texture)");
+    uint64_t tex_handle = 0;
     if (desc_device) {
         if (wp_memcpy_h2d(context, desc_device, &desc, sizeof(wp::Texture))) {
-            track(reinterpret_cast<uint64_t>(desc_device), true);
+            tex_handle = reinterpret_cast<uint64_t>(desc_device);
+            // on a GPU that samples this kind of texture in hardware, kernels tell a software texture by the lowest
+            // bit of its handle (see WP_TEXTURE_SOFTWARE_FALLBACK in texture.h)
+            if (!wp_texture_software_enabled(context, ndim))
+                tex_handle |= 1;
+            track(tex_handle, true);
         } else {
             wp_free_device(context, desc_device);
-            desc_device = nullptr;
         }
     }
 
     desc.data = host_texels;
-    return reinterpret_cast<uint64_t>(desc_device);
+    return tex_handle;
 }
 
 void wp_texture_software_object_destroy(void* context, uint64_t tex_handle)
 {
     track(tex_handle, false);
-    wp_free_device(context, reinterpret_cast<void*>(tex_handle));
+    wp_free_device(context, reinterpret_cast<void*>(tex_handle & ~uint64_t(1)));
 }
 
 #endif  // WP_ENABLE_CUDA

@@ -178,15 +178,8 @@ uint64_t wp_texture_create_device(
         return 0;
     }
 
-#if WP_ENABLE_HIP
-    if (num_mip_levels > 1) {
-        wp::set_error_string("Warp error: Mipmapped textures are not supported on AMD GPUs");
-        return 0;
-    }
-#endif
-
     if (wp_texture_software_enabled(context, ndim))
-        return wp_texture_software_create(context, ndim, shape, num_channels, dtype);
+        return wp_texture_software_create(context, ndim, shape, num_channels, dtype, num_mip_levels);
 
     ContextGuard guard(context);
 
@@ -206,6 +199,18 @@ uint64_t wp_texture_create_device(
 
     if (num_mip_levels > 1) {
         CUmipmappedArray mipmap_array = NULL;
+#if WP_ENABLE_HIP && defined(_WIN32)
+        // HIP documents its mipmapped arrays as still under development on Windows: where they cannot be created,
+        // keep the texture in device memory and sample it in software (WP_TEXTURE_SOFTWARE_FALLBACK in texture.h)
+        CUarray level_array = NULL;
+        if (cuMipmappedArrayCreate_f(&mipmap_array, &arr_desc, (unsigned int)num_mip_levels) != CUDA_SUCCESS
+            || cuMipmappedArrayGetLevel_f(&level_array, mipmap_array, 0) != CUDA_SUCCESS) {
+            if (mipmap_array)
+                (void)cuMipmappedArrayDestroy_f(mipmap_array);
+            return wp_texture_software_create(context, ndim, shape, num_channels, dtype, num_mip_levels);
+        }
+        return reinterpret_cast<uint64_t>(mipmap_array);
+#endif
         if (!check_cu(cuMipmappedArrayCreate_f(&mipmap_array, &arr_desc, (unsigned int)num_mip_levels))) {
             return 0;
         }
@@ -240,6 +245,9 @@ uint64_t wp_texture_get_mip_level_array_device(void* context, uint64_t mipmap_ar
         wp::set_error_string("Warp error: Null mipmapped array handle");
         return 0;
     }
+
+    if (wp_texture_software_owns(mipmap_array_handle))
+        return wp_texture_software_get_mip_level(mipmap_array_handle, level);
 
     ContextGuard guard(context);
 

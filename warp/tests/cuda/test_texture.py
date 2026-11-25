@@ -2672,6 +2672,20 @@ def sample_texture3d_mipmap(
     output[i, j, k] = wp.texture_sample(tex, wp.vec3f(u, v, w), dtype=float, lod=lod)
 
 
+@wp.kernel
+def sample_texture2d_mipmap_float(
+    tex: wp.Texture2D,
+    output: wp.array2d(dtype=float),
+    width: int,
+    height: int,
+    lod: float,
+):
+    i, j = wp.tid()
+    u = (wp.float(j) + 0.5) / wp.float(width)
+    v = (wp.float(i) + 0.5) / wp.float(height)
+    output[i, j] = wp.texture_sample(tex, wp.vec2f(u, v), dtype=float, lod=lod)
+
+
 def test_texture2d_mipmap_full_chain(test, device):
     """A texture created with num_mip_levels=0 should expose the full chain down to 1x1."""
     width = height = 16
@@ -2777,6 +2791,53 @@ def test_texture2d_mipmap_rejects_copy(test, device):
         tex.copy_from(data)
     with test.assertRaises(RuntimeError):
         tex.copy_to(np.zeros_like(data))
+
+
+def test_texture_mipmap_matches_cpu(test, device):
+    """Sampling a mipmapped texture between and at mip levels gives the CPU texture's result."""
+    rng = np.random.default_rng(7)
+    cases = (
+        (wp.Texture1D, rng.random(32, dtype=np.float32)),
+        (wp.Texture2D, rng.random((16, 32), dtype=np.float32)),
+        (wp.Texture3D, rng.random((8, 16, 8), dtype=np.float32)),
+    )
+    lods = (0.0, 0.5, 1.25, 2.0, 2.75)
+    for tex_type, data in cases:
+        for mip_filter_mode in (wp.TextureFilterMode.CLOSEST, wp.TextureFilterMode.LINEAR):
+            with test.subTest(tex_type=tex_type.__name__, mip_filter_mode=mip_filter_mode):
+                results = []
+                for target in ("cpu", device):
+                    tex = tex_type(data=data, num_mip_levels=0, mip_filter_mode=mip_filter_mode, device=target)
+                    out = []
+                    for lod in lods:
+                        if data.ndim == 1:
+                            output = wp.zeros(data.shape, dtype=float, device=target)
+                            wp.launch(
+                                sample_texture1d_mipmap,
+                                dim=data.shape,
+                                inputs=[tex, output, data.shape[0], lod],
+                                device=target,
+                            )
+                        elif data.ndim == 2:
+                            output = wp.zeros(data.shape, dtype=float, device=target)
+                            wp.launch(
+                                sample_texture2d_mipmap_float,
+                                dim=data.shape,
+                                inputs=[tex, output, data.shape[1], data.shape[0], lod],
+                                device=target,
+                            )
+                        else:
+                            output = wp.zeros(data.shape, dtype=float, device=target)
+                            wp.launch(
+                                sample_texture3d_mipmap,
+                                dim=data.shape,
+                                inputs=[tex, output, data.shape[2], data.shape[1], data.shape[0], lod],
+                                device=target,
+                            )
+                        out.append(output.numpy())
+                    results.append(np.stack(out))
+                # texture hardware interpolates with reduced-precision weights
+                np.testing.assert_allclose(results[1], results[0], atol=1e-2)
 
 
 def test_texture_mipmap_invalid_levels(test, device):
@@ -3119,6 +3180,7 @@ add_function_test(
     test_texture_mipmap_invalid_levels,
     devices=all_devices,
 )
+add_function_test(TestTexture, "test_texture_mipmap_matches_cpu", test_texture_mipmap_matches_cpu, devices=cuda_devices)
 
 
 if __name__ == "__main__":

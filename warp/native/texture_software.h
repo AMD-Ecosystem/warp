@@ -3,7 +3,8 @@
 // Device textures sampled in software, for GPUs without image hardware (AMD GPUs whose HIP
 // device reports no image support) and for 3D textures on GPUs without 3D linear filtering (gfx90a). The texels live in
 // ordinary device memory and the texture handle points to a device copy of the same Texture struct the CPU sampler
-// reads, so kernels built for those GPUs use the CPU sampling code unchanged.
+// reads, so kernels built for those GPUs use the CPU sampling code unchanged. Mipmapped textures are kept here too
+// where the HIP runtime cannot create a mipmapped array (Windows); see WP_TEXTURE_SOFTWARE_FALLBACK in texture.h.
 
 #pragma once
 
@@ -15,8 +16,11 @@ bool wp_texture_software_enabled(void* context, int ndim);
 bool wp_texture_software_owns(uint64_t handle);
 bool wp_texture_software_owns_copy(int dst_memory_type, uint64_t dst_handle, int src_memory_type, uint64_t src_handle);
 
-uint64_t wp_texture_software_create(void* context, int ndim, int* shape, int num_channels, int dtype);
+uint64_t
+wp_texture_software_create(void* context, int ndim, int* shape, int num_channels, int dtype, int num_mip_levels);
 void wp_texture_software_destroy(void* context, uint64_t array_handle);
+// the array handle of one level of a mipmapped texture's array
+uint64_t wp_texture_software_get_mip_level(uint64_t array_handle, int level);
 bool wp_texture_software_copy(
     void* context,
     unsigned width_bytes,
