@@ -846,6 +846,33 @@ def test_atomic_double_deterministic(test, device):
     assert_equal_repeated(launch_once)
 
 
+def test_atomic_double_deterministic_large(test, device):
+    """Verify float64 atomics stay bit-exact across runs when the reduction spans many GPU blocks."""
+    n = 1 << 22
+    out_size = 64
+    rng = np.random.default_rng(68)
+
+    # values over 16 orders of magnitude make the sum depend on the order of the additions
+    data_np = rng.standard_normal(n) * 10.0 ** rng.integers(-8, 8, size=n)
+    indices_np = rng.integers(0, out_size, size=n, dtype=np.int32)
+
+    data = wp.array(data_np, dtype=wp.float64, device=device)
+    indices = wp.array(indices_np, dtype=wp.int32, device=device)
+
+    def launch_once():
+        output = wp.zeros(out_size, dtype=wp.float64, device=device)
+        wp.launch(
+            atomic_double_kernel,
+            dim=n,
+            inputs=[data, indices],
+            outputs=[output],
+            device=device,
+        )
+        return output.numpy().copy()
+
+    assert_equal_repeated(launch_once, runs=8)
+
+
 def test_vec3_atomic_add_deterministic(test, device):
     """Verify deterministic mode for composite ``wp.vec3`` atomic adds."""
     n = 1024
@@ -1084,6 +1111,7 @@ for _name in (
     "test_transposed_2d_atomic_add",
     "test_atomic_half_deterministic",
     "test_atomic_double_deterministic",
+    "test_atomic_double_deterministic_large",
     "test_vec3_atomic_add_deterministic",
     "test_vec3_atomic_minmax_deterministic",
     "test_mat33_atomic_add_deterministic",
