@@ -168,6 +168,7 @@ add_function_test(
     TestClangCUDA, "test_invalid_native_func_compile_error", test_invalid_native_func_compile_error, devices=devices
 )
 
+
 def test_llvm_cuda_unsupported(test, device):
     saved_llvm_cuda = wp.config.llvm_cuda
     wp.config.llvm_cuda = True
