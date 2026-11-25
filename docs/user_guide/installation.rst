@@ -87,7 +87,7 @@ They depend on the ROCm Python packages, which are hosted on AMD's package index
 
 .. code-block:: console
 
-    $ pip install https://github.com/AMD-Ecosystem/warp/releases/download/v1.14.0+rocm10.2.0/warp_lang-1.14.0+rocm10.2.0-py3-none-manylinux_2_28_x86_64.whl --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
+    $ pip install https://github.com/AMD-Ecosystem/warp/releases/download/v1.15.0+rocm10.2.0/warp_lang-1.15.0+rocm10.2.0-py3-none-manylinux_2_28_x86_64.whl --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
 
 CUDA Requirements
 -----------------
