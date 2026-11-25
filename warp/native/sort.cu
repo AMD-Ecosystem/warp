@@ -13,6 +13,9 @@
 
 #include <cassert>
 #include <unordered_map>
+#if WP_ENABLE_HIP
+#include <type_traits>
+#endif
 
 #include <cub/cub.cuh>
 
@@ -73,10 +76,52 @@ void radix_sort_release(void* context, void* stream)
     }
 }
 
+#if WP_ENABLE_HIP
+// rocPRIM sorts floating-point keys over their full width only. For a partial bit range, the keys are sorted by the
+// bit pattern a radix sort orders them by (negative values with every bit flipped, others with the sign bit set), as
+// unsigned integers over the same range, and decoded afterwards.
+template <typename Bits> __global__ void radix_sort_float_encode(Bits* keys, int n)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < n) {
+        const Bits sign = Bits(1) << (sizeof(Bits) * 8 - 1);
+        const Bits key = keys[i];
+        keys[i] = (key & sign) ? Bits(~key) : Bits(key | sign);
+    }
+}
+
+template <typename Bits> __global__ void radix_sort_float_decode(Bits* keys, int n)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < n) {
+        const Bits sign = Bits(1) << (sizeof(Bits) * 8 - 1);
+        const Bits key = keys[i];
+        keys[i] = (key & sign) ? Bits(key ^ sign) : Bits(~key);
+    }
+}
+#endif
+
 template <typename KeyType, typename ValueType>
 void radix_sort_pairs_device(void* context, KeyType* keys, ValueType* values, int n, int begin_bit, int end_bit)
 {
     ContextGuard guard(context);
+
+#if WP_ENABLE_HIP
+    if constexpr (std::is_floating_point<KeyType>::value) {
+        if (n > 0 && (begin_bit != 0 || end_bit != int(sizeof(KeyType) * 8))) {
+            using Bits = std::conditional_t<sizeof(KeyType) == 4, uint32_t, uint64_t>;
+            Bits* bits = reinterpret_cast<Bits*>(keys);
+            cudaStream_t stream = static_cast<cudaStream_t>(wp_cuda_stream_get_current());
+            const int blocks = (n + 255) / 256;
+            radix_sort_float_encode<Bits><<<blocks, 256, 0, stream>>>(bits, n);
+            check_cuda(cudaGetLastError());
+            radix_sort_pairs_device<Bits, ValueType>(context, bits, values, n, begin_bit, end_bit);
+            radix_sort_float_decode<Bits><<<blocks, 256, 0, stream>>>(bits, n);
+            check_cuda(cudaGetLastError());
+            return;
+        }
+    }
+#endif
 
     cub::DoubleBuffer<KeyType> d_keys(keys, keys + n);
     cub::DoubleBuffer<ValueType> d_values(values, values + n);
