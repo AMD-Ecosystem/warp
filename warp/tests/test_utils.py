@@ -219,11 +219,15 @@ def test_radix_sort_pairs_bit_range(test, device):
 
 
 def _radix_sort_bits(keys, bit_width):
-    """Return the unsigned bit pattern a radix sort orders signed or unsigned integer keys by."""
+    """Return the unsigned bit pattern a radix sort orders integer or floating-point keys by."""
     bits_type = np.uint32 if bit_width == 32 else np.uint64
     bits = keys.view(bits_type).copy()
-    if np.issubdtype(keys.dtype, np.signedinteger):
-        bits ^= bits_type(1) << bits_type(bit_width - 1)
+    sign = bits_type(1) << bits_type(bit_width - 1)
+    if np.issubdtype(keys.dtype, np.floating):
+        # negative values with every bit flipped, others with the sign bit set
+        bits = np.where((bits & sign) != 0, ~bits, bits | sign)
+    elif np.issubdtype(keys.dtype, np.signedinteger):
+        bits ^= sign
     return bits
 
 
@@ -261,6 +265,44 @@ def test_radix_sort_pairs_bit_range_to_key_width(test, device):
                     order = np.argsort(bits >> bits_type(begin_bit), kind="stable")
                     np.testing.assert_array_equal(wp_values.numpy()[:count], order)
                     np.testing.assert_array_equal(wp_keys.numpy()[:count], keys[order])
+
+
+def test_radix_sort_pairs_float_bit_range(test, device):
+    # Floating-point keys over partial bit ranges, ending below and at the key width, against a stable
+    # sort on the selected bits of the keys' radix encoding.
+    rng = np.random.default_rng(44)
+
+    for key_type, np_type, bit_width in ((wp.float32, np.float32, 32), (wp.float64, np.float64, 64)):
+        bits_type = np.uint32 if bit_width == 32 else np.uint64
+        ranges = (
+            (1, bit_width),
+            (bit_width // 2, bit_width),
+            (bit_width - 1, bit_width),
+            (0, bit_width - 1),
+            (4, bit_width - 4),
+            (3, bit_width // 2),
+        )
+        for count in (1025, 4097, 1 << 20, (1 << 21) + 3):
+            keys = (rng.standard_normal(count) * 10.0 ** rng.integers(-6, 6, count)).astype(np_type)
+            keys[rng.integers(0, count, count // 8)] = keys[0]
+            keys[:4] = (0.0, -0.0, np.inf, -np.inf)
+            bits = _radix_sort_bits(keys, bit_width)
+
+            for begin_bit, end_bit in ranges:
+                with test.subTest(key_type=key_type, count=count, begin_bit=begin_bit, end_bit=end_bit):
+                    key_storage = np.zeros(2 * count, dtype=np_type)
+                    key_storage[:count] = keys
+                    value_storage = np.zeros(2 * count, dtype=np.int32)
+                    value_storage[:count] = np.arange(count, dtype=np.int32)
+                    wp_keys = wp.array(key_storage, dtype=key_type, device=device)
+                    wp_values = wp.array(value_storage, dtype=int, device=device)
+
+                    wp.utils.radix_sort_pairs(wp_keys, wp_values, count, begin_bit=begin_bit, end_bit=end_bit)
+
+                    mask = bits_type((1 << (end_bit - begin_bit)) - 1)
+                    order = np.argsort((bits >> bits_type(begin_bit)) & mask, kind="stable")
+                    np.testing.assert_array_equal(wp_values.numpy()[:count], order)
+                    np.testing.assert_array_equal(wp_keys.numpy()[:count].view(bits_type), keys[order].view(bits_type))
 
 
 def test_radix_sort_pairs_value_types(test, device):
@@ -823,6 +865,9 @@ add_function_test(
     "test_radix_sort_pairs_bit_range_to_key_width",
     test_radix_sort_pairs_bit_range_to_key_width,
     devices=devices,
+)
+add_function_test(
+    TestUtils, "test_radix_sort_pairs_float_bit_range", test_radix_sort_pairs_float_bit_range, devices=devices
 )
 add_function_test(TestUtils, "test_radix_sort_pairs_value_types", test_radix_sort_pairs_value_types, devices=devices)
 add_function_test(
