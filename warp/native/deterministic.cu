@@ -19,6 +19,9 @@
 
 #include <cub/cub.cuh>
 #include <thrust/iterator/transform_iterator.h>
+#if WP_ENABLE_HIP
+#include <rocprim/device/device_reduce_by_key.hpp>
+#endif
 
 namespace {
 
@@ -206,6 +209,41 @@ template <typename T> struct ReduceByKeyOp {
         }
     }
 };
+
+// Reduction of sorted runs whose floating-point result must not change from run to run. CUB's ReduceByKey gives that;
+// rocPRIM's reduce_by_key, behind hipCUB's, does not, so HIP uses rocPRIM's deterministic variant.
+template <
+    typename KeysIn,
+    typename UniqueOut,
+    typename ValuesIn,
+    typename AggregatesOut,
+    typename NumRunsOut,
+    typename Op>
+cudaError_t run_to_run_reduce_by_key(
+    void* temp,
+    size_t& temp_size,
+    KeysIn keys,
+    UniqueOut unique,
+    ValuesIn values,
+    AggregatesOut aggregates,
+    NumRunsOut num_runs,
+    Op op,
+    int count,
+    cudaStream_t stream
+)
+{
+#if WP_ENABLE_HIP
+    using key_type = typename std::iterator_traits<KeysIn>::value_type;
+    return rocprim::deterministic_reduce_by_key(
+        temp, temp_size, keys, values, size_t(count), unique, aggregates, num_runs, op, rocprim::equal_to<key_type>(),
+        stream
+    );
+#else
+    return cub::DeviceReduce::ReduceByKey(
+        temp, temp_size, keys, unique, values, aggregates, num_runs, op, count, stream
+    );
+#endif
+}
 
 struct DestIndexTransform {
     __host__ __device__ int operator()(const int64_t& key) const { return dest_index_from_key(key); }
@@ -562,12 +600,10 @@ void query_raw_scalar_temp_sizes(
 
     auto dest_keys = thrust::make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
     ReduceByKeyOp<T> reduce_op { op };
-    check_cuda(
-        cub::DeviceReduce::ReduceByKey(
-            nullptr, reduce_temp_size, dest_keys, static_cast<int*>(nullptr), static_cast<T*>(nullptr),
-            static_cast<T*>(nullptr), static_cast<int*>(nullptr), reduce_op, count, stream
-        )
-    );
+    check_cuda(run_to_run_reduce_by_key(
+        nullptr, reduce_temp_size, dest_keys, static_cast<int*>(nullptr), static_cast<T*>(nullptr),
+        static_cast<T*>(nullptr), static_cast<int*>(nullptr), reduce_op, count, stream
+    ));
 }
 
 void query_binned_float_scalar_temp_sizes(
@@ -908,12 +944,10 @@ void reduce_raw_scalar_run_to_run(
     auto dest_keys = thrust::make_transform_iterator(d_keys.Current(), DestIndexTransform {});
 
     ReduceByKeyOp<T> reduce_op { op };
-    check_cuda(
-        cub::DeviceReduce::ReduceByKey(
-            reduce_temp, reduce_temp_size, dest_keys, unique_dests, d_values.Current(), aggregates, num_runs, reduce_op,
-            count, stream
-        )
-    );
+    check_cuda(run_to_run_reduce_by_key(
+        reduce_temp, reduce_temp_size, dest_keys, unique_dests, d_values.Current(), aggregates, num_runs, reduce_op,
+        count, stream
+    ));
 
     const int num_blocks = deterministic_num_blocks(count);
     apply_reduced_runs_kernel<T><<<num_blocks, DETERMINISTIC_BLOCK_SIZE, 0, stream>>>(

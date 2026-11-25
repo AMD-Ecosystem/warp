@@ -29,7 +29,7 @@ import ctypes
 import itertools
 import re
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -95,7 +95,10 @@ def det_buffer_allocation_scope(device, stream_is_capturing):
     if previous_mode < 0:
         raise RuntimeError(f"Failed to switch thread capture mode: {runtime.get_error_string()}")
     try:
-        with warp.ScopedStream(alloc_stream, sync_enter=False):
+        # HIP refuses stream-ordered allocations on every stream while a blocking stream is captured, whatever the
+        # capture mode, so allocate these buffers without the memory pool there
+        mempool_scope = warp.ScopedMempool(device, False) if device.is_hip else nullcontext()
+        with warp.ScopedStream(alloc_stream, sync_enter=False), mempool_scope:
             yield
         # Ensure allocations/initialization on the allocation stream complete
         # before captured work can use the memory. Call the native sync
