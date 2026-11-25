@@ -5658,6 +5658,11 @@ bool wp_cuda_set_kernel_cluster_attrs(void* kernel, int cx, int cy, int cz)
     if (!kernel)
         return false;
 
+#if WP_ENABLE_HIP
+    // AMD GPUs have no thread block clusters; launches run unclustered
+    return true;
+#endif
+
     int total = cx * cy * cz;
     if (total <= 1)
         return true;  // (1,1,1) and other unit shapes are pure no-ops.
@@ -5679,6 +5684,11 @@ int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int 
 {
     if (!kernel || !context)
         return 1;
+
+#if WP_ENABLE_HIP
+    // AMD GPUs have no thread block clusters
+    return 1;
+#endif
 
     ContextGuard guard(context);
 
@@ -5777,12 +5787,17 @@ size_t wp_cuda_launch_kernel(
     if (cluster_dim <= 0) {
         cluster_dim = 1;
     }
+#if WP_ENABLE_HIP
+    // AMD GPUs have no thread block clusters
+    cluster_dim = 1;
+#else
     if (cluster_dim > 1) {
         ContextInfo* context_info = get_context_info(static_cast<CUcontext>(context));
         if (!context_info || !context_info->device_info || context_info->device_info->arch < 90) {
             cluster_dim = 1;
         }
     }
+#endif
 
     unsigned int grid_x, grid_y = 1, grid_z = 1;
 

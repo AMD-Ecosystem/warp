@@ -26,7 +26,9 @@ def get_cluster_compile_arch(device):
 
 def cluster_compile_devices():
     """CUDA test devices that can compile and run thread block clusters."""
-    return [d for d in get_cuda_test_devices() if d.arch >= 90 and get_cluster_compile_arch(d) is not None]
+    return [
+        d for d in get_cuda_test_devices() if d.is_cluster_launch_supported and get_cluster_compile_arch(d) is not None
+    ]
 
 
 def set_cluster_compile_arch(test, device):
@@ -167,7 +169,7 @@ def test_cluster_kernel_runs_on_all_devices(test, device):
     # Keep the ambient target here rather than calling set_cluster_compile_arch(),
     # so Hopper+ devices compiling below sm90 exercise the dropped-attribute error.
     compile_arch = device.get_cuda_compile_arch() if device.is_cuda else None
-    if device.is_cuda and device.arch >= 90 and compile_arch < 90:
+    if device.is_cluster_launch_supported and compile_arch < 90:
         with test.assertRaisesRegex(RuntimeError, rf"compiling for sm_{compile_arch}.*cluster attribute is dropped"):
             wp.launch(fill_index, dim=n, inputs=[a], device=device, block_dim=128)
         return
@@ -366,8 +368,8 @@ def test_apic_save_load_preserves_clusters(test, device):
 
 def test_max_cluster_dim_unsupported_returns_one(test, device):
     # get_cuda_max_cluster_dim reports 1 on devices that cannot form clusters
-    # (CPU and sub-Hopper CUDA).
-    if not (device.is_cuda and device.arch >= 90):
+    # (CPU, sub-Hopper CUDA and AMD GPUs).
+    if not device.is_cluster_launch_supported:
         test.assertEqual(wp.get_cuda_max_cluster_dim(query_probe, device), 1)
 
 
@@ -486,6 +488,9 @@ class TestClusterDim(unittest.TestCase):
         # it exercises the "dropped" branch directly (the same compile-path check
         # also fires for JIT loads onto a cluster-capable device compiled below
         # sm90, e.g. with warp.config.ptx_target_arch < 90).
+        if not {80, 90} <= set(wp.get_cuda_supported_archs()):
+            self.skipTest("NVRTC cannot compile for sm_80 and sm_90")
+
         @wp.kernel(cluster_dim=2, module="unique")
         def k(a: wp.array[float]):
             i = wp.tid()

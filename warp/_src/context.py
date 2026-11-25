@@ -3035,7 +3035,11 @@ class ModuleExec:
                 # config here would misclassify an already-loaded module if the
                 # config changed between load and first launch.
                 compile_arch = self.compile_arch
-                status = _cluster_dim_target_status(self.device.arch, compile_arch)
+                if self.device.is_hip:
+                    # AMD GPUs have no thread block clusters: run unclustered, as on NVIDIA GPUs before sm_90
+                    status = "ignored"
+                else:
+                    status = _cluster_dim_target_status(self.device.arch, compile_arch)
                 if status == "dropped":
                     raise RuntimeError(
                         f"Kernel {name!r} requests cluster_dim={cluster_dim} on {self.device.alias} "
@@ -3668,7 +3672,7 @@ class Module:
 
         # Reject cluster_dim > 1 when the compile target drops the cluster
         # attribute (status == "dropped"); see _cluster_dim_target_status.
-        if not is_cpu and output_arch < 90:
+        if not is_cpu and not (device is not None and device.is_hip) and output_arch < 90:
             device_arch = device.arch if device is not None else None
             if _cluster_dim_target_status(device_arch, output_arch) == "dropped":
                 # Validate the same live unique-kernel set that codegen emits.
@@ -4667,6 +4671,9 @@ class Device:
             hardware. ``False`` for CPU devices and for AMD GPUs without image support, which sample in software.
         is_texture3d_hardware_supported (bool): Like ``is_texture_hardware_supported``, for 3D textures. ``False``
             also on gfx90a, which samples 3D textures in software because it has no 3D linear filtering.
+        is_cluster_launch_supported (bool): Indicates whether kernels on this device can launch in thread block
+            clusters (``cluster_dim``): NVIDIA GPUs of compute capability 9.0 or higher. ``False`` for CPU devices
+            and AMD GPUs, where ``cluster_dim`` is ignored.
         is_ipc_supported (Optional[bool]): Indicates whether the device supports IPC.
 
             - ``True`` if supported.
@@ -4721,6 +4728,7 @@ class Device:
             self.is_texture_supported = True
             self.is_texture_hardware_supported = False
             self.is_texture3d_hardware_supported = False
+            self.is_cluster_launch_supported = False
             self.is_ipc_supported = False  # TODO: Support IPC for CPU arrays
             self.is_cubin_supported = False
             self.uuid = None
@@ -4763,6 +4771,7 @@ class Device:
             self.is_texture3d_hardware_supported = (
                 runtime.core.wp_cuda_device_is_texture_hardware_supported(ordinal, 3) > 0
             )
+            self.is_cluster_launch_supported = not self.is_hip and self.arch >= 90
             if platform.system() == "Linux":
                 # Use None when IPC support cannot be determined
                 ipc_support_api_query = runtime.core.wp_cuda_device_is_ipc_supported(ordinal)
@@ -8021,7 +8030,7 @@ def get_cuda_max_cluster_dim(
     init()
 
     device = runtime.get_device(device)
-    if not device.is_cuda or device.arch < 90:
+    if not device.is_cluster_launch_supported:
         return 1
 
     if block_dim is None:

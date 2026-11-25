@@ -5815,7 +5815,10 @@ cuda_module_header = """
 // CUDA Thread Block Cluster shape declaration. Expands to __cluster_dims__
 // only on devices that support clusters (compute capability 9.0+); otherwise
 // expands to nothing so the same source compiles cleanly for any target arch.
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if defined(__HIP_DEVICE_COMPILE__)
+// AMD GPUs: no thread block clusters
+#define WP_CLUSTER_DIMS(x, y, z)
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 #define WP_CLUSTER_DIMS(x, y, z) __cluster_dims__(x, y, z)
 #else
 #define WP_CLUSTER_DIMS(x, y, z)
