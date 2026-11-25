@@ -672,6 +672,36 @@ CUresult cuTexObjectCreate_f(
 
 CUresult cuTexObjectDestroy_f(CUtexObject texObject) { return hip_driver_result(hipTexObjectDestroy(texObject)); }
 
+CUresult cuMipmappedArrayCreate_f(
+    CUmipmappedArray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pMipmappedArrayDesc, unsigned int numMipmapLevels
+)
+{
+    return hip_driver_result(
+        hipMipmappedArrayCreate(pHandle, const_cast<CUDA_ARRAY3D_DESCRIPTOR*>(pMipmappedArrayDesc), numMipmapLevels)
+    );
+}
+
+CUresult cuMipmappedArrayDestroy_f(CUmipmappedArray hMipmappedArray)
+{
+    return hip_driver_result(hipMipmappedArrayDestroy(hMipmappedArray));
+}
+
+CUresult cuMipmappedArrayGetLevel_f(CUarray* pLevelArray, CUmipmappedArray hMipmappedArray, unsigned int level)
+{
+    return hip_driver_result(hipMipmappedArrayGetLevel(pLevelArray, hMipmappedArray, level));
+}
+
+CUresult cuFuncGetAttribute_f(int* pi, CUfunction_attribute attrib, CUfunction hfunc)
+{
+    return hip_driver_result(hipFuncGetAttribute(pi, attrib, hfunc));
+}
+
+// HIP has no driver-style cluster occupancy query
+CUresult cuOccupancyMaxActiveClusters_f(int* numClusters, CUfunction func, const CUlaunchConfig* config)
+{
+    return hipErrorNotSupported;
+}
+
 #else
 
 // the minimum CUDA version required from the driver

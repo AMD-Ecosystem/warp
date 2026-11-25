@@ -126,6 +126,7 @@ static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStrea
 #define cudaMemAccessFlagsProtReadWrite             hipMemAccessFlagsProtReadWrite
 #define cudaMemAdvise                               hipMemAdvise
 #define cudaMemAllocNodeParams                      hipMemAllocNodeParams
+#define cudaMemAttachGlobal                         hipMemAttachGlobal
 #define cudaMemLocation                             hipMemLocation
 #define cudaMemLocationTypeDevice                   hipMemLocationTypeDevice
 #define cudaMemLocationTypeHost                     hipMemLocationTypeHost
@@ -171,6 +172,7 @@ static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStrea
 #define cudaStream_t                                hipStream_t
 #define cudaSuccess                                 hipSuccess
 #define cudaSurfaceObject_t                         hipSurfaceObject_t
+#define cudaThreadExchangeStreamCaptureMode         hipThreadExchangeStreamCaptureMode
 #define cudaUserObjectCreate                        hipUserObjectCreate
 #define cudaUserObjectNoDestructorSync              hipUserObjectNoDestructorSync
 #define cudaUserObject_t                            hipUserObject_t
@@ -195,8 +197,12 @@ static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStrea
 #define CUipcEventHandle      hipIpcEventHandle_t
 #define CUipcMemHandle        hipIpcMemHandle_t
 #define CUjit_option          hipJitOption
+#define CUlaunchAttribute     hipLaunchAttribute
+#define CUlaunchConfig        HIP_LAUNCH_CONFIG
 #define CUmemcpyAttributes    hipMemcpyAttributes
+#define CUmemoryPool          hipMemPool_t
 #define CUmemorytype          hipMemoryType
+#define CUmipmappedArray      hipMipmappedArray_t
 #define CUmodule              hipModule_t
 #define CUpointer_attribute   hipPointer_attribute
 #define CUresult              hipError_t
@@ -209,6 +215,7 @@ static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStrea
 #define CUDA_ARRAY3D_DESCRIPTOR                                 HIP_ARRAY3D_DESCRIPTOR
 #define CUDA_ARRAY3D_SURFACE_LDST                               hipArraySurfaceLoadStore
 #define CUDA_ARRAY_DESCRIPTOR                                   HIP_ARRAY_DESCRIPTOR
+#define CUDA_ERROR_INVALID_VALUE                                hipErrorInvalidValue
 #define CUDA_ERROR_NOT_READY                                    hipErrorNotReady
 #define CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED                  hipErrorPeerAccessAlreadyEnabled
 #define CUDA_ERROR_PEER_ACCESS_NOT_ENABLED                      hipErrorPeerAccessNotEnabled
@@ -228,9 +235,11 @@ static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStrea
 #define CU_AD_FORMAT_UNSIGNED_INT8                              HIP_AD_FORMAT_UNSIGNED_INT8
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR            hipDeviceAttributeComputeCapabilityMajor
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR            hipDeviceAttributeComputeCapabilityMinor
+#define CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS           hipDeviceAttributeConcurrentManagedAccess
 #define CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST hipDeviceAttributeDirectManagedMemAccessFromHost
 #define CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED        hipDeviceAttributeHostNativeAtomicSupported
 #define CU_DEVICE_ATTRIBUTE_INTEGRATED                          hipDeviceAttributeIntegrated
+#define CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY                      hipDeviceAttributeManagedMemory
 #define CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN   hipDeviceAttributeSharedMemPerBlockOptin
 #define CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED              hipDeviceAttributeMemoryPoolsSupported
 #define CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT                hipDeviceAttributeMultiprocessorCount
@@ -261,12 +270,16 @@ static inline hipError_t wp_hip_graph_launch(hipGraphExec_t graph_exec, hipStrea
 #define CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS                      hipIpcMemLazyEnablePeerAccess
 #define CU_JIT_ERROR_LOG_BUFFER                                 hipJitOptionErrorLogBuffer
 #define CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES                      hipJitOptionErrorLogBufferSizeBytes
+#define CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION                   hipLaunchAttributeClusterDimension
 #define CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE              hipMemcpyFlagPreferOverlapWithCompute
 #define CU_MEMCPY_SRC_ACCESS_ORDER_STREAM                       hipMemcpySrcAccessOrderStream
 #define CU_MEMORYTYPE_ARRAY                                     hipMemoryTypeArray
 #define CU_MEMORYTYPE_DEVICE                                    hipMemoryTypeDevice
 #define CU_MEMORYTYPE_HOST                                      hipMemoryTypeHost
+#define CU_POINTER_ATTRIBUTE_IS_MANAGED                         HIP_POINTER_ATTRIBUTE_IS_MANAGED
 #define CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE                     HIP_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
+#define CU_POINTER_ATTRIBUTE_MEMORY_TYPE                        HIP_POINTER_ATTRIBUTE_MEMORY_TYPE
+#define CU_RESOURCE_TYPE_MIPMAPPED_ARRAY                        HIP_RESOURCE_TYPE_MIPMAPPED_ARRAY
 #define CU_RESOURCE_TYPE_ARRAY                                  HIP_RESOURCE_TYPE_ARRAY
 #define CU_STREAM_ADD_CAPTURE_DEPENDENCIES                      hipStreamAddCaptureDependencies
 #define CU_STREAM_CAPTURE_STATUS_ACTIVE                         hipStreamCaptureStatusActive

@@ -5916,7 +5916,7 @@ CUDA_CALLABLE {name} tile_adj_atomic_add_value({name}* p, {name} t)
 }}
 
 #if defined(__CUDA_ARCH__)
-CUDA_CALLABLE {name} warp_shuffle_down({name} val, int offset, int mask)
+CUDA_CALLABLE {name} warp_shuffle_down({name} val, int offset, tile_mask_t mask)
 {{
     {name} ret {{}};
 {shuffle_down_body}
