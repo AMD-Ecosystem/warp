@@ -249,6 +249,9 @@ macOS, and builds both ``warp`` and ``warp-clang``. Pass
 single PTX target for fast local builds; use ``CMAKE_CUDA_ARCHITECTURES`` to
 select different GPU architectures. Use ``build_lib.py`` for release builds
 that need Warp's full GPU architecture coverage.
+The CMake build does not support AMD GPUs: on a host with ROCm and no CUDA
+Toolkit it stops at configure time. Build Warp for AMD GPUs with ``build_lib.py``
+as described above.
 
 To use a specific CUDA Toolkit:
 

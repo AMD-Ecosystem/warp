@@ -83,6 +83,31 @@ function(warp_configure_cuda_root)
     endif()
 endfunction()
 
+# This build compiles for NVIDIA GPUs and CPUs only. On a host with ROCm and no CUDA Toolkit, stop with a
+# message pointing at build_lib.py, which builds Warp for AMD GPUs, instead of failing to find a CUDA compiler.
+function(warp_check_rocm_only_host)
+    if(CMAKE_CUDA_COMPILER)
+        return()
+    endif()
+    find_program(_warp_nvcc nvcc HINTS "${CUDAToolkit_ROOT}/bin")
+    if(_warp_nvcc)
+        return()
+    endif()
+    find_program(
+        _warp_rocm_tool
+        NAMES hipcc rocm-sdk
+        HINTS "$ENV{WARP_ROCM_PATH}/bin" "$ENV{ROCM_PATH}/bin" "$ENV{HIP_PATH}/bin" /opt/rocm/bin
+    )
+    if(_warp_rocm_tool)
+        message(
+            FATAL_ERROR
+                "No CUDA Toolkit was found, but ROCm was (${_warp_rocm_tool}). The CMake build supports NVIDIA GPUs "
+                "and CPUs only; build Warp for AMD GPUs with build_lib.py (see docs/user_guide/installation.rst), "
+                "or configure a CPU-only CMake build with -DWARP_ENABLE_CUDA=OFF."
+        )
+    endif()
+endfunction()
+
 function(warp_set_default_cuda_architectures)
     if((DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "")
        OR (DEFINED CACHE{CMAKE_CUDA_ARCHITECTURES} AND NOT "$CACHE{CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")

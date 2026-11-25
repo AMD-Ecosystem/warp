@@ -42,6 +42,7 @@ include(WarpDependencies)
 
 if(WARP_ENABLE_CUDA)
     warp_configure_cuda_root()
+    warp_check_rocm_only_host()
     warp_set_default_cuda_architectures()
     project(warp LANGUAGES CXX CUDA)
 else()
