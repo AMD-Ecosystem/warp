@@ -218,6 +218,51 @@ def test_radix_sort_pairs_bit_range(test, device):
         assert_np_equal(values.numpy()[:8], np.array((1, 5, 2, 6, 3, 7, 4, 8)))
 
 
+def _radix_sort_bits(keys, bit_width):
+    """Return the unsigned bit pattern a radix sort orders signed or unsigned integer keys by."""
+    bits_type = np.uint32 if bit_width == 32 else np.uint64
+    bits = keys.view(bits_type).copy()
+    if np.issubdtype(keys.dtype, np.signedinteger):
+        bits ^= bits_type(1) << bits_type(bit_width - 1)
+    return bits
+
+
+def test_radix_sort_pairs_bit_range_to_key_width(test, device):
+    # Bit ranges [begin_bit, key width) with begin_bit > 0, at sizes where the sort finishes
+    # with a merge pass as well as larger ones, against a stable sort on the selected bits.
+    rng = np.random.default_rng(42)
+    key_types = (
+        (wp.int32, np.int32, 32),
+        (wp.uint32, np.uint32, 32),
+        (wp.int64, np.int64, 64),
+        (wp.uint64, np.uint64, 64),
+    )
+
+    for key_type, np_type, bit_width in key_types:
+        bits_type = np.uint32 if bit_width == 32 else np.uint64
+        for count in (1025, 4097, 1 << 20):
+            info = np.iinfo(np_type)
+            keys = rng.integers(info.min, info.max, count, dtype=np_type, endpoint=True)
+            # repeated keys check that the sort is stable
+            keys[rng.integers(0, count, count // 8)] = keys[0]
+            bits = _radix_sort_bits(keys, bit_width)
+
+            for begin_bit in (1, bit_width // 2, bit_width - 1):
+                with test.subTest(key_type=key_type, count=count, begin_bit=begin_bit):
+                    key_storage = np.zeros(2 * count, dtype=np_type)
+                    key_storage[:count] = keys
+                    value_storage = np.zeros(2 * count, dtype=np.int32)
+                    value_storage[:count] = np.arange(count, dtype=np.int32)
+                    wp_keys = wp.array(key_storage, dtype=key_type, device=device)
+                    wp_values = wp.array(value_storage, dtype=int, device=device)
+
+                    wp.utils.radix_sort_pairs(wp_keys, wp_values, count, begin_bit=begin_bit, end_bit=bit_width)
+
+                    order = np.argsort(bits >> bits_type(begin_bit), kind="stable")
+                    np.testing.assert_array_equal(wp_values.numpy()[:count], order)
+                    np.testing.assert_array_equal(wp_keys.numpy()[:count], keys[order])
+
+
 def test_radix_sort_pairs_value_types(test, device):
     valueTypes = [wp.uint32, wp.float32, wp.int64, wp.uint64, wp.float64]
 
@@ -303,6 +348,42 @@ def test_segmented_sort_pairs(test, device):
         )
         assert_np_equal(keys.numpy()[:8], np.array((2, 4, 7, 8, 1, 3, 5, 6)))
         assert_np_equal(values.numpy()[:8], np.array((2, 4, 1, 3, 5, 8, 7, 6)))
+
+
+def test_segmented_sort_pairs_large_segments(test, device):
+    # segments from just over one block to large, at sizes where the sort finishes with a merge pass
+    rng = np.random.default_rng(43)
+    segment_sizes = np.array((1025, 3, 4097, 65536, 1, 200000), dtype=np.int32)
+    starts = np.concatenate(((0,), np.cumsum(segment_sizes)[:-1])).astype(np.int32)
+    ends = (starts + segment_sizes).astype(np.int32)
+    count = int(segment_sizes.sum())
+
+    for key_type, np_type in ((wp.int32, np.int32), (wp.float32, np.float32)):
+        with test.subTest(key_type=key_type):
+            if np_type == np.int32:
+                keys = rng.integers(-1000, 1000, count, dtype=np.int32)
+            else:
+                keys = rng.standard_normal(count).astype(np.float32)
+            key_storage = np.zeros(2 * count, dtype=np_type)
+            key_storage[:count] = keys
+            value_storage = np.zeros(2 * count, dtype=np.int32)
+            value_storage[:count] = np.arange(count, dtype=np.int32)
+            wp_keys = wp.array(key_storage, dtype=key_type, device=device)
+            wp_values = wp.array(value_storage, dtype=int, device=device)
+
+            wp.utils.segmented_sort_pairs(
+                wp_keys,
+                wp_values,
+                count,
+                wp.array(starts, dtype=int, device=device),
+                wp.array(ends, dtype=int, device=device),
+            )
+
+            expected = np.concatenate(
+                [start + np.argsort(keys[start:end], kind="stable") for start, end in zip(starts, ends, strict=True)]
+            )
+            np.testing.assert_array_equal(wp_values.numpy()[:count], expected)
+            np.testing.assert_array_equal(wp_keys.numpy()[:count], keys[expected])
 
 
 def test_radix_sort_pairs_empty(test, device):
@@ -737,6 +818,12 @@ add_function_test(
 add_function_test(TestUtils, "test_radix_sort_pairs", test_radix_sort_pairs, devices=devices)
 add_function_test(TestUtils, "test_radix_sort_pairs_signed_keys", test_radix_sort_pairs_signed_keys, devices=devices)
 add_function_test(TestUtils, "test_radix_sort_pairs_bit_range", test_radix_sort_pairs_bit_range, devices=devices)
+add_function_test(
+    TestUtils,
+    "test_radix_sort_pairs_bit_range_to_key_width",
+    test_radix_sort_pairs_bit_range_to_key_width,
+    devices=devices,
+)
 add_function_test(TestUtils, "test_radix_sort_pairs_value_types", test_radix_sort_pairs_value_types, devices=devices)
 add_function_test(
     TestUtils,
@@ -770,6 +857,9 @@ add_function_test(
     devices=devices,
 )
 add_function_test(TestUtils, "test_segmented_sort_pairs", test_segmented_sort_pairs, devices=devices)
+add_function_test(
+    TestUtils, "test_segmented_sort_pairs_large_segments", test_segmented_sort_pairs_large_segments, devices=devices
+)
 add_function_test(TestUtils, "test_segmented_sort_pairs_empty", test_segmented_sort_pairs, devices=devices)
 add_function_test(
     TestUtils,
